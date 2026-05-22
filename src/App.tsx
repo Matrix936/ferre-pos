@@ -1,5 +1,6 @@
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { AuthProvider, useAuth } from "./auth/context/AuthContext";
+import { CatalogosProvider } from "./catalogos/context/CatalogosContext";
 import { ConfigProvider } from "./config/context/ConfigContext";
 import { LoginForm } from "./auth/components/LoginForm";
 import { DashboardLayout } from "./layout/components/DashboardLayout";
@@ -10,11 +11,15 @@ import { SucursalesView } from "./sucursales/components/SucursalesView";
 import { RoleGuard } from "./auth/components/RoleGuard";
 import { MiPerfilView } from "./perfil/components/MiPerfilView";
 import { InventarioView } from "./inventario/components/InventarioView";
+import { ProductosView } from "./productos/components/ProductosView";
 import { MermasAjustesView } from "./inventario/components/MermasAjustes";
 import { ProveedoresView } from "./proveedores/components/ProveedoresView";
+import { MarcasView } from "./catalogos/components/MarcasView";
+import { UnidadesView } from "./catalogos/components/UnidadesView";
 import { NuevaCompra } from "./compras/components/NuevaCompra";
 import { NuevaVenta } from "./ventas/components/NuevaVenta";
 import { HistorialVentasView } from "./ventas/components/HistorialVentas";
+import { FacturacionHub } from "./facturacion/components/FacturacionHub";
 import { CajaView } from "./caja/components/Caja";
 import { ClientesView } from "./clientes/components/Clientes";
 import { NuevoTraspasoView } from "./traspasos/components/NuevoTraspaso";
@@ -34,6 +39,11 @@ function Root() {
         <Route path="/mi-perfil" element={<MiPerfilView />} />
         <Route path="/ventas" element={<NuevaVenta />} />
         <Route path="/ventas/historial" element={<HistorialVentasView />} />
+        <Route path="/facturacion" element={
+          <RoleGuard allowedRoles={["SUPERADMIN", "ADMIN"]}>
+            <FacturacionHub />
+          </RoleGuard>
+        } />
         <Route path="/caja" element={<CajaView />} />
         <Route path="/clientes" element={
           <RoleGuard allowedRoles={["SUPERADMIN", "ADMIN"]}>
@@ -51,6 +61,11 @@ function Root() {
             <InventarioView />
           </RoleGuard>
         } />
+        <Route path="/productos" element={
+          <RoleGuard allowedRoles={["SUPERADMIN", "ADMIN"]}>
+            <ProductosView />
+          </RoleGuard>
+        } />
         <Route path="/inventario/mermas" element={
           <RoleGuard allowedRoles={["SUPERADMIN", "ADMIN"]}>
             <MermasAjustesView />
@@ -60,6 +75,18 @@ function Root() {
         <Route path="/proveedores" element={
           <RoleGuard allowedRoles={["SUPERADMIN", "ADMIN"]}>
             <ProveedoresView />
+          </RoleGuard>
+        } />
+
+        <Route path="/marcas" element={
+          <RoleGuard allowedRoles={["SUPERADMIN", "ADMIN"]}>
+            <MarcasView />
+          </RoleGuard>
+        } />
+
+        <Route path="/unidades" element={
+          <RoleGuard allowedRoles={["SUPERADMIN", "ADMIN"]}>
+            <UnidadesView />
           </RoleGuard>
         } />
 
@@ -98,7 +125,9 @@ export default function App() {
     <BrowserRouter>
       <ConfigProvider>
         <AuthProvider>
-          <Root />
+          <CatalogosProvider>
+            <Root />
+          </CatalogosProvider>
         </AuthProvider>
       </ConfigProvider>
     </BrowserRouter>

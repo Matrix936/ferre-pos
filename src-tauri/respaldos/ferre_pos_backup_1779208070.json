@@ -1,0 +1,186 @@
+{
+  "version": "1",
+  "generadoAt": "1779208070",
+  "tablas": {
+    "compras": [],
+    "creditos_abonos": [],
+    "usuarios": [
+      {
+        "email": "admin@gmail.com",
+        "id": "dc03bbb1-6edc-42f9-a23a-e95726d85ca3",
+        "nombre": "Jesús Maldonado Hernández",
+        "password_hash": "$2b$12$zy2ucTVXqJo9nvNPhtUABuFu000MGAp5J5gJJkbkdUGgEWpWOCiHa",
+        "role": "SUPERADMIN",
+        "sucursal_id": "b99b1752-6d70-497b-83ae-f5c8ea4521d0"
+      }
+    ],
+    "caja_movimientos": [],
+    "cajas_sesiones": [
+      {
+        "estado": "ABIERTA",
+        "fecha_apertura": "2026-05-19T15:15:12.224Z",
+        "fecha_cierre": null,
+        "id": "816edf8f-d157-4ff7-919a-dc61a3803c70",
+        "monto_esperado": 0.0,
+        "monto_final_real": null,
+        "monto_inicial": 0.0,
+        "sucursal_id": "b99b1752-6d70-497b-83ae-f5c8ea4521d0",
+        "usuario_id": "dc03bbb1-6edc-42f9-a23a-e95726d85ca3"
+      }
+    ],
+    "ventas": [
+      {
+        "cliente_id": null,
+        "estado": "COMPLETADA",
+        "fecha": "2026-05-19T15:17:44.439Z",
+        "fecha_cancelacion": null,
+        "id": "3dc8b838-be98-4de3-b063-2b8e35e6e67f",
+        "metodo_pago": "EFECTIVO",
+        "motivo_cancelacion": null,
+        "sucursal_id": "b99b1752-6d70-497b-83ae-f5c8ea4521d0",
+        "total": 100.0,
+        "usuario_autorizo_cancelacion_id": null,
+        "usuario_id": "dc03bbb1-6edc-42f9-a23a-e95726d85ca3"
+      },
+      {
+        "cliente_id": null,
+        "estado": "COMPLETADA",
+        "fecha": "2026-05-19T15:37:59.123Z",
+        "fecha_cancelacion": null,
+        "id": "2b9010f2-1a51-4741-9da2-af055395e645",
+        "metodo_pago": "EFECTIVO",
+        "motivo_cancelacion": null,
+        "sucursal_id": "b99b1752-6d70-497b-83ae-f5c8ea4521d0",
+        "total": 300.0,
+        "usuario_autorizo_cancelacion_id": null,
+        "usuario_id": "dc03bbb1-6edc-42f9-a23a-e95726d85ca3"
+      },
+      {
+        "cliente_id": "19e8ff0b-e80a-4287-87e9-dbcee2de1671",
+        "estado": "COMPLETADA",
+        "fecha": "2026-05-19T15:39:20.477Z",
+        "fecha_cancelacion": null,
+        "id": "5bdee802-6cde-46aa-95a8-c35cd1608cd5",
+        "metodo_pago": "CREDITO",
+        "motivo_cancelacion": null,
+        "sucursal_id": "b99b1752-6d70-497b-83ae-f5c8ea4521d0",
+        "total": 400.0,
+        "usuario_autorizo_cancelacion_id": null,
+        "usuario_id": "dc03bbb1-6edc-42f9-a23a-e95726d85ca3"
+      }
+    ],
+    "inventario_sucursal": [
+      {
+        "producto_id": "40105bfb-9630-448f-afe8-993a8a54f04e",
+        "stock": 192.0,
+        "stock_minimo": 1.0,
+        "sucursal_id": "b99b1752-6d70-497b-83ae-f5c8ea4521d0"
+      }
+    ],
+    "traspasos": [],
+    "detalle_compras": [],
+    "clientes": [
+      {
+        "direccion": "",
+        "id": "19e8ff0b-e80a-4287-87e9-dbcee2de1671",
+        "limite_credito": 10000.0,
+        "nombre": "Pedro Maldonado",
+        "saldo_deudor": 400.0,
+        "telefono": "9543129854"
+      }
+    ],
+    "proveedores": [
+      {
+        "contacto_nombre": "Jesús Morales",
+        "direccion": "",
+        "email": "",
+        "id": "fdd3334b-5698-43f5-9929-6536f3e4f295",
+        "nombre": "Trupper",
+        "telefono": ""
+      }
+    ],
+    "detalle_traspasos": [],
+    "facturas_emitidas": [
+      {
+        "estado": "TIMBRADA",
+        "fecha_emision": "2026-05-19T15:39:20.477Z",
+        "id": "FAC-5bdee802-6cde-46aa-95a8-c35cd1608cd5",
+        "monto_total": 464.0,
+        "pdf_path": null,
+        "rfc_receptor": "AUGL086714A45",
+        "uuid": "TEST-93D3DEAC-E86C-48FA-AD27-1EB39AA55C65",
+        "venta_id": "5bdee802-6cde-46aa-95a8-c35cd1608cd5",
+        "xml_path": null
+      }
+    ],
+    "empresa_config_fiscal": [
+      {
+        "actualizado_at": "2026-05-19T15:35:59.662Z",
+        "id": 1,
+        "razon_social": "FERRETERIA LA MIXTECA",
+        "regimen_fiscal": "601",
+        "registro_patronal": "Y6812345108",
+        "rfc": "EKU9003173C9"
+      }
+    ],
+    "sucursales": [
+      {
+        "codigo_postal": "71196",
+        "direccion": "Av. Principal 123",
+        "id": "b99b1752-6d70-497b-83ae-f5c8ea4521d0",
+        "nombre": "Centro Chalcatongo",
+        "telefono": "555-0000"
+      }
+    ],
+    "productos": [
+      {
+        "categoria": "",
+        "clave_producto": "2343242",
+        "codigo_barras": "232143",
+        "codigo_proveedor": "314312",
+        "descripcion": "Pinzas",
+        "id": "40105bfb-9630-448f-afe8-993a8a54f04e",
+        "marca": "Trupper",
+        "precio_costo": 70.0,
+        "precio_venta": 100.0,
+        "proveedor_id": "fdd3334b-5698-43f5-9929-6536f3e4f295",
+        "sat_clave_prod_serv": "27111700",
+        "sat_clave_unidad": "H87",
+        "unidad": ""
+      }
+    ],
+    "detalle_ventas": [
+      {
+        "cantidad": 1.0,
+        "id": "3a854b82-3e2d-44e3-ab68-91e2ced27420",
+        "precio_venta_pactado": 100.0,
+        "producto_id": "40105bfb-9630-448f-afe8-993a8a54f04e",
+        "venta_id": "3dc8b838-be98-4de3-b063-2b8e35e6e67f"
+      },
+      {
+        "cantidad": 3.0,
+        "id": "f5b9a6cf-f3a7-4ee6-8f03-db853ec3ae33",
+        "precio_venta_pactado": 100.0,
+        "producto_id": "40105bfb-9630-448f-afe8-993a8a54f04e",
+        "venta_id": "2b9010f2-1a51-4741-9da2-af055395e645"
+      },
+      {
+        "cantidad": 4.0,
+        "id": "22c0c176-b0bd-48ab-bf27-b82c6075ee4d",
+        "precio_venta_pactado": 100.0,
+        "producto_id": "40105bfb-9630-448f-afe8-993a8a54f04e",
+        "venta_id": "5bdee802-6cde-46aa-95a8-c35cd1608cd5"
+      }
+    ],
+    "mermas_ajustes": [],
+    "clientes_datos_fiscales": [
+      {
+        "cliente_id": "19e8ff0b-e80a-4287-87e9-dbcee2de1671",
+        "codigo_postal": "71100",
+        "razon_social": "Pedro Maldonado",
+        "regimen_fiscal": "626",
+        "rfc": "AUGL086714A45"
+      }
+    ]
+  }
+}

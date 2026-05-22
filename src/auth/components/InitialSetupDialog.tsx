@@ -46,6 +46,7 @@ export function InitialSetupDialog({ open, onClose, onComplete }: InitialSetupDi
   const [sucursalNombre, setSucursalNombre] = useState("");
   const [direccion, setDireccion] = useState("");
   const [telefono, setTelefono] = useState("");
+  const [codigoPostal, setCodigoPostal] = useState("");
   const [nombres, setNombres] = useState("");
   const [apellidoPaterno, setApellidoPaterno] = useState("");
   const [apellidoMaterno, setApellidoMaterno] = useState("");
@@ -57,7 +58,7 @@ export function InitialSetupDialog({ open, onClose, onComplete }: InitialSetupDi
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const canContinueIdentity = Boolean(empresaNombre.trim());
-  const canContinueCompany = Boolean(sucursalNombre.trim() && direccion.trim());
+  const canContinueCompany = Boolean(sucursalNombre.trim() && direccion.trim() && codigoPostal.trim());
   const canCreateUser = Boolean(nombres.trim() && apellidoPaterno.trim() && email.trim() && password.trim());
 
   const sucursalPreview = useMemo<Sucursal>(() => ({
@@ -65,7 +66,8 @@ export function InitialSetupDialog({ open, onClose, onComplete }: InitialSetupDi
     nombre: sucursalNombre.trim(),
     direccion: direccion.trim(),
     telefono: telefono.trim(),
-  }), [direccion, sucursalId, sucursalNombre, telefono]);
+    codigoPostal: codigoPostal.trim(),
+  }), [codigoPostal, direccion, sucursalId, sucursalNombre, telefono]);
 
   const handleLogoUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -260,6 +262,14 @@ export function InitialSetupDialog({ open, onClose, onComplete }: InitialSetupDi
               value={telefono}
               onChange={(event) => setTelefono(event.target.value)}
               fullWidth
+            />
+            <TextField
+              label="Código postal"
+              value={codigoPostal}
+              onChange={(event) => setCodigoPostal(event.target.value)}
+              required
+              fullWidth
+              slotProps={{ htmlInput: { maxLength: 5 } }}
             />
           </Box>
         )}

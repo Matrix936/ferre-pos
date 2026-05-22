@@ -10,9 +10,12 @@ export interface ProductoInventario {
   unidad: string;
   precioCosto: number;
   precioVenta: number;
+  satClaveProdServ: string;
+  satClaveUnidad: string;
   sucursalId: string;
   stock: number;
   stockMinimo: number;
+  costoPromedio: number;
 }
 
 export interface ProductoPayload {
@@ -27,12 +30,18 @@ export interface ProductoPayload {
   unidad: string;
   precioCosto: number;
   precioVenta: number;
+  satClaveProdServ: string;
+  satClaveUnidad: string;
 }
+
+export type ProductoCatalogo = ProductoPayload;
 
 export interface InventarioSucursalPayload {
   sucursalId: string;
   stock: number;
   stockMinimo: number;
+  precioVenta: number;
+  costoPromedio: number;
 }
 
 export interface Proveedor {
@@ -42,6 +51,17 @@ export interface Proveedor {
   telefono: string;
   email: string;
   direccion: string;
+}
+
+export interface Marca {
+  id: string;
+  nombre: string;
+}
+
+export interface UnidadMedida {
+  id: string;
+  nombre: string;
+  claveSat: string;
 }
 
 export interface CompraDetallePayload {

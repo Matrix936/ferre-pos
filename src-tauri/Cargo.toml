@@ -26,3 +26,5 @@ rusqlite = { version = "0.31.0", features = ["bundled"] }
 r2d2 = "0.8"
 r2d2_sqlite = "0.24"
 bcrypt = "0.15"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+tokio = { version = "1", features = ["time", "rt"] }

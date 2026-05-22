@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import {
   Alert,
+  Autocomplete,
   Box,
   Button,
   MenuItem,
@@ -16,10 +17,11 @@ import {
   TextField,
   Typography,
 } from '@mui/material';
-import { Add as AddIcon, Delete as DeleteIcon, Save as SaveIcon } from '@mui/icons-material';
+import { Delete as DeleteIcon, Save as SaveIcon } from '@mui/icons-material';
 import { useAuth } from '../../auth/context/AuthContext';
-import { Proveedor, ProductoInventario, RegistrarCompraPayload } from '../../inventario/types';
-import { Sucursal } from '../../sucursales/types';
+import { useCatalogos } from '../../catalogos/context/CatalogosContext';
+import { ProductoInventario, RegistrarCompraPayload } from '../../inventario/types';
+import { useDebouncedValue } from '../../shared/hooks/useDebouncedValue';
 
 interface CompraRow {
   productoId: string;
@@ -31,8 +33,7 @@ interface CompraRow {
 
 export function NuevaCompra() {
   const { user } = useAuth();
-  const [proveedores, setProveedores] = useState<Proveedor[]>([]);
-  const [sucursales, setSucursales] = useState<Sucursal[]>([]);
+  const { proveedores, sucursales } = useCatalogos();
   const [productosBusqueda, setProductosBusqueda] = useState<ProductoInventario[]>([]);
   const [detalle, setDetalle] = useState<CompraRow[]>([]);
   const [search, setSearch] = useState('');
@@ -43,37 +44,33 @@ export function NuevaCompra() {
 
   const isSuperAdmin = user?.role === 'SUPERADMIN';
   const sucursalCompraId = isSuperAdmin ? selectedSucursalId : user?.sucursalId ?? '';
+  const searchDebounced = useDebouncedValue(search, 300);
 
-  const fetchProveedores = async () => {
-    const data = await invoke<Proveedor[]>('get_proveedores');
-    setProveedores(data);
-  };
-
-  const fetchSucursales = async () => {
-    const data = await invoke<Sucursal[]>('get_sucursales');
-    setSucursales(data);
-    if (!selectedSucursalId && data.length > 0) {
-      setSelectedSucursalId(user?.sucursalId || data[0].id);
+  useEffect(() => {
+    if (!selectedSucursalId && sucursales.length > 0) {
+      setSelectedSucursalId(user?.sucursalId || sucursales[0].id);
     }
-  };
-
-  const fetchProductos = async () => {
-    if (!sucursalCompraId) return;
-    const query = search.trim();
-    const data = query
-      ? await invoke<ProductoInventario[]>('buscar_productos_por_sucursal', { sucursalId: sucursalCompraId, query })
-      : await invoke<ProductoInventario[]>('get_productos_por_sucursal', { sucursalId: sucursalCompraId });
-    setProductosBusqueda(data);
-  };
+  }, [selectedSucursalId, sucursales, user?.sucursalId]);
 
   useEffect(() => {
-    fetchProveedores().catch((error) => console.error('Error proveedores:', error));
-    fetchSucursales().catch((error) => console.error('Error sucursales:', error));
-  }, []);
-
-  useEffect(() => {
-    fetchProductos().catch((error) => console.error('Error productos:', error));
-  }, [search, sucursalCompraId]);
+    const query = searchDebounced.trim();
+    if (!sucursalCompraId || query.length <= 2) {
+      setProductosBusqueda([]);
+      return;
+    }
+    let active = true;
+    invoke<ProductoInventario[]>('buscar_productos_por_sucursal', { sucursalId: sucursalCompraId, query })
+      .then((data) => {
+        if (active) setProductosBusqueda(data);
+      })
+      .catch((error) => {
+        console.error('Error productos:', error);
+        if (active) setProductosBusqueda([]);
+      });
+    return () => {
+      active = false;
+    };
+  }, [searchDebounced, sucursalCompraId]);
 
   const total = useMemo(
     () =>
@@ -133,7 +130,7 @@ export function NuevaCompra() {
       await invoke('registrar_compra', { compra: payload });
       clearForm();
       setSnackbar('Entrada registrada correctamente.');
-      fetchProductos().catch((error) => console.error('Error productos:', error));
+      setProductosBusqueda([]);
     } catch (error) {
       console.error('Error al registrar compra:', error);
       setSnackbar(`Error al registrar compra: ${error}`);
@@ -168,25 +165,57 @@ export function NuevaCompra() {
           ) : (
             <TextField label="Sucursal" value={sucursales.find((s) => s.id === sucursalCompraId)?.nombre || ''} disabled />
           )}
-          <TextField
-            label="Buscar producto por descripción, código o clave"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            fullWidth
+          <Autocomplete
+            freeSolo
+            options={productosBusqueda}
+            getOptionLabel={(option) => (typeof option === 'string' ? option : option.descripcion)}
+            inputValue={search}
+            onInputChange={(_, value, reason) => {
+              setSearch(value);
+              if (reason !== 'input' || !value.trim()) {
+                setProductosBusqueda([]);
+              }
+            }}
+            onChange={(_, value) => {
+              if (!value) return;
+              if (typeof value === 'string') {
+                const selected = productosBusqueda.find((item) =>
+                  item.descripcion.toLowerCase().includes(value.trim().toLowerCase()),
+                );
+                if (selected) {
+                  addProducto(selected);
+                }
+              } else {
+                addProducto(value);
+              }
+              setSearch('');
+              setProductosBusqueda([]);
+            }}
+            renderOption={(props, option) => (
+              <Box component="li" {...props}>
+                <Box sx={{ display: 'flex', justifyContent: 'space-between', width: '100%', gap: 2 }}>
+                  <Box>
+                    <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                      {option.descripcion}
+                    </Typography>
+                    <Typography variant="caption" color="text.secondary">
+                      {option.marca || 'Sin marca'}
+                    </Typography>
+                  </Box>
+                  <Typography variant="body2" sx={{ fontWeight: 700 }}>
+                    ${option.precioVenta.toFixed(2)}
+                  </Typography>
+                </Box>
+              </Box>
+            )}
+            renderInput={(params) => (
+              <TextField
+                {...params}
+                label="Buscar producto por descripción, código o clave"
+                fullWidth
+              />
+            )}
           />
-        </Box>
-      </Paper>
-
-      <Paper elevation={0} sx={{ p: 2, borderRadius: 2, border: '1px solid', borderColor: 'divider', mb: 2 }}>
-        <Typography variant="subtitle1" sx={{ fontWeight: 600, mb: 1.5 }}>
-          Agregar productos
-        </Typography>
-        <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1 }}>
-          {productosBusqueda.slice(0, 20).map((producto) => (
-            <Button key={producto.id} size="small" variant="outlined" startIcon={<AddIcon />} onClick={() => addProducto(producto)}>
-              {producto.descripcion}
-            </Button>
-          ))}
         </Box>
       </Paper>
 

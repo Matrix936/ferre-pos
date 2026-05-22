@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import {
   Box,
   Button,
@@ -22,9 +22,10 @@ import { Add as AddIcon, Delete as DeleteIcon, Edit as EditIcon, Save as SaveIco
 import { invoke } from '@tauri-apps/api/core';
 import { Proveedor } from '../../inventario/types';
 import { TableActions } from '../../shared/components/TableActions';
+import { useCatalogos } from '../../catalogos/context/CatalogosContext';
 
 export function ProveedoresView() {
-  const [proveedores, setProveedores] = useState<Proveedor[]>([]);
+  const { proveedores, refreshCatalogos } = useCatalogos();
   const [search, setSearch] = useState('');
   const [open, setOpen] = useState(false);
   const [editMode, setEditMode] = useState(false);
@@ -34,19 +35,6 @@ export function ProveedoresView() {
   const [telefono, setTelefono] = useState('');
   const [email, setEmail] = useState('');
   const [direccion, setDireccion] = useState('');
-
-  const fetchProveedores = async () => {
-    try {
-      const data = await invoke<Proveedor[]>('get_proveedores');
-      setProveedores(data);
-    } catch (error) {
-      console.error('Error al obtener proveedores:', error);
-    }
-  };
-
-  useEffect(() => {
-    fetchProveedores();
-  }, []);
 
   const handleOpen = (proveedor?: Proveedor) => {
     if (proveedor) {
@@ -88,7 +76,7 @@ export function ProveedoresView() {
         await invoke('create_proveedor', { proveedor });
       }
       handleClose();
-      fetchProveedores();
+      await refreshCatalogos();
     } catch (error) {
       console.error('Error al guardar proveedor:', error);
       alert(`Error al guardar: ${error}`);
@@ -99,7 +87,7 @@ export function ProveedoresView() {
     if (!confirm('¿Está seguro de que desea eliminar este proveedor?')) return;
     try {
       await invoke('delete_provider', { id });
-      fetchProveedores();
+      await refreshCatalogos();
     } catch (error) {
       console.error('Error al eliminar proveedor:', error);
       alert(`Error al eliminar: ${error}`);

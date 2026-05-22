@@ -9,51 +9,151 @@ import {
   MenuItem, 
   Tooltip,
   Divider,
-  Chip
+  Chip,
+  Badge,
+  Button,
+  useTheme
 } from '@mui/material';
+import { invoke } from '@tauri-apps/api/core';
 import { 
   Logout, 
   Settings, 
   Storefront, 
   Person,
-  Menu as MenuIcon
+  Menu as MenuIcon,
+  Brightness4 as Brightness4Icon,
+  Brightness7 as Brightness7Icon,
+  CloudDone as CloudDoneIcon,
+  CloudUpload as CloudUploadIcon,
+  DoneAll as DoneAllIcon,
+  FiberManualRecord as FiberManualRecordIcon,
+  Notifications as NotificationsIcon
 } from '@mui/icons-material';
-import { useEffect, useMemo, useState } from 'react';
-import { invoke } from '@tauri-apps/api/core';
+import { useContext, useEffect, useMemo, useState } from 'react';
 import { useAuth } from '../../auth/context/AuthContext';
+import { useCatalogos } from '../../catalogos/context/CatalogosContext';
 import { useConfig } from '../../config/context/ConfigContext';
 import { useNavigate } from 'react-router-dom';
 import { RoleGuard } from '../../auth/components/RoleGuard';
-import { Sucursal } from '../../sucursales/types';
+import { ColorModeContext } from '../../theme';
 
 interface TopbarProps {
   onToggleSidebar: () => void;
 }
 
+interface SyncStatus {
+  pendientes: number;
+  ventasPendientes?: number;
+}
+
+interface Notificacion {
+  id: string;
+  categoria: string;
+  severidad: 'INFO' | 'WARNING' | 'CRITICAL';
+  titulo: string;
+  mensaje: string;
+  leida: boolean;
+  creadaAt: string;
+}
+
+const formatCurrentDateTime = (date: Date) => {
+  const formattedDate = new Intl.DateTimeFormat('es-MX', {
+    weekday: 'long',
+    day: 'numeric',
+    month: 'long',
+  }).format(date);
+
+  const formattedTime = new Intl.DateTimeFormat('es-MX', {
+    hour: 'numeric',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: true,
+  }).format(date);
+
+  return `${formattedDate.charAt(0).toUpperCase()}${formattedDate.slice(1)} - ${formattedTime.toUpperCase()}`;
+};
+
 export function Topbar({ onToggleSidebar }: TopbarProps) {
   const { user, logout } = useAuth();
   const { systemName } = useConfig();
+  const theme = useTheme();
+  const colorMode = useContext(ColorModeContext);
+  const { sucursales } = useCatalogos();
+  const [currentDateTime, setCurrentDateTime] = useState(() => formatCurrentDateTime(new Date()));
+  const [syncStatus, setSyncStatus] = useState<SyncStatus>({ pendientes: 0 });
+  const [notificaciones, setNotificaciones] = useState<Notificacion[]>([]);
   const [anchorEl, setAnchorEl] = useState<null | HTMLElement>(null);
-  const [sucursales, setSucursales] = useState<Sucursal[]>([]);
+  const [notificationsAnchorEl, setNotificationsAnchorEl] = useState<null | HTMLElement>(null);
   const navigate = useNavigate();
 
   useEffect(() => {
-    const fetchSucursales = async () => {
+    const intervalId = window.setInterval(() => {
+      setCurrentDateTime(formatCurrentDateTime(new Date()));
+    }, 1000);
+
+    return () => window.clearInterval(intervalId);
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+
+    const loadSyncStatus = async () => {
       try {
-        const data = await invoke<Sucursal[]>('get_sucursales');
-        setSucursales(data);
+        const status = await invoke<SyncStatus>('get_sync_status');
+        if (active) setSyncStatus(status);
       } catch (error) {
-        console.error('Error al obtener sucursales para el topbar:', error);
+        console.error('Error al consultar sincronización:', error);
       }
     };
 
-    fetchSucursales();
+    loadSyncStatus();
+    const intervalId = window.setInterval(loadSyncStatus, 15000);
+
+    return () => {
+      active = false;
+      window.clearInterval(intervalId);
+    };
+  }, []);
+
+  const loadNotificaciones = async () => {
+    try {
+      const data = await invoke<Notificacion[]>('get_notificaciones', { soloNoLeidas: false });
+      setNotificaciones(data);
+    } catch (error) {
+      console.error('Error al consultar notificaciones:', error);
+    }
+  };
+
+  useEffect(() => {
+    loadNotificaciones();
+    const intervalId = window.setInterval(loadNotificaciones, 15000);
+
+    return () => window.clearInterval(intervalId);
   }, []);
 
   const sucursalNombre = useMemo(() => {
     const sucursal = sucursales.find((item) => item.id === user?.sucursalId);
     return sucursal?.nombre || 'Principal';
   }, [sucursales, user?.sucursalId]);
+
+  const syncLabel = useMemo(() => {
+    if (syncStatus.pendientes <= 0) return 'Supabase al día';
+    if (syncStatus.ventasPendientes && syncStatus.ventasPendientes > 0) {
+      return `${syncStatus.ventasPendientes} ${syncStatus.ventasPendientes === 1 ? 'venta' : 'ventas'} por sincronizar`;
+    }
+    return `${syncStatus.pendientes} ${syncStatus.pendientes === 1 ? 'cambio' : 'cambios'} por sincronizar`;
+  }, [syncStatus]);
+
+  const unreadNotifications = useMemo(
+    () => notificaciones.filter((notificacion) => !notificacion.leida).length,
+    [notificaciones],
+  );
+
+  const severityColor = (severidad: Notificacion['severidad']) => {
+    if (severidad === 'CRITICAL') return 'error.main';
+    if (severidad === 'WARNING') return 'warning.main';
+    return 'info.main';
+  };
   
   const handleOpenMenu = (event: React.MouseEvent<HTMLElement>) => {
     setAnchorEl(event.currentTarget);
@@ -61,6 +161,25 @@ export function Topbar({ onToggleSidebar }: TopbarProps) {
 
   const handleCloseMenu = () => {
     setAnchorEl(null);
+  };
+
+  const handleOpenNotifications = (event: React.MouseEvent<HTMLElement>) => {
+    setNotificationsAnchorEl(event.currentTarget);
+    loadNotificaciones();
+  };
+
+  const handleCloseNotifications = () => {
+    setNotificationsAnchorEl(null);
+  };
+
+  const handleMarkNotificationRead = async (id: string) => {
+    await invoke('marcar_notificacion_leida', { id });
+    loadNotificaciones();
+  };
+
+  const handleMarkAllNotificationsRead = async () => {
+    await invoke('marcar_todas_notificaciones_leidas');
+    loadNotificaciones();
   };
 
   const handleLogout = () => {
@@ -97,18 +216,60 @@ export function Topbar({ onToggleSidebar }: TopbarProps) {
             size="small"
             sx={{ borderRadius: '6px', fontWeight: 500 }}
           />
+          <Tooltip title={syncStatus.pendientes <= 0 ? 'Todos los cambios locales están sincronizados con Supabase.' : 'Hay cambios locales pendientes de subir a Supabase.'}>
+            <Chip
+              icon={
+                syncStatus.pendientes <= 0 ? (
+                  <CloudDoneIcon sx={{ fontSize: '1rem !important' }} />
+                ) : (
+                  <CloudUploadIcon sx={{ fontSize: '1rem !important' }} />
+                )
+              }
+              label={syncLabel}
+              color={syncStatus.pendientes <= 0 ? 'success' : 'warning'}
+              variant={syncStatus.pendientes <= 0 ? 'outlined' : 'filled'}
+              size="small"
+              sx={{
+                borderRadius: '6px',
+                fontWeight: 600,
+                display: { xs: 'none', sm: 'inline-flex' },
+              }}
+            />
+          </Tooltip>
         </Box>
 
         {/* Sección Derecha: Usuario y Acciones */}
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-          <Box sx={{ mr: 2, textAlign: 'right', display: { xs: 'none', sm: 'block' } }}>
-            <Typography variant="subtitle2" sx={{ lineHeight: 1, fontWeight: 600 }}>
-              {user?.nombre}
+
+          <Box 
+            sx={{ 
+              display: { xs: 'none', md: 'flex' }, 
+              flexDirection: 'column', 
+              alignItems: 'center', // Empuja el texto hacia la derecha para que rime con los iconos
+              mr: 2 
+            }}
+          >
+            <Typography variant="caption" color="text.secondary" sx={{ lineHeight: 1.1 }}>
+              {currentDateTime.split(' - ')[0]} {/* Agarra solo la Fecha */}
             </Typography>
-            <Typography variant="caption" color="text.secondary">
-              {user?.role}
+            <Typography variant="body2" color="text.primary" sx={{ fontWeight: 'bold', lineHeight: 1.1 }}>
+              {currentDateTime.split(' - ')[1]} {/* Agarra solo la Hora */}
             </Typography>
           </Box>
+
+          <Tooltip title={theme.palette.mode === 'dark' ? 'Cambiar a modo claro' : 'Cambiar a modo oscuro'}>
+            <IconButton onClick={colorMode.toggleColorMode} color="inherit">
+              {theme.palette.mode === 'dark' ? <Brightness7Icon /> : <Brightness4Icon />}
+            </IconButton>
+          </Tooltip>
+
+          <Tooltip title="Centro de notificaciones">
+            <IconButton onClick={handleOpenNotifications} color="inherit" aria-label="notificaciones">
+              <Badge color="error" badgeContent={unreadNotifications} max={99}>
+                <NotificationsIcon />
+              </Badge>
+            </IconButton>
+          </Tooltip>
 
           <Tooltip title="Opciones de cuenta">
             <IconButton onClick={handleOpenMenu} sx={{ p: 0.5 }}>
@@ -126,6 +287,83 @@ export function Topbar({ onToggleSidebar }: TopbarProps) {
             </IconButton>
           </Tooltip>
 
+          <Menu
+            anchorEl={notificationsAnchorEl}
+            open={Boolean(notificationsAnchorEl)}
+            onClose={handleCloseNotifications}
+            transformOrigin={{ horizontal: 'right', vertical: 'top' }}
+            anchorOrigin={{ horizontal: 'right', vertical: 'bottom' }}
+            slotProps={{
+              paper: {
+                elevation: 3,
+                sx: { width: 390, maxWidth: 'calc(100vw - 24px)', mt: 1.5, borderRadius: 2 }
+              }
+            }}
+          >
+            <Box sx={{ px: 2, py: 1.5, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1 }}>
+              <Box>
+                <Typography variant="subtitle1" sx={{ fontWeight: 800, lineHeight: 1.2 }}>
+                  Notificaciones
+                </Typography>
+                <Typography variant="caption" color="text.secondary">
+                  {unreadNotifications} pendientes por atender
+                </Typography>
+              </Box>
+              <Button
+                size="small"
+                startIcon={<DoneAllIcon fontSize="small" />}
+                onClick={handleMarkAllNotificationsRead}
+                disabled={unreadNotifications === 0}
+              >
+                Leer todas
+              </Button>
+            </Box>
+            <Divider />
+            {notificaciones.length === 0 ? (
+              <Box sx={{ px: 2, py: 3 }}>
+                <Typography variant="body2" color="text.secondary">
+                  Todo tranquilo por ahora.
+                </Typography>
+              </Box>
+            ) : (
+              notificaciones.slice(0, 8).map((notificacion) => (
+                <MenuItem
+                  key={notificacion.id}
+                  onClick={() => handleMarkNotificationRead(notificacion.id)}
+                  sx={{
+                    alignItems: 'flex-start',
+                    gap: 1.25,
+                    py: 1.4,
+                    whiteSpace: 'normal',
+                    bgcolor: notificacion.leida ? 'transparent' : 'action.hover',
+                  }}
+                >
+                  <FiberManualRecordIcon
+                    sx={{
+                      mt: 0.55,
+                      fontSize: 12,
+                      color: severityColor(notificacion.severidad),
+                      flex: '0 0 auto',
+                    }}
+                  />
+                  <Box sx={{ minWidth: 0 }}>
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 0.25, flexWrap: 'wrap' }}>
+                      <Typography variant="body2" sx={{ fontWeight: 800, lineHeight: 1.25 }}>
+                        {notificacion.titulo}
+                      </Typography>
+                      <Typography variant="caption" color="text.secondary" sx={{ textTransform: 'capitalize' }}>
+                        {notificacion.categoria.toLowerCase()}
+                      </Typography>
+                    </Box>
+                    <Typography variant="body2" color="text.secondary" sx={{ lineHeight: 1.35 }}>
+                      {notificacion.mensaje}
+                    </Typography>
+                  </Box>
+                </MenuItem>
+              ))
+            )}
+          </Menu>
+
           {/* Menú Desplegable */}
           <Menu
             anchorEl={anchorEl}
@@ -140,6 +378,19 @@ export function Topbar({ onToggleSidebar }: TopbarProps) {
               }
             }}
           >
+            <Box sx={{ px: 2, py: 1.5 }}>
+              <Typography variant="subtitle1" sx={{ fontWeight: 700, lineHeight: 1.2 }}>
+                {user?.nombre || 'Usuario'}
+              </Typography>
+              <Chip
+                label={user?.role || 'Sin rol'}
+                size="small"
+                color="primary"
+                variant="outlined"
+                sx={{ mt: 0.75, height: 22, borderRadius: '6px', fontSize: '0.72rem' }}
+              />
+            </Box>
+            <Divider />
             <MenuItem onClick={() => { handleCloseMenu(); navigate('/mi-perfil'); }} sx={{ gap: 1.5, py: 1.5 }}>
               <Person fontSize="small" color="action" /> Mi Perfil
             </MenuItem>

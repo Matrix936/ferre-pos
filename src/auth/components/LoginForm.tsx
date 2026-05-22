@@ -182,7 +182,7 @@ export function LoginForm() {
                 <Divider sx={{ my: 3 }} />
                 <Box sx={{ display: "flex", flexDirection: "column", gap: 1.5 }}>
                   <Typography variant="body2" color="text.secondary">
-                    ¿Primera vez que en el sistema?
+                    ¿Primera vez en el sistema?
                   </Typography>
                   <Button
                     variant="outlined"

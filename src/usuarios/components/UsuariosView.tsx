@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { 
   Box, 
   Typography, 
@@ -24,8 +24,9 @@ import { Add as AddIcon, Edit as EditIcon, Delete as DeleteIcon, Save as SaveIco
 import { invoke } from '@tauri-apps/api/core';
 import { Usuario } from '../types';
 import { Role } from '../../auth/types';
-import { Sucursal } from '../../sucursales/types';
 import { TableActions } from '../../shared/components/TableActions';
+import { useCatalogos } from '../../catalogos/context/CatalogosContext';
+import { useAuth } from '../../auth/context/AuthContext';
 
 function splitNombreCompleto(nombreCompleto: string) {
   const parts = nombreCompleto.trim().split(/\s+/).filter(Boolean);
@@ -57,8 +58,9 @@ function buildNombreCompleto(nombres: string, apellidoPaterno: string, apellidoM
 }
 
 export function UsuariosView() {
-  const [usuarios, setUsuarios] = useState<Usuario[]>([]);
-  const [sucursales, setSucursales] = useState<Sucursal[]>([]);
+  const { user: usuarioSesion } = useAuth();
+  const { usuarios, sucursales, refreshCatalogos } = useCatalogos();
+  const isAdmin = usuarioSesion?.role === 'ADMIN';
   const [open, setOpen] = useState(false);
   const [editMode, setEditMode] = useState(false);
   
@@ -72,24 +74,18 @@ export function UsuariosView() {
   const [password, setPassword] = useState('');
   const [search, setSearch] = useState('');
 
-  const fetchData = async () => {
-    try {
-      const [usuariosData, sucursalesData] = await Promise.all([
-        invoke<Usuario[]>('get_usuarios'),
-        invoke<Sucursal[]>('get_sucursales')
-      ]);
-      setUsuarios(usuariosData);
-      setSucursales(sucursalesData);
-    } catch (error) {
-      console.error('Error al obtener datos:', error);
-    }
+  const canManageUsuario = (usuario: Usuario) => {
+    if (!usuarioSesion || usuario.id === usuarioSesion.id) return false;
+    if (usuarioSesion.role === 'SUPERADMIN') return true;
+    return usuario.role === 'USUARIO' && usuario.sucursalId === usuarioSesion.sucursalId;
   };
 
-  useEffect(() => {
-    fetchData();
-  }, []);
-
   const handleOpen = (user?: Usuario) => {
+    if (user && !canManageUsuario(user)) {
+      alert('No puedes modificar esta cuenta con tu rol actual.');
+      return;
+    }
+
     if (user) {
       const nombreSeparado = splitNombreCompleto(user.nombre);
       setEditMode(true);
@@ -109,7 +105,9 @@ export function UsuariosView() {
       setApellidoMaterno('');
       setEmail('');
       setRole('USUARIO');
-      if (sucursales.length > 0) {
+      if (isAdmin && usuarioSesion?.sucursalId) {
+        setSucursalId(usuarioSesion.sucursalId);
+      } else if (sucursales.length > 0) {
         setSucursalId(sucursales[0].id);
       } else {
         setSucursalId('');
@@ -124,12 +122,20 @@ export function UsuariosView() {
   };
 
   const handleSave = async () => {
+    const effectiveRole: Role = isAdmin ? 'USUARIO' : role;
+    const effectiveSucursalId = isAdmin ? usuarioSesion?.sucursalId || '' : sucursalId;
+
+    if (isAdmin && !effectiveSucursalId) {
+      alert('Tu cuenta no tiene sucursal asignada.');
+      return;
+    }
+
     const usuario: Usuario = {
       id: currentId,
       nombre: buildNombreCompleto(nombres, apellidoPaterno, apellidoMaterno),
       email: email.trim(),
-      role,
-      sucursalId,
+      role: effectiveRole,
+      sucursalId: effectiveSucursalId,
     };
 
     try {
@@ -139,7 +145,7 @@ export function UsuariosView() {
         await invoke('create_usuario', { usuario, password });
       }
       handleClose();
-      fetchData();
+      await refreshCatalogos();
     } catch (error) {
       console.error('Error al guardar usuario:', error);
       alert(`Error al guardar: ${error}`);
@@ -147,10 +153,16 @@ export function UsuariosView() {
   };
 
   const handleDelete = async (id: string) => {
+    const usuario = usuarios.find((item) => item.id === id);
+    if (usuario && !canManageUsuario(usuario)) {
+      alert('No puedes eliminar esta cuenta con tu rol actual.');
+      return;
+    }
+
     if (confirm('¿Está seguro de que desea eliminar este usuario?')) {
       try {
         await invoke('delete_usuario', { id });
-        fetchData();
+        await refreshCatalogos();
       } catch (error) {
         console.error('Error al eliminar usuario:', error);
         alert(`Error al eliminar: ${error}`);
@@ -244,10 +256,21 @@ export function UsuariosView() {
                   </TableCell>
                   <TableCell>{getSucursalName(usuario.sucursalId)}</TableCell>
                   <TableCell align="right">
-                    <IconButton color="primary" onClick={() => handleOpen(usuario)} size="small" sx={{ mr: 1 }}>
+                    <IconButton
+                      color="primary"
+                      onClick={() => handleOpen(usuario)}
+                      size="small"
+                      disabled={!canManageUsuario(usuario)}
+                      sx={{ mr: 1 }}
+                    >
                       <EditIcon fontSize="small" />
                     </IconButton>
-                    <IconButton color="error" onClick={() => handleDelete(usuario.id)} size="small">
+                    <IconButton
+                      color="error"
+                      onClick={() => handleDelete(usuario.id)}
+                      size="small"
+                      disabled={!canManageUsuario(usuario)}
+                    >
                       <DeleteIcon fontSize="small" />
                     </IconButton>
                   </TableCell>
@@ -317,18 +340,20 @@ export function UsuariosView() {
               onChange={(e) => setRole(e.target.value as Role)} 
               fullWidth 
               required
+              disabled={isAdmin}
             >
-              <MenuItem value="SUPERADMIN">Super Administrador</MenuItem>
-              <MenuItem value="ADMIN">Administrador</MenuItem>
+              {!isAdmin && <MenuItem value="SUPERADMIN">Super Administrador</MenuItem>}
+              {!isAdmin && <MenuItem value="ADMIN">Administrador</MenuItem>}
               <MenuItem value="USUARIO">Usuario</MenuItem>
             </TextField>
             <TextField 
               select 
               label="Sucursal" 
-              value={sucursalId} 
+              value={isAdmin ? usuarioSesion?.sucursalId || '' : sucursalId} 
               onChange={(e) => setSucursalId(e.target.value)} 
               fullWidth 
               required
+              disabled={isAdmin}
             >
               {sucursales.map((sucursal) => (
                 <MenuItem key={sucursal.id} value={sucursal.id}>
@@ -350,7 +375,7 @@ export function UsuariosView() {
             variant="contained" 
             disableElevation
             startIcon={<SaveIcon />}
-            disabled={!nombres || !apellidoPaterno || !email || (!editMode && !password) || !sucursalId}
+            disabled={!nombres || !apellidoPaterno || !email || (!editMode && !password) || !(isAdmin ? usuarioSesion?.sucursalId : sucursalId)}
             sx={{ borderRadius: '8px', px: 3 }}
           >
             Guardar

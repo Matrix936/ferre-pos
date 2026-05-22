@@ -10,6 +10,8 @@ import {
 } from '@mui/material';
 import { CloudUpload as CloudUploadIcon, Save as SaveIcon } from '@mui/icons-material';
 import { useConfig } from '../../config/context/ConfigContext';
+import { ConfiguracionFiscalView } from '../views/ConfiguracionFiscalView';
+import { SincronizacionConfigView } from '../views/SincronizacionConfigView';
 
 export function ConfiguracionView() {
   const { systemName, setSystemName, logo, setLogo } = useConfig();
@@ -47,12 +49,12 @@ export function ConfiguracionView() {
   };
 
   return (
-    <Box sx={{ maxWidth: 800, mx: 'auto', mt: 2 }}>
+    <Box sx={{ maxWidth: 900, mx: 'auto', mt: 2 }}>
       <Typography variant="h5" sx={{ fontWeight: 700, mb: 3, color: 'text.primary' }}>
         Configuración del sistema
       </Typography>
 
-      <Paper elevation={0} sx={{ p: 4, borderRadius: 2, border: '1px solid', borderColor: 'divider' }}>
+      <Paper elevation={0} sx={{ p: 4, borderRadius: 2, border: '1px solid', borderColor: 'divider', mb: 3 }}>
         <Typography variant="h6" sx={{ mb: 2, fontWeight: 600 }}>
           Apariencia
         </Typography>
@@ -152,6 +154,8 @@ export function ConfiguracionView() {
 
         </Box>
       </Paper>
+      <SincronizacionConfigView />
+      <ConfiguracionFiscalView />
     </Box>
   );
 }

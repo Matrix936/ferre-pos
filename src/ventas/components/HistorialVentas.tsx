@@ -19,8 +19,8 @@ import {
   Typography,
 } from '@mui/material';
 import { RoleGuard } from '../../auth/components/RoleGuard';
-import { Sucursal } from '../../sucursales/types';
-import { User } from '../../auth/types';
+import { useAuth } from '../../auth/context/AuthContext';
+import { useCatalogos } from '../../catalogos/context/CatalogosContext';
 
 interface HistorialVenta {
   id: string;
@@ -47,9 +47,10 @@ interface HistorialVentaDetalle {
 }
 
 export function HistorialVentasView() {
+  const { user } = useAuth();
+  const { sucursales, usuarios } = useCatalogos();
+  const isSuperAdmin = user?.role === 'SUPERADMIN';
   const [ventas, setVentas] = useState<HistorialVenta[]>([]);
-  const [sucursales, setSucursales] = useState<Sucursal[]>([]);
-  const [usuarios, setUsuarios] = useState<User[]>([]);
   const [fechaInicio, setFechaInicio] = useState('');
   const [fechaFin, setFechaFin] = useState('');
   const [sucursalId, setSucursalId] = useState('');
@@ -58,20 +59,11 @@ export function HistorialVentasView() {
   const [detalle, setDetalle] = useState<HistorialVentaDetalle[]>([]);
   const [loadingCancel, setLoadingCancel] = useState(false);
 
-  const fetchBaseData = async () => {
-    const [sucursalesData, usuariosData] = await Promise.all([
-      invoke<Sucursal[]>('get_sucursales'),
-      invoke<User[]>('get_usuarios'),
-    ]);
-    setSucursales(sucursalesData);
-    setUsuarios(usuariosData);
-  };
-
   const fetchVentas = async () => {
     const filtro = {
       fechaInicio: fechaInicio ? `${fechaInicio}T00:00:00.000Z` : undefined,
       fechaFin: fechaFin ? `${fechaFin}T23:59:59.999Z` : undefined,
-      sucursalId: sucursalId || undefined,
+      sucursalId: isSuperAdmin ? sucursalId || undefined : user?.sucursalId,
       usuarioId: usuarioId || undefined,
     };
     const data = await invoke<HistorialVenta[]>('get_historial_ventas', { filtro });
@@ -79,12 +71,8 @@ export function HistorialVentasView() {
   };
 
   useEffect(() => {
-    fetchBaseData().catch((error) => console.error('Error base historial:', error));
-  }, []);
-
-  useEffect(() => {
     fetchVentas().catch((error) => console.error('Error historial ventas:', error));
-  }, [fechaInicio, fechaFin, sucursalId, usuarioId]);
+  }, [fechaInicio, fechaFin, sucursalId, usuarioId, user?.sucursalId, isSuperAdmin]);
 
   const openDetalle = async (venta: HistorialVenta) => {
     setSelectedVenta(venta);
@@ -94,10 +82,21 @@ export function HistorialVentasView() {
 
   const handleCancelarVenta = async () => {
     if (!selectedVenta) return;
+    if (!user) {
+      alert('No hay una sesión activa para autorizar la cancelación.');
+      return;
+    }
+    const motivoCancelacion = prompt('Motivo de cancelación');
+    if (!motivoCancelacion?.trim()) return;
     if (!confirm('¿Seguro que deseas cancelar esta venta?')) return;
     setLoadingCancel(true);
     try {
-      await invoke('cancelar_venta', { ventaId: selectedVenta.id });
+      await invoke('cancelar_venta', {
+        ventaId: selectedVenta.id,
+        usuarioAutorizoId: user.id,
+        motivoCancelacion: motivoCancelacion.trim(),
+        fechaCancelacion: new Date().toISOString(),
+      });
       const ventaActualizada = { ...selectedVenta, estado: 'CANCELADA' };
       setSelectedVenta(ventaActualizada);
       setVentas((prev) => prev.map((v) => (v.id === ventaActualizada.id ? ventaActualizada : v)));
@@ -118,12 +117,14 @@ export function HistorialVentasView() {
         <Box sx={{ display: 'grid', gap: 2, gridTemplateColumns: { xs: '1fr', md: 'repeat(4, minmax(180px, 1fr))' } }}>
           <TextField label="Fecha inicio" type="date" value={fechaInicio} onChange={(e) => setFechaInicio(e.target.value)} slotProps={{ inputLabel: { shrink: true } }} />
           <TextField label="Fecha fin" type="date" value={fechaFin} onChange={(e) => setFechaFin(e.target.value)} slotProps={{ inputLabel: { shrink: true } }} />
-          <TextField select label="Sucursal" value={sucursalId} onChange={(e) => setSucursalId(e.target.value)}>
-            <MenuItem value="">Todas</MenuItem>
-            {sucursales.map((sucursal) => (
-              <MenuItem key={sucursal.id} value={sucursal.id}>{sucursal.nombre}</MenuItem>
-            ))}
-          </TextField>
+          {isSuperAdmin && (
+            <TextField select label="Sucursal" value={sucursalId} onChange={(e) => setSucursalId(e.target.value)}>
+              <MenuItem value="">Todas</MenuItem>
+              {sucursales.map((sucursal) => (
+                <MenuItem key={sucursal.id} value={sucursal.id}>{sucursal.nombre}</MenuItem>
+              ))}
+            </TextField>
+          )}
           <TextField select label="Usuario" value={usuarioId} onChange={(e) => setUsuarioId(e.target.value)}>
             <MenuItem value="">Todos</MenuItem>
             {usuarios.map((usuario) => (

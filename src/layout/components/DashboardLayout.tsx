@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { Box } from "@mui/material";
 import { Sidebar } from "./Sidebar";
 import { Topbar } from "./Topbar";
 
@@ -14,7 +15,7 @@ export function DashboardLayout({ children }: { children: React.ReactNode }) {
   };
 
   return (
-    <div className="flex h-screen bg-slate-50 font-sans overflow-hidden">
+    <Box className="flex h-screen font-sans overflow-hidden" sx={{ bgcolor: 'background.default' }}>
       <Sidebar isOpen={sidebarOpen} onClose={closeSidebar} />
       <div className="flex-1 flex flex-col min-w-0">
         <Topbar onToggleSidebar={toggleSidebar} />
@@ -22,6 +23,6 @@ export function DashboardLayout({ children }: { children: React.ReactNode }) {
           {children}
         </main>
       </div>
-    </div>
+    </Box>
   );
 }

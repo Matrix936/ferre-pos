@@ -12,9 +12,12 @@
   "app": {
     "windows": [
       {
-        "title": "ferre-pos",
-        "width": 800,
-        "height": 600
+        "title": "Ferre-POS",
+        "width": 1280,
+        "height": 720,
+        "resizable": true,
+        "maximized": true, 
+        "fullscreen": false
       }
     ],
     "security": {

@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { 
   Box, 
   Typography, 
@@ -22,9 +22,10 @@ import { Add as AddIcon, Edit as EditIcon, Delete as DeleteIcon, Save as SaveIco
 import { invoke } from '@tauri-apps/api/core';
 import { Sucursal } from '../types';
 import { TableActions } from '../../shared/components/TableActions';
+import { useCatalogos } from '../../catalogos/context/CatalogosContext';
 
 export function SucursalesView() {
-  const [sucursales, setSucursales] = useState<Sucursal[]>([]);
+  const { sucursales, refreshCatalogos } = useCatalogos();
   const [open, setOpen] = useState(false);
   const [editMode, setEditMode] = useState(false);
   
@@ -32,20 +33,8 @@ export function SucursalesView() {
   const [nombre, setNombre] = useState('');
   const [direccion, setDireccion] = useState('');
   const [telefono, setTelefono] = useState('');
+  const [codigoPostal, setCodigoPostal] = useState('');
   const [search, setSearch] = useState('');
-
-  const fetchSucursales = async () => {
-    try {
-      const data = await invoke<Sucursal[]>('get_sucursales');
-      setSucursales(data);
-    } catch (error) {
-      console.error('Error al obtener sucursales:', error);
-    }
-  };
-
-  useEffect(() => {
-    fetchSucursales();
-  }, []);
 
   const handleOpen = (sucursal?: Sucursal) => {
     if (sucursal) {
@@ -54,12 +43,14 @@ export function SucursalesView() {
       setNombre(sucursal.nombre);
       setDireccion(sucursal.direccion);
       setTelefono(sucursal.telefono);
+      setCodigoPostal(sucursal.codigoPostal || '');
     } else {
       setEditMode(false);
       setCurrentId(crypto.randomUUID());
       setNombre('');
       setDireccion('');
       setTelefono('');
+      setCodigoPostal('');
     }
     setOpen(true);
   };
@@ -74,6 +65,7 @@ export function SucursalesView() {
       nombre,
       direccion,
       telefono,
+      codigoPostal,
     };
 
     try {
@@ -83,7 +75,7 @@ export function SucursalesView() {
         await invoke('create_sucursal', { sucursal });
       }
       handleClose();
-      fetchSucursales();
+      await refreshCatalogos();
     } catch (error) {
       console.error('Error al guardar sucursal:', error);
       alert(`Error al guardar: ${error}`);
@@ -94,7 +86,7 @@ export function SucursalesView() {
     if (confirm('¿Está seguro de que desea eliminar esta sucursal?')) {
       try {
         await invoke('delete_sucursal', { id });
-        fetchSucursales();
+        await refreshCatalogos();
       } catch (error) {
         console.error('Error al eliminar sucursal:', error);
         alert(`Error al eliminar: ${error}`);
@@ -108,7 +100,8 @@ export function SucursalesView() {
     return (
       sucursal.nombre.toLowerCase().includes(query) ||
       sucursal.direccion.toLowerCase().includes(query) ||
-      sucursal.telefono.toLowerCase().includes(query)
+      sucursal.telefono.toLowerCase().includes(query) ||
+      sucursal.codigoPostal.toLowerCase().includes(query)
     );
   });
 
@@ -143,11 +136,13 @@ export function SucursalesView() {
               nombre: sucursal.nombre,
               direccion: sucursal.direccion,
               telefono: sucursal.telefono,
+              codigoPostal: sucursal.codigoPostal,
             }))}
             columns={[
               { key: 'nombre', label: 'Nombre' },
               { key: 'direccion', label: 'Dirección' },
               { key: 'telefono', label: 'Teléfono' },
+              { key: 'codigoPostal', label: 'Código postal' },
             ]}
           />
         </Box>
@@ -161,6 +156,7 @@ export function SucursalesView() {
                 <TableCell sx={{ fontWeight: 600 }}>Nombre</TableCell>
                 <TableCell sx={{ fontWeight: 600 }}>Dirección</TableCell>
                 <TableCell sx={{ fontWeight: 600 }}>Teléfono</TableCell>
+                <TableCell sx={{ fontWeight: 600 }}>Código postal</TableCell>
                 <TableCell align="right" sx={{ fontWeight: 600 }}>Acciones</TableCell>
               </TableRow>
             </TableHead>
@@ -170,6 +166,7 @@ export function SucursalesView() {
                   <TableCell>{sucursal.nombre}</TableCell>
                   <TableCell>{sucursal.direccion}</TableCell>
                   <TableCell>{sucursal.telefono}</TableCell>
+                  <TableCell>{sucursal.codigoPostal || '-'}</TableCell>
                   <TableCell align="right">
                     <IconButton color="primary" onClick={() => handleOpen(sucursal)} size="small" sx={{ mr: 1 }}>
                       <EditIcon fontSize="small" />
@@ -182,7 +179,7 @@ export function SucursalesView() {
               ))}
               {filteredSucursales.length === 0 && (
                 <TableRow>
-                  <TableCell colSpan={4} align="center" sx={{ py: 4, color: 'text.secondary' }}>
+                  <TableCell colSpan={5} align="center" sx={{ py: 4, color: 'text.secondary' }}>
                     No hay sucursales registradas.
                   </TableCell>
                 </TableRow>
@@ -219,6 +216,14 @@ export function SucursalesView() {
               onChange={(e) => setTelefono(e.target.value)} 
               fullWidth 
             />
+            <TextField
+              label="Código postal"
+              value={codigoPostal}
+              onChange={(e) => setCodigoPostal(e.target.value)}
+              fullWidth
+              required
+              slotProps={{ htmlInput: { maxLength: 5 } }}
+            />
           </Box>
         </DialogContent>
         <DialogActions sx={{ p: 3, pt: 1 }}>
@@ -230,7 +235,7 @@ export function SucursalesView() {
             variant="contained" 
             disableElevation
             startIcon={<SaveIcon />}
-            disabled={!nombre || !direccion || !currentId}
+            disabled={!nombre || !direccion || !codigoPostal || !currentId}
             sx={{ borderRadius: '8px', px: 3 }}
           >
             Guardar

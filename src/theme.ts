@@ -1,7 +1,14 @@
+import { createContext } from 'react';
 import { createTheme } from '@mui/material/styles';
+import type { PaletteMode } from '@mui/material';
 
-const theme = createTheme({
+export const ColorModeContext = createContext({
+  toggleColorMode: () => {},
+});
+
+export const createAppTheme = (mode: PaletteMode) => createTheme({
   palette: {
+    mode,
     primary: {
       main: '#1a73e8', // Google Blue
     },
@@ -9,7 +16,8 @@ const theme = createTheme({
       main: '#ea4335', // Google Red
     },
     background: {
-      default: '#f8f9fa',
+      default: mode === 'light' ? '#f8f9fa' : '#121212',
+      paper: mode === 'light' ? '#ffffff' : '#1e1e1e',
     },
   },
   typography: {
@@ -45,5 +53,7 @@ const theme = createTheme({
     },
   },
 });
+
+const theme = createAppTheme('light');
 
 export default theme;

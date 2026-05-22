@@ -9,6 +9,7 @@ import {
   DialogTitle,
   Divider,
   IconButton,
+  MenuItem,
   Paper,
   Table,
   TableBody,
@@ -19,9 +20,24 @@ import {
   TextField,
   Typography,
 } from '@mui/material';
-import { Add as AddIcon, Delete as DeleteIcon, Edit as EditIcon, Payments as AbonoIcon, Save as SaveIcon } from '@mui/icons-material';
+import { Add as AddIcon, Delete as DeleteIcon, Edit as EditIcon, FactCheck as FiscalIcon, Payments as AbonoIcon, Save as SaveIcon } from '@mui/icons-material';
 import { useAuth } from '../../auth/context/AuthContext';
 import { Cliente } from '../../inventario/types';
+
+interface ClienteDatosFiscales {
+  clienteId: string;
+  rfc: string;
+  razonSocial: string;
+  regimenFiscal: string;
+  codigoPostal: string;
+}
+
+const regimenesFiscales = [
+  { value: '601', label: '601 - General de Ley Personas Morales' },
+  { value: '605', label: '605 - Sueldos y Salarios' },
+  { value: '612', label: '612 - Personas Físicas con Actividades Empresariales' },
+  { value: '626', label: '626 - Régimen Simplificado de Confianza' },
+];
 
 export function ClientesView() {
   const { user } = useAuth();
@@ -39,6 +55,12 @@ export function ClientesView() {
   const [openAbono, setOpenAbono] = useState(false);
   const [clienteAbono, setClienteAbono] = useState<Cliente | null>(null);
   const [montoAbono, setMontoAbono] = useState('');
+  const [openFiscal, setOpenFiscal] = useState(false);
+  const [clienteFiscal, setClienteFiscal] = useState<Cliente | null>(null);
+  const [rfc, setRfc] = useState('');
+  const [razonSocial, setRazonSocial] = useState('');
+  const [regimenFiscal, setRegimenFiscal] = useState('626');
+  const [codigoPostalFiscal, setCodigoPostalFiscal] = useState('');
 
   const fetchClientes = async () => {
     try {
@@ -108,6 +130,47 @@ export function ClientesView() {
     setClienteAbono(cliente);
     setMontoAbono('');
     setOpenAbono(true);
+  };
+
+  const handleOpenFiscal = async (cliente: Cliente) => {
+    setClienteFiscal(cliente);
+    setRfc('');
+    setRazonSocial(cliente.nombre);
+    setRegimenFiscal('626');
+    setCodigoPostalFiscal('');
+    setOpenFiscal(true);
+    try {
+      const data = await invoke<ClienteDatosFiscales | null>('get_cliente_datos_fiscales', {
+        clienteId: cliente.id,
+      });
+      if (data) {
+        setRfc(data.rfc);
+        setRazonSocial(data.razonSocial);
+        setRegimenFiscal(data.regimenFiscal);
+        setCodigoPostalFiscal(data.codigoPostal);
+      }
+    } catch (error) {
+      alert(`Error al cargar datos fiscales: ${error}`);
+    }
+  };
+
+  const handleGuardarFiscal = async () => {
+    if (!clienteFiscal) return;
+    try {
+      await invoke('guardar_cliente_datos_fiscales', {
+        datos: {
+          clienteId: clienteFiscal.id,
+          rfc: rfc.trim().toUpperCase(),
+          razonSocial: razonSocial.trim(),
+          regimenFiscal,
+          codigoPostal: codigoPostalFiscal.trim(),
+        },
+      });
+      setOpenFiscal(false);
+      setClienteFiscal(null);
+    } catch (error) {
+      alert(`Error al guardar datos fiscales: ${error}`);
+    }
   };
 
   const handleRegistrarAbono = async () => {
@@ -184,6 +247,9 @@ export function ClientesView() {
                     <IconButton color="success" size="small" sx={{ mr: 1 }} onClick={() => handleOpenAbono(cliente)}>
                       <AbonoIcon fontSize="small" />
                     </IconButton>
+                    <IconButton color="info" size="small" sx={{ mr: 1 }} onClick={() => handleOpenFiscal(cliente)}>
+                      <FiscalIcon fontSize="small" />
+                    </IconButton>
                     <IconButton color="error" size="small" onClick={() => handleDeleteCliente(cliente.id)}>
                       <DeleteIcon fontSize="small" />
                     </IconButton>
@@ -246,6 +312,64 @@ export function ClientesView() {
           <Button onClick={() => setOpenAbono(false)}>Cancelar</Button>
           <Button variant="contained" onClick={handleRegistrarAbono} disabled={!Number(montoAbono || 0)}>
             Registrar
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={openFiscal} onClose={() => setOpenFiscal(false)} maxWidth="sm" fullWidth>
+        <DialogTitle>Datos Fiscales (SAT)</DialogTitle>
+        <Divider />
+        <DialogContent sx={{ pt: 3 }}>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+            Cliente: <strong>{clienteFiscal?.nombre}</strong>
+          </Typography>
+          <Box sx={{ display: 'grid', gap: 2.5, gridTemplateColumns: { xs: '1fr', md: '1fr 1fr' } }}>
+            <TextField
+              label="RFC"
+              value={rfc}
+              onChange={(e) => setRfc(e.target.value.toUpperCase())}
+              required
+              slotProps={{ htmlInput: { maxLength: 13 } }}
+            />
+            <TextField
+              select
+              label="Régimen fiscal"
+              value={regimenFiscal}
+              onChange={(e) => setRegimenFiscal(e.target.value)}
+              required
+            >
+              {regimenesFiscales.map((regimen) => (
+                <MenuItem key={regimen.value} value={regimen.value}>
+                  {regimen.label}
+                </MenuItem>
+              ))}
+            </TextField>
+            <TextField
+              label="Razón social"
+              value={razonSocial}
+              onChange={(e) => setRazonSocial(e.target.value)}
+              required
+              sx={{ gridColumn: { xs: 'auto', md: '1 / -1' } }}
+            />
+            <TextField
+              label="Código postal fiscal"
+              value={codigoPostalFiscal}
+              onChange={(e) => setCodigoPostalFiscal(e.target.value.replace(/\D/g, '').slice(0, 5))}
+              required
+              slotProps={{ htmlInput: { maxLength: 5 } }}
+            />
+          </Box>
+        </DialogContent>
+        <DialogActions sx={{ p: 3, pt: 1 }}>
+          <Button onClick={() => setOpenFiscal(false)}>Cancelar</Button>
+          <Button
+            variant="contained"
+            startIcon={<SaveIcon />}
+            onClick={handleGuardarFiscal}
+            disabled={rfc.trim().length < 12 || !razonSocial.trim() || !regimenFiscal || codigoPostalFiscal.trim().length !== 5}
+            disableElevation
+          >
+            Guardar datos SAT
           </Button>
         </DialogActions>
       </Dialog>

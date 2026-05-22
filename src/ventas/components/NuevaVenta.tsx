@@ -1,7 +1,8 @@
-import { FormEvent, useEffect, useMemo, useState } from 'react';
+import { ReactNode, useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import {
   Alert,
+  Autocomplete,
   Badge,
   Box,
   Button,
@@ -16,6 +17,7 @@ import {
   MenuItem,
   Paper,
   Snackbar,
+  Stack,
   Table,
   TableBody,
   TableCell,
@@ -25,9 +27,16 @@ import {
   TextField,
   Typography,
 } from '@mui/material';
-import { Delete as DeleteIcon, Payments as PaymentsIcon } from '@mui/icons-material';
+import {
+  Delete as DeleteIcon,
+  PauseCircleOutlined as PauseCircleOutlineIcon,
+  Payments as PaymentsIcon,
+  Search as SearchIcon,
+  Undo as UndoIcon,
+} from '@mui/icons-material';
 import { useAuth } from '../../auth/context/AuthContext';
 import { Cliente, ProductoInventario, RegistrarVentaPayload } from '../../inventario/types';
+import { useDebouncedValue } from '../../shared/hooks/useDebouncedValue';
 
 interface VentaRow {
   productoId: string;
@@ -44,11 +53,72 @@ interface TicketEnEspera {
   total: number;
 }
 
+function ShortcutHint({ keys, label }: { keys: string; label: string }) {
+  return (
+    <Box
+      component="span"
+      sx={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 0.75,
+        color: 'text.secondary',
+        fontSize: '0.78rem',
+        whiteSpace: 'nowrap',
+      }}
+    >
+      <Box
+        component="kbd"
+        sx={{
+          px: 0.75,
+          py: 0.2,
+          borderRadius: 0.75,
+          border: '1px solid',
+          borderColor: 'divider',
+          bgcolor: 'background.paper',
+          color: 'text.primary',
+          fontFamily: 'inherit',
+          fontSize: '0.72rem',
+          fontWeight: 700,
+          lineHeight: 1.4,
+        }}
+      >
+        {keys}
+      </Box>
+      {label}
+    </Box>
+  );
+}
+
+function ButtonContentWithShortcut({ children, shortcut }: { children: ReactNode; shortcut: string }) {
+  return (
+    <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 1 }}>
+      {children}
+      <Box
+        component="kbd"
+        sx={{
+          px: 0.65,
+          py: 0.1,
+          borderRadius: 0.75,
+          border: '1px solid',
+          borderColor: 'currentColor',
+          fontFamily: 'inherit',
+          fontSize: '0.68rem',
+          fontWeight: 700,
+          lineHeight: 1.35,
+          opacity: 0.72,
+        }}
+      >
+        {shortcut}
+      </Box>
+    </Box>
+  );
+}
+
 export function NuevaVenta() {
   const { user } = useAuth();
-  const [productos, setProductos] = useState<ProductoInventario[]>([]);
   const [carrito, setCarrito] = useState<VentaRow[]>([]);
   const [busqueda, setBusqueda] = useState('');
+  const [opcionesBusqueda, setOpcionesBusqueda] = useState<ProductoInventario[]>([]);
   const [metodoPago, setMetodoPago] = useState('EFECTIVO');
   const [clientes, setClientes] = useState<Cliente[]>([]);
   const [clienteId, setClienteId] = useState('');
@@ -60,14 +130,18 @@ export function NuevaVenta() {
   const [openEspera, setOpenEspera] = useState(false);
   const [referenciaEspera, setReferenciaEspera] = useState('');
   const [openRecuperar, setOpenRecuperar] = useState(false);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const referenciaInputRef = useRef<HTMLInputElement>(null);
+  const efectivoInputRef = useRef<HTMLInputElement>(null);
+  const lastProductoAddedRef = useRef<{ id: string; at: number } | null>(null);
 
   const sucursalId = user?.sucursalId ?? '';
   const canUseCredito = user?.role === 'SUPERADMIN' || user?.role === 'ADMIN';
+  const busquedaDebounced = useDebouncedValue(busqueda, 300);
 
   const fetchProductos = async () => {
     if (!sucursalId) return;
-    const data = await invoke<ProductoInventario[]>('get_productos_por_sucursal', { sucursalId });
-    setProductos(data);
+    await invoke<ProductoInventario[]>('get_productos_por_sucursal', { sucursalId });
   };
 
   useEffect(() => {
@@ -93,6 +167,10 @@ export function NuevaVenta() {
 
   const cambio = useMemo(() => Number(efectivoRecibido || 0) - total, [efectivoRecibido, total]);
 
+  const focusSearch = () => {
+    window.setTimeout(() => searchInputRef.current?.focus(), 0);
+  };
+
   const addProducto = (producto: ProductoInventario) => {
     setCarrito((prev) => {
       const idx = prev.findIndex((item) => item.productoId === producto.id);
@@ -114,11 +192,40 @@ export function NuevaVenta() {
     });
   };
 
-  const handleBuscarEnter = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    const q = busqueda.trim().toLowerCase();
+  const addProductoFromSearch = (producto: ProductoInventario) => {
+    const now = Date.now();
+    const last = lastProductoAddedRef.current;
+    if (last?.id === producto.id && now - last.at < 180) {
+      return;
+    }
+    lastProductoAddedRef.current = { id: producto.id, at: now };
+    addProducto(producto);
+  };
+
+  useEffect(() => {
+    const q = busquedaDebounced.trim();
+    if (!sucursalId || q.length <= 2) {
+      setOpcionesBusqueda([]);
+      return;
+    }
+    let active = true;
+    invoke<ProductoInventario[]>('buscar_productos_por_sucursal', { sucursalId, query: q })
+      .then((data) => {
+        if (active) setOpcionesBusqueda(data);
+      })
+      .catch((error) => {
+        console.error('Error buscando sugerencias:', error);
+        if (active) setOpcionesBusqueda([]);
+      });
+    return () => {
+      active = false;
+    };
+  }, [sucursalId, busquedaDebounced]);
+
+  const handleAgregarDesdeBusqueda = (rawValue: string) => {
+    const q = rawValue.trim().toLowerCase();
     if (!q) return;
-    const producto = productos.find(
+    const producto = opcionesBusqueda.find(
       (item) =>
         item.descripcion.toLowerCase().includes(q) ||
         item.codigoBarras.toLowerCase().includes(q) ||
@@ -129,8 +236,9 @@ export function NuevaVenta() {
       setSnackbar('No se encontró el producto.');
       return;
     }
-    addProducto(producto);
+    addProductoFromSearch(producto);
     setBusqueda('');
+    setOpcionesBusqueda([]);
   };
 
   const updateRow = (productoId: string, field: 'cantidad' | 'precioVenta', value: string) => {
@@ -147,6 +255,16 @@ export function NuevaVenta() {
     setMetodoPago('EFECTIVO');
     setEfectivoRecibido('');
     setClienteId('');
+  };
+
+  const handleNuevaVenta = () => {
+    if (carrito.length === 0 && !busqueda && !clienteId && !efectivoRecibido) {
+      focusSearch();
+      return;
+    }
+    clearVenta();
+    setSnackbar('Venta limpia. Lista para capturar.');
+    focusSearch();
   };
 
   const handleGuardarEnEspera = () => {
@@ -213,6 +331,7 @@ export function NuevaVenta() {
       clearVenta();
       setSnackbar('Venta registrada correctamente.');
       fetchProductos().catch((error) => console.error('Error productos:', error));
+      focusSearch();
     } catch (error) {
       console.error('Error al registrar venta:', error);
       setSnackbar(`Error al registrar venta: ${error}`);
@@ -221,26 +340,156 @@ export function NuevaVenta() {
     }
   };
 
-  return (
-    <Box sx={{ maxWidth: 1280, mx: 'auto', mt: 2 }}>
-      <Typography variant="h5" sx={{ fontWeight: 700, mb: 3 }}>
-        Punto de Venta
-      </Typography>
+  useEffect(() => {
+    if (openEspera) {
+      window.setTimeout(() => referenciaInputRef.current?.focus(), 0);
+    }
+  }, [openEspera]);
 
-      <Paper elevation={0} sx={{ p: 2, borderRadius: 2, border: '1px solid', borderColor: 'divider', mb: 2 }}>
-        <Box component="form" onSubmit={handleBuscarEnter}>
-          <TextField
-            label="Buscar por descripción, código de barras, código proveedor o clave. Presiona Enter para agregar."
-            value={busqueda}
-            onChange={(e) => setBusqueda(e.target.value)}
-            fullWidth
-            autoFocus
+  useEffect(() => {
+    if (openCobrar && metodoPago === 'EFECTIVO') {
+      window.setTimeout(() => efectivoInputRef.current?.focus(), 0);
+    }
+  }, [openCobrar, metodoPago]);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      const key = event.key.toUpperCase();
+      if (!key.startsWith('F')) return;
+
+      if (key === 'F2') {
+        event.preventDefault();
+        setOpenCobrar(false);
+        setOpenEspera(false);
+        setOpenRecuperar(false);
+        focusSearch();
+        return;
+      }
+
+      if (key === 'F4') {
+        event.preventDefault();
+        if (carrito.length > 0) setOpenCobrar(true);
+        return;
+      }
+
+      if (key === 'F6') {
+        event.preventDefault();
+        if (carrito.length > 0) setOpenEspera(true);
+        return;
+      }
+
+      if (key === 'F7') {
+        event.preventDefault();
+        setOpenRecuperar(true);
+        return;
+      }
+
+      if (key === 'F8') {
+        event.preventDefault();
+        handleNuevaVenta();
+        return;
+      }
+
+      if (key === 'F10') {
+        event.preventDefault();
+        if (openCobrar) {
+          confirmarCobro();
+          return;
+        }
+        if (openEspera) {
+          handleGuardarEnEspera();
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [carrito.length, busqueda, clienteId, efectivoRecibido, openCobrar, openEspera, metodoPago, cambio, total, loading]);
+
+  return (
+    <Box sx={{ maxWidth: 1280, mx: 'auto', mt: 2, height: 'calc(100vh - 112px)', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 2, mb: 3, flexWrap: 'wrap', flexShrink: 0 }}>
+        <Box>
+          <Typography variant="h5" sx={{ fontWeight: 700 }}>
+            Punto de Venta
+          </Typography>
+          <Stack direction="row" spacing={1.5} useFlexGap sx={{ mt: 1, flexWrap: 'wrap' }}>
+            <ShortcutHint keys="F2" label="Buscar" />
+            <ShortcutHint keys="F4" label="Cobrar" />
+            <ShortcutHint keys="F6" label="Espera" />
+            <ShortcutHint keys="F7" label="Recuperar" />
+            <ShortcutHint keys="F8" label="Nueva venta" />
+            <ShortcutHint keys="F10" label="Confirmar" />
+          </Stack>
+        </Box>
+      </Box>
+
+      <Paper elevation={0} sx={{ p: 2, borderRadius: 2, border: '1px solid', borderColor: 'divider', mb: 2, flexShrink: 0 }}>
+        <Box>
+          <Autocomplete
+            freeSolo
+            options={opcionesBusqueda}
+            getOptionLabel={(option) => (typeof option === 'string' ? option : option.descripcion)}
+            inputValue={busqueda}
+            onInputChange={(_, value, reason) => {
+              setBusqueda(value);
+              if (reason !== 'input' || !value.trim()) {
+                setOpcionesBusqueda([]);
+              }
+            }}
+            onChange={(_, value) => {
+              if (!value) return;
+              if (typeof value === 'string') {
+                handleAgregarDesdeBusqueda(value);
+                return;
+              }
+              addProductoFromSearch(value);
+              setBusqueda('');
+              setOpcionesBusqueda([]);
+            }}
+            renderOption={(props, option) => (
+              <Box component="li" {...props}>
+                <Box sx={{ display: 'flex', justifyContent: 'space-between', width: '100%', gap: 2 }}>
+                  <Box>
+                    <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                      {option.descripcion}
+                    </Typography>
+                    <Typography variant="caption" color="text.secondary">
+                      {option.marca || 'Sin marca'}
+                    </Typography>
+                  </Box>
+                  <Typography variant="body2" sx={{ fontWeight: 700 }}>
+                    ${option.precioVenta.toFixed(2)}
+                  </Typography>
+                </Box>
+              </Box>
+            )}
+            renderInput={(params) => (
+              <TextField
+                {...params}
+                label="Buscar producto"
+                placeholder="Descripción, código de barras, código proveedor o clave"
+                autoFocus
+                inputRef={searchInputRef}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' && busqueda.trim()) {
+                    const highlightedOption = (event.target as HTMLInputElement).getAttribute('aria-activedescendant');
+                    if (highlightedOption) {
+                      return;
+                    }
+                    event.preventDefault();
+                    handleAgregarDesdeBusqueda(busqueda);
+                  }
+                }}
+                helperText="F2 enfoca este campo. Enter agrega la coincidencia más cercana."
+              />
+            )}
           />
         </Box>
       </Paper>
 
-      <Paper elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider', overflow: 'hidden' }}>
-        <TableContainer>
+      <Paper elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider', overflow: 'hidden', flex: 1, minHeight: 0 }}>
+        <TableContainer sx={{ maxHeight: '100%', overflow: 'auto' }}>
           <Table>
             <TableHead sx={{ bgcolor: 'background.default' }}>
               <TableRow>
@@ -295,7 +544,21 @@ export function NuevaVenta() {
         </TableContainer>
       </Paper>
 
-      <Paper elevation={0} sx={{ p: 3, borderRadius: 2, border: '1px solid', borderColor: 'divider', mt: 2 }}>
+      <Paper
+        elevation={0}
+        sx={{
+          p: 3,
+          borderRadius: 2,
+          border: '1px solid',
+          borderColor: 'divider',
+          mt: 2,
+          flexShrink: 0,
+          position: 'sticky',
+          bottom: 0,
+          zIndex: 2,
+          bgcolor: 'background.paper',
+        }}
+      >
         <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 2, flexWrap: 'wrap' }}>
           <Typography variant="h3" sx={{ fontWeight: 800, color: 'primary.main' }}>
             ${total.toFixed(2)}
@@ -304,19 +567,31 @@ export function NuevaVenta() {
             <Button
               variant="outlined"
               size="large"
+              startIcon={<PauseCircleOutlineIcon />}
               onClick={() => setOpenEspera(true)}
               disabled={carrito.length === 0}
             >
-              Poner en Espera
+              <ButtonContentWithShortcut shortcut="F6">Poner en Espera</ButtonContentWithShortcut>
             </Button>
             <Button
               variant="outlined"
               size="large"
+              startIcon={<UndoIcon />}
               onClick={() => setOpenRecuperar(true)}
             >
               <Badge color="primary" badgeContent={ticketsEnEspera.length} max={99}>
-                <Box component="span" sx={{ px: 1 }}>Recuperar Ticket</Box>
+                <Box component="span" sx={{ px: 1 }}>
+                  <ButtonContentWithShortcut shortcut="F7">Recuperar Ticket</ButtonContentWithShortcut>
+                </Box>
               </Badge>
+            </Button>
+            <Button
+              variant="outlined"
+              size="large"
+              startIcon={<SearchIcon />}
+              onClick={handleNuevaVenta}
+            >
+              <ButtonContentWithShortcut shortcut="F8">Nueva venta</ButtonContentWithShortcut>
             </Button>
             <Button
               variant="contained"
@@ -325,7 +600,7 @@ export function NuevaVenta() {
               onClick={() => setOpenCobrar(true)}
               disabled={carrito.length === 0}
             >
-              Cobrar
+              <ButtonContentWithShortcut shortcut="F4">Cobrar</ButtonContentWithShortcut>
             </Button>
           </Box>
         </Box>
@@ -342,13 +617,14 @@ export function NuevaVenta() {
             value={referenciaEspera}
             onChange={(e) => setReferenciaEspera(e.target.value)}
             placeholder="Ej: Cliente de las mangueras"
+            inputRef={referenciaInputRef}
             autoFocus
           />
         </DialogContent>
         <DialogActions sx={{ p: 2 }}>
           <Button onClick={() => setOpenEspera(false)}>Cancelar</Button>
           <Button variant="contained" onClick={handleGuardarEnEspera}>
-            Confirmar
+            <ButtonContentWithShortcut shortcut="F10">Confirmar</ButtonContentWithShortcut>
           </Button>
         </DialogActions>
       </Dialog>
@@ -406,6 +682,7 @@ export function NuevaVenta() {
             value={efectivoRecibido}
             onChange={(e) => setEfectivoRecibido(e.target.value)}
             disabled={metodoPago !== 'EFECTIVO'}
+            inputRef={efectivoInputRef}
             slotProps={{ htmlInput: { min: 0, step: '0.01' } }}
           />
           <TextField label="Cambio" value={`$${Math.max(cambio, 0).toFixed(2)}`} disabled />
@@ -413,7 +690,7 @@ export function NuevaVenta() {
         <DialogActions sx={{ p: 2 }}>
           <Button onClick={() => setOpenCobrar(false)}>Cancelar</Button>
           <Button variant="contained" onClick={confirmarCobro} disabled={loading}>
-            Confirmar cobro
+            <ButtonContentWithShortcut shortcut="F10">Confirmar cobro</ButtonContentWithShortcut>
           </Button>
         </DialogActions>
       </Dialog>

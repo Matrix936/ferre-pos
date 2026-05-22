@@ -18,7 +18,7 @@ import {
 } from '@mui/material';
 import { ShoppingCart as ReabastecerIcon } from '@mui/icons-material';
 import { useAuth } from '../../auth/context/AuthContext';
-import { Sucursal } from '../../sucursales/types';
+import { useCatalogos } from '../../catalogos/context/CatalogosContext';
 
 interface DashboardStats {
   totalVendido: number;
@@ -45,8 +45,8 @@ interface ProductoMasVendido {
 
 export function DashboardView() {
   const { user } = useAuth();
+  const { sucursales } = useCatalogos();
   const navigate = useNavigate();
-  const [sucursales, setSucursales] = useState<Sucursal[]>([]);
   const [selectedSucursalId, setSelectedSucursalId] = useState('');
   const [fechaInicio, setFechaInicio] = useState('');
   const [fechaFin, setFechaFin] = useState('');
@@ -75,13 +75,6 @@ export function DashboardView() {
     setBajoStock(lowStockData);
     setTopVendidos(topData);
   };
-
-  useEffect(() => {
-    if (!isSuperAdmin) return;
-    invoke<Sucursal[]>('get_sucursales')
-      .then((data) => setSucursales(data))
-      .catch((error) => console.error('Error al cargar sucursales:', error));
-  }, [isSuperAdmin]);
 
   useEffect(() => {
     if (!isSuperAdmin) return;
