@@ -5,6 +5,7 @@ import {
   Autocomplete,
   Box,
   Button,
+  CircularProgress,
   MenuItem,
   Paper,
   Snackbar,
@@ -136,8 +137,15 @@ export function MermasAjustesView() {
             freeSolo
             options={productos}
             getOptionLabel={(option) => (typeof option === 'string' ? option : option.descripcion)}
+            filterOptions={(options) => options}
+            noOptionsText="Escribe al menos 3 caracteres para buscar coincidencias"
             inputValue={search}
             onInputChange={(_, value, reason) => {
+              if (reason === 'reset') {
+                setSearch('');
+                setProductos([]);
+                return;
+              }
               setSearch(value);
               if (reason !== 'input' || !value.trim()) {
                 setProductos([]);
@@ -223,11 +231,11 @@ export function MermasAjustesView() {
         <Box sx={{ display: 'flex', justifyContent: 'flex-end', mt: 2 }}>
           <Button
             variant="contained"
-            startIcon={<AjusteIcon />}
+            startIcon={loading ? <CircularProgress size={18} color="inherit" /> : <AjusteIcon />}
             onClick={handleRegistrar}
             disabled={loading || !productoSeleccionado?.id || !cantidad || !motivo.trim()}
           >
-            Registrar Ajuste
+            {loading ? 'Registrando...' : 'Registrar Ajuste'}
           </Button>
         </Box>
       </Paper>

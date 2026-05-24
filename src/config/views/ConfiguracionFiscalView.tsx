@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { Alert, Box, Button, Divider, Paper, TextField, Typography } from '@mui/material';
+import { Alert, Box, Button, CircularProgress, Divider, Paper, TextField, Typography } from '@mui/material';
 import { Save as SaveIcon } from '@mui/icons-material';
 
 interface EmpresaConfigFiscal {
@@ -100,13 +100,13 @@ export function ConfiguracionFiscalView() {
       <Box sx={{ display: 'flex', justifyContent: 'flex-end', mt: 3 }}>
         <Button
           variant="contained"
-          startIcon={<SaveIcon />}
+          startIcon={loading ? <CircularProgress size={18} color="inherit" /> : <SaveIcon />}
           onClick={handleSave}
           disabled={loading || !rfc.trim() || !razonSocial.trim() || !regimenFiscal.trim()}
           disableElevation
           sx={{ px: 4, py: 1, borderRadius: '8px' }}
         >
-          Guardar configuración fiscal
+          {loading ? 'Guardando...' : 'Guardar configuración fiscal'}
         </Button>
       </Box>
     </Paper>

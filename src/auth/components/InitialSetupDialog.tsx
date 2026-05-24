@@ -4,6 +4,7 @@ import {
   Alert,
   Box,
   Button,
+  CircularProgress,
   Dialog,
   DialogActions,
   DialogContent,
@@ -21,6 +22,7 @@ import { Role } from "../types";
 import { Usuario } from "../../usuarios/types";
 import { Sucursal } from "../../sucursales/types";
 import { useConfig } from "../../config/context/ConfigContext";
+import { validateLogoFile } from "../../shared/utils/logoValidation";
 
 interface InitialSetupDialogProps {
   open: boolean;
@@ -54,6 +56,7 @@ export function InitialSetupDialog({ open, onClose, onComplete }: InitialSetupDi
   const [password, setPassword] = useState("");
   const [role, setRole] = useState<Role>("SUPERADMIN");
   const [error, setError] = useState("");
+  const [logoInfo, setLogoInfo] = useState("");
   const [saving, setSaving] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -69,24 +72,19 @@ export function InitialSetupDialog({ open, onClose, onComplete }: InitialSetupDi
     codigoPostal: codigoPostal.trim(),
   }), [codigoPostal, direccion, sucursalId, sucursalNombre, telefono]);
 
-  const handleLogoUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+  const handleLogoUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
 
     if (file) {
       setError("");
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        const img = new Image();
-        img.onload = () => {
-          if (img.width === 1024 && img.height === 330) {
-            setEmpresaLogo(reader.result as string);
-          } else {
-            setError(`Las dimensiones de la imagen deben ser exactamente 1024x330 píxeles. La imagen actual es de ${img.width}x${img.height} píxeles.`);
-          }
-        };
-        img.src = reader.result as string;
-      };
-      reader.readAsDataURL(file);
+      setLogoInfo("");
+      try {
+        const result = await validateLogoFile(file);
+        setEmpresaLogo(result.dataUrl);
+        setLogoInfo(result.warning || `Logo cargado correctamente (${result.width}x${result.height}px).`);
+      } catch (validationError) {
+        setError(validationError instanceof Error ? validationError.message : "No se pudo validar el logo.");
+      }
     }
 
     if (fileInputRef.current) {
@@ -96,11 +94,13 @@ export function InitialSetupDialog({ open, onClose, onComplete }: InitialSetupDi
 
   const handleNext = () => {
     setError("");
+    setLogoInfo("");
     setActiveStep((step) => step + 1);
   };
 
   const handleBack = () => {
     setError("");
+    setLogoInfo("");
     setActiveStep((step) => step - 1);
   };
 
@@ -179,13 +179,21 @@ export function InitialSetupDialog({ open, onClose, onComplete }: InitialSetupDi
 
             <Box sx={{ display: "flex", flexDirection: "column", gap: 2 }}>
               <Typography variant="subtitle2" color="text.secondary">
-                Logotipo del sistema opcional (1024x330 píxeles)
+                Logotipo del sistema opcional
               </Typography>
+              <Typography variant="body2" color="text.secondary">
+                Puede ser horizontal, cuadrado o vertical. El sistema lo ajusta sin recortarlo.
+              </Typography>
+              {logoInfo && (
+                <Alert severity={logoInfo.startsWith("El logo") ? "warning" : "success"}>
+                  {logoInfo}
+                </Alert>
+              )}
               <Box
                 sx={{
                   width: "100%",
                   maxWidth: 512,
-                  height: 165,
+                  minHeight: 165,
                   bgcolor: "background.default",
                   border: "1px dashed",
                   borderColor: "divider",
@@ -197,11 +205,28 @@ export function InitialSetupDialog({ open, onClose, onComplete }: InitialSetupDi
                 }}
               >
                 {empresaLogo ? (
-                  <Box component="img" src={empresaLogo} alt="Logo" sx={{ width: "100%", height: "100%", objectFit: "contain" }} />
+                  <Box component="img" src={empresaLogo} alt="Logo" sx={{ maxWidth: "92%", maxHeight: 136, objectFit: "contain" }} />
                 ) : (
                   <Typography color="text.secondary">Sin logo</Typography>
                 )}
               </Box>
+
+              {empresaLogo && (
+                <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", sm: "1fr 1fr" }, gap: 2 }}>
+                  <Box sx={{ border: "1px solid", borderColor: "divider", borderRadius: 1, p: 1.5 }}>
+                    <Typography variant="caption" color="text.secondary">Vista amplia</Typography>
+                    <Box sx={{ height: 52, mt: 1, display: "flex", alignItems: "center", justifyContent: "center", bgcolor: "background.default", borderRadius: 1 }}>
+                      <Box component="img" src={empresaLogo} alt="Vista amplia" sx={{ maxWidth: 180, maxHeight: 42, objectFit: "contain" }} />
+                    </Box>
+                  </Box>
+                  <Box sx={{ border: "1px solid", borderColor: "divider", borderRadius: 1, p: 1.5 }}>
+                    <Typography variant="caption" color="text.secondary">Vista compacta</Typography>
+                    <Box sx={{ height: 52, mt: 1, display: "flex", alignItems: "center", justifyContent: "center", bgcolor: "background.default", borderRadius: 1 }}>
+                      <Box component="img" src={empresaLogo} alt="Vista compacta" sx={{ maxWidth: 44, maxHeight: 44, objectFit: "contain" }} />
+                    </Box>
+                  </Box>
+                </Box>
+              )}
 
               <input
                 type="file"
@@ -219,7 +244,13 @@ export function InitialSetupDialog({ open, onClose, onComplete }: InitialSetupDi
                   Cargar logo
                 </Button>
                 {empresaLogo && (
-                  <Button color="error" onClick={() => setEmpresaLogo(null)}>
+                  <Button
+                    color="error"
+                    onClick={() => {
+                      setEmpresaLogo(null);
+                      setLogoInfo("");
+                    }}
+                  >
                     Quitar logo
                   </Button>
                 )}
@@ -359,7 +390,7 @@ export function InitialSetupDialog({ open, onClose, onComplete }: InitialSetupDi
         ) : (
           <Button
             variant="contained"
-            startIcon={<Save />}
+            startIcon={saving ? <CircularProgress size={18} color="inherit" /> : <Save />}
             onClick={handleSubmit}
             disabled={!canCreateUser || saving}
           >

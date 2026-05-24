@@ -6,6 +6,8 @@ import {
   Badge,
   Box,
   Button,
+  Chip,
+  CircularProgress,
   DialogContentText,
   Dialog,
   DialogActions,
@@ -28,6 +30,7 @@ import {
   Typography,
 } from '@mui/material';
 import {
+  AddCircleOutlined as AddCircleOutlineIcon,
   Delete as DeleteIcon,
   PauseCircleOutlined as PauseCircleOutlineIcon,
   Payments as PaymentsIcon,
@@ -44,6 +47,10 @@ interface VentaRow {
   marca: string;
   cantidad: string;
   precioVenta: string;
+  precioOriginal?: number | null;
+  precioDescontado?: number | null;
+  nombrePromo?: string | null;
+  promocionId?: string | null;
 }
 
 interface TicketEnEspera {
@@ -52,6 +59,20 @@ interface TicketEnEspera {
   productos: VentaRow[];
   total: number;
 }
+
+interface CajaActualResumen {
+  sesion: {
+    id: string;
+    estado: string;
+  };
+}
+
+const toCents = (value: number) => Math.round((Number.isFinite(value) ? value : 0) * 100);
+const fromCents = (value: number) => value / 100;
+const formatMoney = (value: number) => `$${fromCents(toCents(value)).toFixed(2)}`;
+const getPrecioOriginal = (row: VentaRow) => Number(row.precioOriginal || row.precioVenta || 0);
+const getPrecioFinal = (row: VentaRow) => Number(row.precioVenta || 0);
+const getDescuentoUnitario = (row: VentaRow) => Math.max(0, getPrecioOriginal(row) - getPrecioFinal(row));
 
 function ShortcutHint({ keys, label }: { keys: string; label: string }) {
   return (
@@ -130,6 +151,12 @@ export function NuevaVenta() {
   const [openEspera, setOpenEspera] = useState(false);
   const [referenciaEspera, setReferenciaEspera] = useState('');
   const [openRecuperar, setOpenRecuperar] = useState(false);
+  const [cajaAbierta, setCajaAbierta] = useState(false);
+  const [openVentaRapida, setOpenVentaRapida] = useState(false);
+  const [ventaRapidaDescripcion, setVentaRapidaDescripcion] = useState('');
+  const [ventaRapidaCantidad, setVentaRapidaCantidad] = useState('1');
+  const [ventaRapidaPrecio, setVentaRapidaPrecio] = useState('');
+  const [selectedRowIndex, setSelectedRowIndex] = useState<number | null>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const referenciaInputRef = useRef<HTMLInputElement>(null);
   const efectivoInputRef = useRef<HTMLInputElement>(null);
@@ -137,6 +164,7 @@ export function NuevaVenta() {
 
   const sucursalId = user?.sucursalId ?? '';
   const canUseCredito = user?.role === 'SUPERADMIN' || user?.role === 'ADMIN';
+  const canUseVentaRapida = canUseCredito;
   const busquedaDebounced = useDebouncedValue(busqueda, 300);
 
   const fetchProductos = async () => {
@@ -144,9 +172,28 @@ export function NuevaVenta() {
     await invoke<ProductoInventario[]>('get_productos_por_sucursal', { sucursalId });
   };
 
+  const fetchCajaActual = async () => {
+    if (!user?.id || !sucursalId) {
+      setCajaAbierta(false);
+      return;
+    }
+    const data = await invoke<CajaActualResumen | null>('get_caja_actual', {
+      usuarioId: user.id,
+      sucursalId,
+    });
+    setCajaAbierta(Boolean(data && data.sesion.estado === 'ABIERTA'));
+  };
+
   useEffect(() => {
     fetchProductos().catch((error) => console.error('Error productos:', error));
   }, [sucursalId]);
+
+  useEffect(() => {
+    fetchCajaActual().catch((error) => {
+      console.error('Error caja actual:', error);
+      setCajaAbierta(false);
+    });
+  }, [user?.id, sucursalId]);
 
   useEffect(() => {
     if (!canUseCredito) return;
@@ -157,15 +204,39 @@ export function NuevaVenta() {
 
   const total = useMemo(
     () =>
-      carrito.reduce((acc, row) => {
+      fromCents(carrito.reduce((acc, row) => {
         const cantidad = Number(row.cantidad || 0);
         const precio = Number(row.precioVenta || 0);
-        return acc + cantidad * precio;
-      }, 0),
+        return acc + toCents(cantidad * precio);
+      }, 0)),
     [carrito],
   );
 
-  const cambio = useMemo(() => Number(efectivoRecibido || 0) - total, [efectivoRecibido, total]);
+  const subtotalSinDescuento = useMemo(
+    () =>
+      fromCents(carrito.reduce((acc, row) => {
+        const cantidad = Number(row.cantidad || 0);
+        return acc + toCents(cantidad * getPrecioOriginal(row));
+      }, 0)),
+    [carrito],
+  );
+
+  const ahorroTotal = useMemo(
+    () =>
+      fromCents(carrito.reduce((acc, row) => {
+        const cantidad = Number(row.cantidad || 0);
+        if (!row.nombrePromo) return acc;
+        return acc + toCents(getDescuentoUnitario(row) * cantidad);
+      }, 0)),
+    [carrito],
+  );
+
+  const productosConPromocion = useMemo(
+    () => carrito.filter((row) => row.nombrePromo && getDescuentoUnitario(row) > 0).length,
+    [carrito],
+  );
+
+  const cambio = useMemo(() => fromCents(toCents(Number(efectivoRecibido || 0)) - toCents(total)), [efectivoRecibido, total]);
 
   const focusSearch = () => {
     window.setTimeout(() => searchInputRef.current?.focus(), 0);
@@ -175,10 +246,24 @@ export function NuevaVenta() {
     setCarrito((prev) => {
       const idx = prev.findIndex((item) => item.productoId === producto.id);
       if (idx >= 0) {
+        setSelectedRowIndex(idx);
         return prev.map((item, index) =>
-          index === idx ? { ...item, cantidad: String(Number(item.cantidad || 0) + 1) } : item,
+          index === idx
+            ? {
+                ...item,
+                descripcion: producto.descripcion,
+                marca: producto.marca,
+                cantidad: String(Number(item.cantidad || 0) + 1),
+                precioVenta: String(producto.precioVenta ?? item.precioVenta ?? 0),
+                precioOriginal: producto.precioOriginal ?? null,
+                precioDescontado: producto.precioDescontado ?? null,
+                nombrePromo: producto.nombrePromo ?? null,
+                promocionId: producto.promocionId ?? null,
+              }
+            : item,
         );
       }
+      setSelectedRowIndex(prev.length);
       return [
         ...prev,
         {
@@ -187,9 +272,46 @@ export function NuevaVenta() {
           marca: producto.marca,
           cantidad: '1',
           precioVenta: String(producto.precioVenta ?? 0),
+          precioOriginal: producto.precioOriginal ?? null,
+          precioDescontado: producto.precioDescontado ?? null,
+          nombrePromo: producto.nombrePromo ?? null,
+          promocionId: producto.promocionId ?? null,
         },
       ];
     });
+  };
+
+  const refreshCarritoPromociones = async () => {
+    if (!sucursalId || carrito.length === 0) return;
+    const productosActualizados = await invoke<ProductoInventario[]>('get_productos_por_sucursal', { sucursalId });
+    const index = new Map(productosActualizados.map((producto) => [producto.id, producto]));
+    setCarrito((prev) =>
+      prev.map((row) => {
+        if (row.productoId === 'VENTA-DIVERSA') return row;
+        const producto = index.get(row.productoId);
+        if (!producto) return row;
+        return {
+          ...row,
+          descripcion: producto.descripcion,
+          marca: producto.marca,
+          precioVenta: String(producto.precioVenta ?? row.precioVenta ?? 0),
+          precioOriginal: producto.precioOriginal ?? null,
+          precioDescontado: producto.precioDescontado ?? null,
+          nombrePromo: producto.nombrePromo ?? null,
+          promocionId: producto.promocionId ?? null,
+        };
+      }),
+    );
+  };
+
+  const prepararCobro = async () => {
+    if (carrito.length === 0 || !cajaAbierta) return;
+    try {
+      await refreshCarritoPromociones();
+    } catch (error) {
+      console.error('Error refrescando promociones antes de cobrar:', error);
+    }
+    setOpenCobrar(true);
   };
 
   const addProductoFromSearch = (producto: ProductoInventario) => {
@@ -241,12 +363,13 @@ export function NuevaVenta() {
     setOpcionesBusqueda([]);
   };
 
-  const updateRow = (productoId: string, field: 'cantidad' | 'precioVenta', value: string) => {
+  const updateRow = (productoId: string, field: 'cantidad', value: string) => {
     setCarrito((prev) => prev.map((row) => (row.productoId === productoId ? { ...row, [field]: value } : row)));
   };
 
   const removeRow = (productoId: string) => {
     setCarrito((prev) => prev.filter((row) => row.productoId !== productoId));
+    setSelectedRowIndex(null);
   };
 
   const clearVenta = () => {
@@ -255,6 +378,65 @@ export function NuevaVenta() {
     setMetodoPago('EFECTIVO');
     setEfectivoRecibido('');
     setClienteId('');
+    setSelectedRowIndex(null);
+  };
+
+  const handleAgregarVentaRapida = async () => {
+    if (!canUseVentaRapida || !sucursalId) return;
+    const cantidad = Number(ventaRapidaCantidad || 0);
+    const precio = Number(ventaRapidaPrecio || 0);
+    if (!ventaRapidaDescripcion.trim()) {
+      setSnackbar('Describe el artículo diverso.');
+      return;
+    }
+    if (cantidad <= 0 || precio <= 0) {
+      setSnackbar('Cantidad y precio deben ser mayores a cero.');
+      return;
+    }
+    const existing = carrito.find((row) => row.productoId === 'VENTA-DIVERSA');
+    if (existing && Number(existing.precioVenta || 0) !== fromCents(toCents(precio))) {
+      setSnackbar('Solo puede haber un artículo diverso por ticket si cambia el precio.');
+      return;
+    }
+
+    try {
+      const producto = await invoke<ProductoInventario>('asegurar_producto_venta_diversa', { sucursalId });
+      const precioNormalizado = fromCents(toCents(precio));
+      setCarrito((prev) => {
+        const idx = prev.findIndex((row) => row.productoId === producto.id);
+        if (idx >= 0) {
+          setSelectedRowIndex(idx);
+          return prev.map((row, index) =>
+            index === idx
+              ? {
+                  ...row,
+                  descripcion: row.descripcion || ventaRapidaDescripcion.trim(),
+                  cantidad: String(Number(row.cantidad || 0) + cantidad),
+                  precioVenta: String(precioNormalizado),
+                }
+              : row,
+          );
+        }
+        setSelectedRowIndex(prev.length);
+        return [
+          ...prev,
+          {
+            productoId: producto.id,
+            descripcion: ventaRapidaDescripcion.trim(),
+            marca: producto.marca || 'Sin marca',
+            cantidad: String(cantidad),
+            precioVenta: String(precioNormalizado),
+          },
+        ];
+      });
+      setVentaRapidaDescripcion('');
+      setVentaRapidaCantidad('1');
+      setVentaRapidaPrecio('');
+      setOpenVentaRapida(false);
+      setSnackbar('Artículo diverso agregado.');
+    } catch (error) {
+      setSnackbar(`Error al agregar artículo diverso: ${error}`);
+    }
   };
 
   const handleNuevaVenta = () => {
@@ -300,6 +482,10 @@ export function NuevaVenta() {
 
   const confirmarCobro = async () => {
     if (!user?.id || !sucursalId || carrito.length === 0) return;
+    if (!cajaAbierta) {
+      setSnackbar('No puedes cobrar porque la caja está cerrada.');
+      return;
+    }
     if (metodoPago === 'EFECTIVO' && cambio < 0) {
       setSnackbar('El efectivo recibido es insuficiente.');
       return;
@@ -331,6 +517,7 @@ export function NuevaVenta() {
       clearVenta();
       setSnackbar('Venta registrada correctamente.');
       fetchProductos().catch((error) => console.error('Error productos:', error));
+      fetchCajaActual().catch((error) => console.error('Error caja actual:', error));
       focusSearch();
     } catch (error) {
       console.error('Error al registrar venta:', error);
@@ -354,21 +541,60 @@ export function NuevaVenta() {
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      const isTyping = target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA' || target?.getAttribute('role') === 'combobox';
       const key = event.key.toUpperCase();
+      if (!isTyping && key === 'ARROWDOWN') {
+        event.preventDefault();
+        setSelectedRowIndex((prev) => {
+          if (carrito.length === 0) return null;
+          return prev === null ? 0 : Math.min(prev + 1, carrito.length - 1);
+        });
+        return;
+      }
+
+      if (!isTyping && key === 'ARROWUP') {
+        event.preventDefault();
+        setSelectedRowIndex((prev) => {
+          if (carrito.length === 0) return null;
+          return prev === null ? 0 : Math.max(prev - 1, 0);
+        });
+        return;
+      }
+
+      if (!isTyping && key === 'DELETE' && selectedRowIndex !== null && carrito[selectedRowIndex]) {
+        event.preventDefault();
+        removeRow(carrito[selectedRowIndex].productoId);
+        return;
+      }
+
       if (!key.startsWith('F')) return;
+
+      if (key === 'F1') {
+        event.preventDefault();
+        if (canUseVentaRapida) setOpenVentaRapida(true);
+        return;
+      }
 
       if (key === 'F2') {
         event.preventDefault();
         setOpenCobrar(false);
         setOpenEspera(false);
         setOpenRecuperar(false);
+        setOpenVentaRapida(false);
         focusSearch();
         return;
       }
 
       if (key === 'F4') {
         event.preventDefault();
-        if (carrito.length > 0) setOpenCobrar(true);
+        if (carrito.length > 0 && cajaAbierta) void prepararCobro();
+        return;
+      }
+
+      if (key === 'F12') {
+        event.preventDefault();
+        if (carrito.length > 0 && cajaAbierta) void prepararCobro();
         return;
       }
 
@@ -398,13 +624,17 @@ export function NuevaVenta() {
         }
         if (openEspera) {
           handleGuardarEnEspera();
+          return;
+        }
+        if (openVentaRapida) {
+          handleAgregarVentaRapida();
         }
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [carrito.length, busqueda, clienteId, efectivoRecibido, openCobrar, openEspera, metodoPago, cambio, total, loading]);
+  }, [carrito, selectedRowIndex, busqueda, clienteId, efectivoRecibido, openCobrar, openEspera, openVentaRapida, metodoPago, cambio, total, loading, cajaAbierta, canUseVentaRapida, ventaRapidaDescripcion, ventaRapidaCantidad, ventaRapidaPrecio]);
 
   return (
     <Box sx={{ maxWidth: 1280, mx: 'auto', mt: 2, height: 'calc(100vh - 112px)', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
@@ -414,24 +644,38 @@ export function NuevaVenta() {
             Punto de Venta
           </Typography>
           <Stack direction="row" spacing={1.5} useFlexGap sx={{ mt: 1, flexWrap: 'wrap' }}>
+            {canUseVentaRapida && <ShortcutHint keys="F1" label="Artículo diverso" />}
             <ShortcutHint keys="F2" label="Buscar" />
             <ShortcutHint keys="F4" label="Cobrar" />
             <ShortcutHint keys="F6" label="Espera" />
             <ShortcutHint keys="F7" label="Recuperar" />
             <ShortcutHint keys="F8" label="Nueva venta" />
             <ShortcutHint keys="F10" label="Confirmar" />
+            <ShortcutHint keys="F12" label="Cobro rápido" />
           </Stack>
         </Box>
       </Box>
 
       <Paper elevation={0} sx={{ p: 2, borderRadius: 2, border: '1px solid', borderColor: 'divider', mb: 2, flexShrink: 0 }}>
+        {!cajaAbierta && (
+          <Alert severity="warning" sx={{ mb: 2 }}>
+            Caja cerrada. Puedes preparar el carrito, pero abre caja antes de cobrar.
+          </Alert>
+        )}
         <Box>
           <Autocomplete
             freeSolo
             options={opcionesBusqueda}
             getOptionLabel={(option) => (typeof option === 'string' ? option : option.descripcion)}
+            filterOptions={(options) => options}
+            noOptionsText="Escribe al menos 3 caracteres para buscar coincidencias"
             inputValue={busqueda}
             onInputChange={(_, value, reason) => {
+              if (reason === 'reset') {
+                setBusqueda('');
+                setOpcionesBusqueda([]);
+                return;
+              }
               setBusqueda(value);
               if (reason !== 'input' || !value.trim()) {
                 setOpcionesBusqueda([]);
@@ -459,7 +703,22 @@ export function NuevaVenta() {
                     </Typography>
                   </Box>
                   <Typography variant="body2" sx={{ fontWeight: 700 }}>
-                    ${option.precioVenta.toFixed(2)}
+                    {option.nombrePromo && option.precioOriginal ? (
+                      <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 1, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                        <Chip
+                          label={option.nombrePromo}
+                          color="success"
+                          size="small"
+                          sx={{ height: 20, borderRadius: '6px', fontWeight: 700 }}
+                        />
+                        <Box component="span" sx={{ color: 'text.secondary', textDecoration: 'line-through', fontWeight: 500 }}>
+                          ${option.precioOriginal.toFixed(2)}
+                        </Box>
+                        <Box component="span">${option.precioVenta.toFixed(2)}</Box>
+                      </Box>
+                    ) : (
+                      <>${option.precioVenta.toFixed(2)}</>
+                    )}
                   </Typography>
                 </Box>
               </Box>
@@ -497,14 +756,32 @@ export function NuevaVenta() {
                 <TableCell sx={{ fontWeight: 600 }}>Marca</TableCell>
                 <TableCell sx={{ fontWeight: 600 }}>Cantidad</TableCell>
                 <TableCell sx={{ fontWeight: 600 }}>Precio</TableCell>
+                <TableCell sx={{ fontWeight: 600 }}>Descuento</TableCell>
                 <TableCell sx={{ fontWeight: 600 }}>Importe</TableCell>
                 <TableCell align="right" sx={{ fontWeight: 600 }}>Acciones</TableCell>
               </TableRow>
             </TableHead>
             <TableBody>
-              {carrito.map((row) => (
-                <TableRow key={row.productoId} hover>
-                  <TableCell>{row.descripcion}</TableCell>
+              {carrito.map((row, index) => (
+                <TableRow
+                  key={`${row.productoId}-${index}`}
+                  hover
+                  selected={selectedRowIndex === index}
+                  onClick={() => setSelectedRowIndex(index)}
+                >
+                  <TableCell>
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
+                      <Box component="span">{row.descripcion}</Box>
+                      {row.nombrePromo && (
+                        <Chip
+                          label={row.nombrePromo}
+                          size="small"
+                          color="success"
+                          sx={{ height: 22, borderRadius: '6px', fontWeight: 700 }}
+                        />
+                      )}
+                    </Box>
+                  </TableCell>
                   <TableCell>{row.marca || '-'}</TableCell>
                   <TableCell sx={{ width: 140 }}>
                     <TextField
@@ -516,15 +793,36 @@ export function NuevaVenta() {
                     />
                   </TableCell>
                   <TableCell sx={{ width: 180 }}>
-                    <TextField
-                      size="small"
-                      type="number"
-                      value={row.precioVenta}
-                      onChange={(e) => updateRow(row.productoId, 'precioVenta', e.target.value)}
-                      slotProps={{ htmlInput: { min: 0, step: '0.01' } }}
-                    />
+                    {row.nombrePromo && row.precioOriginal ? (
+                      <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.25 }}>
+                        <Typography variant="caption" sx={{ color: 'text.secondary', textDecoration: 'line-through' }}>
+                          {formatMoney(row.precioOriginal)}
+                        </Typography>
+                        <Typography variant="body2" sx={{ fontWeight: 800 }}>
+                          {formatMoney(Number(row.precioVenta || 0))}
+                        </Typography>
+                      </Box>
+                    ) : (
+                      <Typography variant="body2" sx={{ fontWeight: 700 }}>
+                        {formatMoney(Number(row.precioVenta || 0))}
+                      </Typography>
+                    )}
                   </TableCell>
-                  <TableCell>${(Number(row.cantidad || 0) * Number(row.precioVenta || 0)).toFixed(2)}</TableCell>
+                  <TableCell sx={{ width: 150 }}>
+                    {row.nombrePromo && getDescuentoUnitario(row) > 0 ? (
+                      <Stack spacing={0.25}>
+                        <Typography variant="body2" sx={{ color: 'success.main', fontWeight: 800 }}>
+                          -{formatMoney(getDescuentoUnitario(row) * Number(row.cantidad || 0))}
+                        </Typography>
+                        <Typography variant="caption" color="text.secondary">
+                          {formatMoney(getDescuentoUnitario(row))} c/u
+                        </Typography>
+                      </Stack>
+                    ) : (
+                      <Typography variant="body2" color="text.secondary">-</Typography>
+                    )}
+                  </TableCell>
+                  <TableCell>{formatMoney(Number(row.cantidad || 0) * Number(row.precioVenta || 0))}</TableCell>
                   <TableCell align="right">
                     <Button size="small" color="error" startIcon={<DeleteIcon />} onClick={() => removeRow(row.productoId)}>
                       Quitar
@@ -534,7 +832,7 @@ export function NuevaVenta() {
               ))}
               {carrito.length === 0 && (
                 <TableRow>
-                  <TableCell colSpan={6} align="center" sx={{ py: 4, color: 'text.secondary' }}>
+                  <TableCell colSpan={7} align="center" sx={{ py: 4, color: 'text.secondary' }}>
                     Carrito vacío.
                   </TableCell>
                 </TableRow>
@@ -560,10 +858,43 @@ export function NuevaVenta() {
         }}
       >
         <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 2, flexWrap: 'wrap' }}>
-          <Typography variant="h3" sx={{ fontWeight: 800, color: 'primary.main' }}>
-            ${total.toFixed(2)}
-          </Typography>
+          <Box>
+            {ahorroTotal > 0 && (
+              <Stack direction="row" spacing={1} sx={{ mb: 0.5, alignItems: 'center' }}>
+                <Typography variant="body2" color="text.secondary">
+                  Subtotal:
+                </Typography>
+                <Typography variant="body2" sx={{ textDecoration: 'line-through', color: 'text.secondary', fontWeight: 700 }}>
+                  {formatMoney(subtotalSinDescuento)}
+                </Typography>
+                <Chip
+                  label={`${productosConPromocion} ${productosConPromocion === 1 ? 'promo' : 'promos'}`}
+                  color="success"
+                  size="small"
+                  sx={{ height: 22, borderRadius: '6px', fontWeight: 800 }}
+                />
+              </Stack>
+            )}
+            <Typography variant="h3" sx={{ fontWeight: 800, color: 'primary.main' }}>
+              {formatMoney(total)}
+            </Typography>
+            {ahorroTotal > 0 && (
+              <Typography variant="body2" sx={{ color: 'success.main', fontWeight: 700 }}>
+                Ahorro total: {formatMoney(ahorroTotal)}
+              </Typography>
+            )}
+          </Box>
           <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
+            {canUseVentaRapida && (
+              <Button
+                variant="outlined"
+                size="large"
+                startIcon={<AddCircleOutlineIcon />}
+                onClick={() => setOpenVentaRapida(true)}
+              >
+                <ButtonContentWithShortcut shortcut="F1">Artículo diverso</ButtonContentWithShortcut>
+              </Button>
+            )}
             <Button
               variant="outlined"
               size="large"
@@ -597,8 +928,8 @@ export function NuevaVenta() {
               variant="contained"
               size="large"
               startIcon={<PaymentsIcon />}
-              onClick={() => setOpenCobrar(true)}
-              disabled={carrito.length === 0}
+              onClick={() => void prepararCobro()}
+              disabled={carrito.length === 0 || !cajaAbierta}
             >
               <ButtonContentWithShortcut shortcut="F4">Cobrar</ButtonContentWithShortcut>
             </Button>
@@ -640,7 +971,7 @@ export function NuevaVenta() {
                 <ListItemButton key={ticket.id} onClick={() => handleRecuperarTicket(ticket)}>
                   <ListItemText
                     primary={ticket.referencia}
-                    secondary={`${new Date(ticket.id).toLocaleTimeString()} · Total: $${ticket.total.toFixed(2)}`}
+                    secondary={`${new Date(ticket.id).toLocaleTimeString()} · Total: ${formatMoney(ticket.total)}`}
                   />
                 </ListItemButton>
               ))}
@@ -652,9 +983,49 @@ export function NuevaVenta() {
         </DialogActions>
       </Dialog>
 
-      <Dialog open={openCobrar} onClose={() => setOpenCobrar(false)} maxWidth="xs" fullWidth>
-        <DialogTitle>Cobrar venta</DialogTitle>
-        <DialogContent sx={{ pt: 2, display: 'flex', flexDirection: 'column', gap: 2 }}>
+      <Dialog open={openVentaRapida} onClose={() => setOpenVentaRapida(false)} maxWidth="xs" fullWidth>
+        <DialogTitle>Artículo diverso</DialogTitle>
+        <DialogContent sx={{ '&&': { pt: 2.5 }, display: 'flex', flexDirection: 'column', gap: 2 }}>
+          <Alert severity="info">
+            Uso controlado para artículos sin código. Solo para personal autorizado.
+          </Alert>
+          <TextField
+            label="Descripción"
+            value={ventaRapidaDescripcion}
+            onChange={(e) => setVentaRapidaDescripcion(e.target.value)}
+            placeholder="Ej: Cable por metro, tornillería surtida"
+            autoFocus
+          />
+          <TextField
+            label="Cantidad"
+            type="number"
+            value={ventaRapidaCantidad}
+            onChange={(e) => setVentaRapidaCantidad(e.target.value)}
+            slotProps={{ htmlInput: { min: 0.01, step: '0.01' } }}
+          />
+          <TextField
+            label="Precio neto"
+            type="number"
+            value={ventaRapidaPrecio}
+            onChange={(e) => setVentaRapidaPrecio(e.target.value)}
+            slotProps={{ htmlInput: { min: 0.01, step: '0.01' } }}
+          />
+        </DialogContent>
+        <DialogActions sx={{ p: 2 }}>
+          <Button onClick={() => setOpenVentaRapida(false)}>Cancelar</Button>
+          <Button
+            variant="contained"
+            onClick={handleAgregarVentaRapida}
+            disabled={!ventaRapidaDescripcion.trim() || Number(ventaRapidaCantidad || 0) <= 0 || Number(ventaRapidaPrecio || 0) <= 0}
+          >
+            Agregar
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={openCobrar} onClose={loading ? undefined : () => setOpenCobrar(false)} maxWidth="xs" fullWidth>
+        <DialogTitle sx={{ pb: 1 }}>Cobrar venta</DialogTitle>
+        <DialogContent sx={{ '&&': { pt: 2.5 }, display: 'flex', flexDirection: 'column', gap: 2 }}>
           <TextField select label="Método de pago" value={metodoPago} onChange={(e) => setMetodoPago(e.target.value)}>
             <MenuItem value="EFECTIVO">Efectivo</MenuItem>
             <MenuItem value="TARJETA">Tarjeta</MenuItem>
@@ -675,7 +1046,34 @@ export function NuevaVenta() {
               ))}
             </TextField>
           )}
-          <TextField label="Total a cobrar" value={`$${total.toFixed(2)}`} disabled />
+          {ahorroTotal > 0 && (
+            <Paper
+              elevation={0}
+              sx={{
+                p: 1.5,
+                borderRadius: 1.5,
+                border: '1px solid',
+                borderColor: 'success.main',
+                bgcolor: (theme) => theme.palette.mode === 'dark' ? 'rgba(46, 125, 50, 0.12)' : 'rgba(46, 125, 50, 0.08)',
+              }}
+            >
+              <Stack spacing={0.75}>
+                <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 2 }}>
+                  <Typography variant="body2" color="text.secondary">Subtotal sin descuento</Typography>
+                  <Typography variant="body2" sx={{ fontWeight: 700, textDecoration: 'line-through', color: 'text.secondary' }}>
+                    {formatMoney(subtotalSinDescuento)}
+                  </Typography>
+                </Box>
+                <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 2 }}>
+                  <Typography variant="body2" sx={{ color: 'success.main', fontWeight: 700 }}>Descuentos aplicados</Typography>
+                  <Typography variant="body2" sx={{ color: 'success.main', fontWeight: 800 }}>
+                    -{formatMoney(ahorroTotal)}
+                  </Typography>
+                </Box>
+              </Stack>
+            </Paper>
+          )}
+          <TextField label="Total a cobrar" value={formatMoney(total)} disabled />
           <TextField
             label="Efectivo recibido"
             type="number"
@@ -685,12 +1083,17 @@ export function NuevaVenta() {
             inputRef={efectivoInputRef}
             slotProps={{ htmlInput: { min: 0, step: '0.01' } }}
           />
-          <TextField label="Cambio" value={`$${Math.max(cambio, 0).toFixed(2)}`} disabled />
+          <TextField label="Cambio" value={formatMoney(Math.max(cambio, 0))} disabled />
         </DialogContent>
         <DialogActions sx={{ p: 2 }}>
-          <Button onClick={() => setOpenCobrar(false)}>Cancelar</Button>
-          <Button variant="contained" onClick={confirmarCobro} disabled={loading}>
-            <ButtonContentWithShortcut shortcut="F10">Confirmar cobro</ButtonContentWithShortcut>
+          <Button onClick={() => setOpenCobrar(false)} disabled={loading}>Cancelar</Button>
+          <Button
+            variant="contained"
+            onClick={confirmarCobro}
+            disabled={loading}
+            startIcon={loading ? <CircularProgress size={18} color="inherit" /> : undefined}
+          >
+            {loading ? 'Cobrando...' : <ButtonContentWithShortcut shortcut="F10">Confirmar cobro</ButtonContentWithShortcut>}
           </Button>
         </DialogActions>
       </Dialog>

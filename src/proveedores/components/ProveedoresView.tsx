@@ -2,6 +2,7 @@ import { useState } from 'react';
 import {
   Box,
   Button,
+  CircularProgress,
   Dialog,
   DialogActions,
   DialogContent,
@@ -35,6 +36,8 @@ export function ProveedoresView() {
   const [telefono, setTelefono] = useState('');
   const [email, setEmail] = useState('');
   const [direccion, setDireccion] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [deletingId, setDeletingId] = useState('');
 
   const handleOpen = (proveedor?: Proveedor) => {
     if (proveedor) {
@@ -60,6 +63,7 @@ export function ProveedoresView() {
   const handleClose = () => setOpen(false);
 
   const handleSave = async () => {
+    if (saving) return;
     const proveedor: Proveedor = {
       id: currentId,
       nombre: nombre.trim(),
@@ -69,6 +73,7 @@ export function ProveedoresView() {
       direccion: direccion.trim(),
     };
 
+    setSaving(true);
     try {
       if (editMode) {
         await invoke('update_proveedor', { id: currentId, proveedor });
@@ -80,17 +85,22 @@ export function ProveedoresView() {
     } catch (error) {
       console.error('Error al guardar proveedor:', error);
       alert(`Error al guardar: ${error}`);
+    } finally {
+      setSaving(false);
     }
   };
 
   const handleDelete = async (id: string) => {
     if (!confirm('¿Está seguro de que desea eliminar este proveedor?')) return;
+    setDeletingId(id);
     try {
       await invoke('delete_provider', { id });
       await refreshCatalogos();
     } catch (error) {
       console.error('Error al eliminar proveedor:', error);
       alert(`Error al eliminar: ${error}`);
+    } finally {
+      setDeletingId('');
     }
   };
 
@@ -166,11 +176,11 @@ export function ProveedoresView() {
                   <TableCell>{proveedor.email || '-'}</TableCell>
                   <TableCell>{proveedor.direccion || '-'}</TableCell>
                   <TableCell align="right">
-                    <IconButton color="primary" size="small" sx={{ mr: 1 }} onClick={() => handleOpen(proveedor)}>
+                    <IconButton color="primary" size="small" sx={{ mr: 1 }} onClick={() => handleOpen(proveedor)} disabled={Boolean(deletingId)}>
                       <EditIcon fontSize="small" />
                     </IconButton>
-                    <IconButton color="error" size="small" onClick={() => handleDelete(proveedor.id)}>
-                      <DeleteIcon fontSize="small" />
+                    <IconButton color="error" size="small" onClick={() => handleDelete(proveedor.id)} disabled={Boolean(deletingId)}>
+                      {deletingId === proveedor.id ? <CircularProgress size={18} /> : <DeleteIcon fontSize="small" />}
                     </IconButton>
                   </TableCell>
                 </TableRow>
@@ -187,7 +197,7 @@ export function ProveedoresView() {
         </TableContainer>
       </Paper>
 
-      <Dialog open={open} onClose={handleClose} maxWidth="sm" fullWidth slotProps={{ paper: { sx: { borderRadius: 2 } } }}>
+      <Dialog open={open} onClose={saving ? undefined : handleClose} maxWidth="sm" fullWidth slotProps={{ paper: { sx: { borderRadius: 2 } } }}>
         <DialogTitle sx={{ fontWeight: 600, pb: 1 }}>{editMode ? 'Editar proveedor' : 'Nuevo proveedor'}</DialogTitle>
         <Divider />
         <DialogContent sx={{ pt: 3 }}>
@@ -200,9 +210,15 @@ export function ProveedoresView() {
           </Box>
         </DialogContent>
         <DialogActions sx={{ p: 3, pt: 1 }}>
-          <Button onClick={handleClose}>Cancelar</Button>
-          <Button onClick={handleSave} variant="contained" startIcon={<SaveIcon />} disableElevation disabled={!nombre.trim()}>
-            Guardar
+          <Button onClick={handleClose} disabled={saving}>Cancelar</Button>
+          <Button
+            onClick={handleSave}
+            variant="contained"
+            startIcon={saving ? <CircularProgress size={18} color="inherit" /> : <SaveIcon />}
+            disableElevation
+            disabled={saving || !nombre.trim()}
+          >
+            {saving ? 'Guardando...' : 'Guardar'}
           </Button>
         </DialogActions>
       </Dialog>

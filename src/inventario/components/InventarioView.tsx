@@ -4,6 +4,7 @@ import {
   Autocomplete,
   Box,
   Button,
+  CircularProgress,
   Chip,
   Dialog,
   DialogActions,
@@ -39,11 +40,13 @@ export function InventarioView() {
   const [selectedSucursalId, setSelectedSucursalId] = useState('');
   const [open, setOpen] = useState(false);
   const [productoSeleccionado, setProductoSeleccionado] = useState<ProductoCatalogo | null>(null);
+  const [catalogoInput, setCatalogoInput] = useState('');
   const [stockSucursalId, setStockSucursalId] = useState('');
   const [stock, setStock] = useState('0');
   const [stockMinimo, setStockMinimo] = useState('0');
   const [costoPromedio, setCostoPromedio] = useState('0');
   const [precioVenta, setPrecioVenta] = useState('0');
+  const [saving, setSaving] = useState(false);
 
   const userSucursalId = user?.sucursalId ?? '';
   const isSuperAdmin = user?.role === 'SUPERADMIN';
@@ -107,6 +110,17 @@ export function InventarioView() {
     return catalogo.filter((item) => !idsEnSucursal.has(item.id) || item.id === productoSeleccionado?.id);
   }, [catalogo, inventario, productoSeleccionado?.id]);
 
+  const catalogoOpciones = useMemo(() => {
+    const query = catalogoInput.trim().toLowerCase();
+    if (query.length < 2) return productoSeleccionado ? [productoSeleccionado] : [];
+    return catalogoDisponible
+      .filter((item) =>
+        [item.descripcion, item.codigoBarras, item.codigoProveedor, item.claveProducto, item.marca, item.unidad]
+          .some((value) => value.toLowerCase().includes(query)),
+      )
+      .slice(0, 25);
+  }, [catalogoDisponible, catalogoInput, productoSeleccionado]);
+
   const openNew = () => {
     setProductoSeleccionado(null);
     setStockSucursalId(sucursalConsulta || userSucursalId);
@@ -114,6 +128,7 @@ export function InventarioView() {
     setStockMinimo('0');
     setCostoPromedio('0');
     setPrecioVenta('0');
+    setCatalogoInput('');
     setOpen(true);
   };
 
@@ -138,10 +153,12 @@ export function InventarioView() {
     setStockMinimo(String(producto.stockMinimo ?? 0));
     setCostoPromedio(String(producto.costoPromedio ?? producto.precioCosto ?? 0));
     setPrecioVenta(String(producto.precioVenta ?? 0));
+    setCatalogoInput(producto.descripcion);
     setOpen(true);
   };
 
   const handleSave = async () => {
+    if (saving) return;
     if (!productoSeleccionado || !stockSucursalId) return;
     const inventarioPayload: InventarioSucursalPayload = {
       sucursalId: stockSucursalId,
@@ -150,6 +167,7 @@ export function InventarioView() {
       costoPromedio: Number(costoPromedio || 0),
       precioVenta: Number(precioVenta || 0),
     };
+    setSaving(true);
     try {
       await invoke('guardar_inventario_sucursal', {
         productoId: productoSeleccionado.id,
@@ -159,6 +177,8 @@ export function InventarioView() {
       await fetchInventario();
     } catch (error) {
       alert(`Error al guardar inventario: ${error}`);
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -191,8 +211,16 @@ export function InventarioView() {
             freeSolo
             options={searchOptions}
             getOptionLabel={(option) => (typeof option === 'string' ? option : option.descripcion)}
+            filterOptions={(options) => options}
+            noOptionsText="Escribe al menos 3 caracteres para buscar coincidencias"
             inputValue={searchInput}
             onInputChange={(_, value, reason) => {
+              if (reason === 'reset') {
+                setSearchInput('');
+                setSearchOptions([]);
+                setSearchApplied('');
+                return;
+              }
               setSearchInput(value);
               if (reason !== 'input' || !value.trim()) {
                 setSearchOptions([]);
@@ -279,16 +307,26 @@ export function InventarioView() {
         </TableContainer>
       </Paper>
 
-      <Dialog open={open} onClose={() => setOpen(false)} maxWidth="sm" fullWidth>
+      <Dialog open={open} onClose={saving ? undefined : () => setOpen(false)} maxWidth="sm" fullWidth>
         <DialogTitle sx={{ fontWeight: 600 }}>Configurar inventario por sucursal</DialogTitle>
         <Divider />
         <DialogContent sx={{ pt: 3, display: 'flex', flexDirection: 'column', gap: 2 }}>
           <Autocomplete
-            options={catalogoDisponible}
+            options={catalogoOpciones}
             value={productoSeleccionado}
-            onChange={(_, value) => setProductoSeleccionado(value)}
+            inputValue={catalogoInput}
+            onInputChange={(_, value, reason) => {
+              setCatalogoInput(value);
+              if (reason === 'clear') setProductoSeleccionado(null);
+            }}
+            onChange={(_, value) => {
+              setProductoSeleccionado(value);
+              setCatalogoInput(value?.descripcion ?? '');
+            }}
             getOptionLabel={(option) => `${option.descripcion}${option.marca ? ` · ${option.marca}` : ''}`}
             isOptionEqualToValue={(option, value) => option.id === value.id}
+            filterOptions={(options) => options}
+            noOptionsText="Escribe al menos 2 letras para buscar producto"
             renderInput={(params) => <TextField {...params} label="Producto" required />}
           />
           <TextField select label="Sucursal" value={stockSucursalId} onChange={(e) => setStockSucursalId(e.target.value)} required>
@@ -302,9 +340,14 @@ export function InventarioView() {
           <TextField label="Precio venta en esta sucursal" type="number" value={precioVenta} onChange={(e) => setPrecioVenta(e.target.value)} />
         </DialogContent>
         <DialogActions sx={{ p: 3, pt: 1 }}>
-          <Button onClick={() => setOpen(false)}>Cancelar</Button>
-          <Button variant="contained" startIcon={<SaveIcon />} onClick={handleSave} disabled={!productoSeleccionado || !stockSucursalId}>
-            Guardar
+          <Button onClick={() => setOpen(false)} disabled={saving}>Cancelar</Button>
+          <Button
+            variant="contained"
+            startIcon={saving ? <CircularProgress size={18} color="inherit" /> : <SaveIcon />}
+            onClick={handleSave}
+            disabled={saving || !productoSeleccionado || !stockSucursalId}
+          >
+            {saving ? 'Guardando...' : 'Guardar'}
           </Button>
         </DialogActions>
       </Dialog>

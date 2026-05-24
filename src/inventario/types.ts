@@ -16,6 +16,10 @@ export interface ProductoInventario {
   stock: number;
   stockMinimo: number;
   costoPromedio: number;
+  precioOriginal?: number | null;
+  precioDescontado?: number | null;
+  nombrePromo?: string | null;
+  promocionId?: string | null;
 }
 
 export interface ProductoPayload {
@@ -54,6 +58,11 @@ export interface Proveedor {
 }
 
 export interface Marca {
+  id: string;
+  nombre: string;
+}
+
+export interface Categoria {
   id: string;
   nombre: string;
 }

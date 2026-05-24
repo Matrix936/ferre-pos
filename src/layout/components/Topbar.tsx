@@ -18,13 +18,10 @@ import { invoke } from '@tauri-apps/api/core';
 import { 
   Logout, 
   Settings, 
-  Storefront, 
   Person,
   Menu as MenuIcon,
   Brightness4 as Brightness4Icon,
   Brightness7 as Brightness7Icon,
-  CloudDone as CloudDoneIcon,
-  CloudUpload as CloudUploadIcon,
   DoneAll as DoneAllIcon,
   FiberManualRecord as FiberManualRecordIcon,
   Notifications as NotificationsIcon
@@ -32,7 +29,6 @@ import {
 import { useContext, useEffect, useMemo, useState } from 'react';
 import { useAuth } from '../../auth/context/AuthContext';
 import { useCatalogos } from '../../catalogos/context/CatalogosContext';
-import { useConfig } from '../../config/context/ConfigContext';
 import { useNavigate } from 'react-router-dom';
 import { RoleGuard } from '../../auth/components/RoleGuard';
 import { ColorModeContext } from '../../theme';
@@ -75,7 +71,6 @@ const formatCurrentDateTime = (date: Date) => {
 
 export function Topbar({ onToggleSidebar }: TopbarProps) {
   const { user, logout } = useAuth();
-  const { systemName } = useConfig();
   const theme = useTheme();
   const colorMode = useContext(ColorModeContext);
   const { sucursales } = useCatalogos();
@@ -137,11 +132,21 @@ export function Topbar({ onToggleSidebar }: TopbarProps) {
   }, [sucursales, user?.sucursalId]);
 
   const syncLabel = useMemo(() => {
-    if (syncStatus.pendientes <= 0) return 'Supabase al día';
+    if (syncStatus.pendientes <= 0) return 'Sincronizado';
     if (syncStatus.ventasPendientes && syncStatus.ventasPendientes > 0) {
-      return `${syncStatus.ventasPendientes} ${syncStatus.ventasPendientes === 1 ? 'venta' : 'ventas'} por sincronizar`;
+      return `${syncStatus.ventasPendientes} ${syncStatus.ventasPendientes === 1 ? 'venta' : 'ventas'}`;
     }
-    return `${syncStatus.pendientes} ${syncStatus.pendientes === 1 ? 'cambio' : 'cambios'} por sincronizar`;
+    return `${syncStatus.pendientes} ${syncStatus.pendientes === 1 ? 'pendiente' : 'pendientes'}`;
+  }, [syncStatus]);
+
+  const syncTooltip = useMemo(() => {
+    if (syncStatus.pendientes <= 0) {
+      return 'Todos los cambios locales están sincronizados con Supabase.';
+    }
+
+    const ventas = syncStatus.ventasPendientes ?? 0;
+    const otros = Math.max(syncStatus.pendientes - ventas, 0);
+    return `Pendientes por subir: ${syncStatus.pendientes}. Ventas: ${ventas}. Otros cambios: ${otros}.`;
   }, [syncStatus]);
 
   const unreadNotifications = useMemo(
@@ -182,9 +187,13 @@ export function Topbar({ onToggleSidebar }: TopbarProps) {
     loadNotificaciones();
   };
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
     handleCloseMenu();
-    logout();
+    try {
+      await logout();
+    } catch (error) {
+      window.alert(String(error));
+    }
   };
 
   return (
@@ -200,41 +209,139 @@ export function Topbar({ onToggleSidebar }: TopbarProps) {
     >
       <Toolbar sx={{ justifyContent: 'space-between' }}>
         
-        {/* Sección Izquierda: Logo y Sucursal */}
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+        {/* Sección Izquierda: Sucursal y sincronización */}
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.25, minWidth: 0 }}>
           <IconButton onClick={onToggleSidebar} edge="start" aria-label="toggle sidebar">
             <MenuIcon />
           </IconButton>
-          <Typography variant="h6" sx={{ fontWeight: 700, color: 'primary.main', letterSpacing: -0.5 }}>
-            {systemName}
-          </Typography>
-          <Divider orientation="vertical" flexItem sx={{ height: 24, my: 'auto' }} />
-          <Chip 
-            icon={<Storefront sx={{ fontSize: '1rem !important' }} />} 
-            label={`Sucursal: ${sucursalNombre}`} 
-            variant="outlined" 
-            size="small"
-            sx={{ borderRadius: '6px', fontWeight: 500 }}
-          />
-          <Tooltip title={syncStatus.pendientes <= 0 ? 'Todos los cambios locales están sincronizados con Supabase.' : 'Hay cambios locales pendientes de subir a Supabase.'}>
-            <Chip
-              icon={
-                syncStatus.pendientes <= 0 ? (
-                  <CloudDoneIcon sx={{ fontSize: '1rem !important' }} />
-                ) : (
-                  <CloudUploadIcon sx={{ fontSize: '1rem !important' }} />
-                )
-              }
-              label={syncLabel}
-              color={syncStatus.pendientes <= 0 ? 'success' : 'warning'}
-              variant={syncStatus.pendientes <= 0 ? 'outlined' : 'filled'}
-              size="small"
+          <Tooltip title={`Sucursal activa: ${sucursalNombre}`}>
+            <Box
               sx={{
-                borderRadius: '6px',
-                fontWeight: 600,
-                display: { xs: 'none', sm: 'inline-flex' },
+                display: { xs: 'none', sm: 'flex' },
+                alignItems: 'center',
+                gap: 1,
+                minHeight: 36,
+                minWidth: 0,
+                px: 1.25,
+                border: '1px solid',
+                borderColor: 'divider',
+                borderRadius: '10px',
+                bgcolor: 'background.paper',
+                color: 'text.primary',
+                overflow: 'hidden',
+                transition: (muiTheme) => muiTheme.transitions.create(['background-color', 'border-color'], {
+                  duration: 240,
+                  easing: muiTheme.transitions.easing.easeInOut,
+                }),
+                '&:hover': {
+                  borderColor: 'primary.main',
+                  bgcolor: theme.palette.mode === 'dark' ? 'rgba(25, 118, 210, 0.12)' : 'rgba(25, 118, 210, 0.06)',
+                },
               }}
-            />
+            >
+              <Box
+                sx={{
+                  width: 8,
+                  height: 8,
+                  borderRadius: '50%',
+                  bgcolor: 'primary.main',
+                  boxShadow: theme.palette.mode === 'dark'
+                    ? '0 0 0 3px rgba(25, 118, 210, 0.18)'
+                    : '0 0 0 3px rgba(25, 118, 210, 0.12)',
+                  flex: '0 0 auto',
+                }}
+              />
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, minWidth: 0 }}>
+                <Typography variant="body2" sx={{ fontWeight: 600, whiteSpace: 'nowrap' }}>
+                  Sucursal
+                </Typography>
+                <Box
+                  component="span"
+                  sx={{
+                    px: 0.75,
+                    py: 0.25,
+                    borderRadius: '6px',
+                    bgcolor: theme.palette.mode === 'dark' ? 'rgba(25, 118, 210, 0.18)' : 'rgba(25, 118, 210, 0.1)',
+                    color: 'primary.main',
+                    fontSize: '0.65rem',
+                    fontWeight: 800,
+                    lineHeight: 1,
+                    maxWidth: 150,
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  {sucursalNombre}
+                </Box>
+              </Box>
+            </Box>
+          </Tooltip>
+          <Tooltip title={syncTooltip}>
+            <Box
+              sx={{
+                display: { xs: 'none', md: 'flex' },
+                alignItems: 'center',
+                gap: 1,
+                minHeight: 36,
+                px: 1.25,
+                border: '1px solid',
+                borderColor: 'divider',
+                borderRadius: '10px',
+                bgcolor: 'background.paper',
+                color: 'text.primary',
+                overflow: 'hidden',
+                transition: (muiTheme) => muiTheme.transitions.create(['background-color', 'border-color'], {
+                  duration: 240,
+                  easing: muiTheme.transitions.easing.easeInOut,
+                }),
+                '&:hover': {
+                  borderColor: syncStatus.pendientes <= 0 ? 'success.main' : 'warning.main',
+                  bgcolor: syncStatus.pendientes <= 0
+                    ? theme.palette.mode === 'dark' ? 'rgba(46, 125, 50, 0.12)' : 'rgba(46, 125, 50, 0.06)'
+                    : theme.palette.mode === 'dark' ? 'rgba(237, 108, 2, 0.14)' : 'rgba(237, 108, 2, 0.08)',
+                },
+              }}
+            >
+              <Box
+                sx={{
+                  width: 8,
+                  height: 8,
+                  borderRadius: '50%',
+                  bgcolor: syncStatus.pendientes <= 0 ? 'success.main' : 'warning.main',
+                  boxShadow: syncStatus.pendientes <= 0
+                    ? '0 0 0 3px rgba(46, 125, 50, 0.12)'
+                    : '0 0 0 3px rgba(237, 108, 2, 0.14)',
+                  flex: '0 0 auto',
+                }}
+              />
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, minWidth: 0 }}>
+                <Typography variant="body2" sx={{ fontWeight: 600, whiteSpace: 'nowrap' }}>
+                  Sync
+                </Typography>
+                <Box
+                  component="span"
+                  sx={{
+                    px: 0.75,
+                    py: 0.25,
+                    borderRadius: '6px',
+                    bgcolor: syncStatus.pendientes <= 0
+                      ? theme.palette.mode === 'dark' ? 'rgba(46, 125, 50, 0.18)' : 'rgba(46, 125, 50, 0.1)'
+                      : theme.palette.mode === 'dark' ? 'rgba(237, 108, 2, 0.2)' : 'rgba(237, 108, 2, 0.12)',
+                    color: syncStatus.pendientes <= 0 ? 'success.main' : 'warning.main',
+                    fontSize: '0.65rem',
+                    fontWeight: 800,
+                    lineHeight: 1,
+                    maxWidth: 100,
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  {syncLabel}
+                </Box>
+              </Box>
+            </Box>
           </Tooltip>
         </Box>
 

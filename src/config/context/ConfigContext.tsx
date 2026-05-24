@@ -5,6 +5,8 @@ interface ConfigContextType {
   setSystemName: (name: string) => void;
   logo: string | null;
   setLogo: (logo: string | null) => void;
+  logoAnimationEnabled: boolean;
+  setLogoAnimationEnabled: (enabled: boolean) => void;
 }
 
 const ConfigContext = createContext<ConfigContextType | undefined>(undefined);
@@ -16,6 +18,10 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
   
   const [logo, setLogo] = useState<string | null>(() => {
     return localStorage.getItem('systemLogo') || null;
+  });
+
+  const [logoAnimationEnabled, setLogoAnimationEnabled] = useState(() => {
+    return localStorage.getItem('logoAnimationEnabled') !== 'false';
   });
 
   useEffect(() => {
@@ -30,8 +36,12 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
     }
   }, [logo]);
 
+  useEffect(() => {
+    localStorage.setItem('logoAnimationEnabled', String(logoAnimationEnabled));
+  }, [logoAnimationEnabled]);
+
   return (
-    <ConfigContext.Provider value={{ systemName, setSystemName, logo, setLogo }}>
+    <ConfigContext.Provider value={{ systemName, setSystemName, logo, setLogo, logoAnimationEnabled, setLogoAnimationEnabled }}>
       {children}
     </ConfigContext.Provider>
   );

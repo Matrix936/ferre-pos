@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import {
   Box,
   Button,
+  CircularProgress,
   Dialog,
   DialogActions,
   DialogContent,
@@ -61,6 +62,11 @@ export function ClientesView() {
   const [razonSocial, setRazonSocial] = useState('');
   const [regimenFiscal, setRegimenFiscal] = useState('626');
   const [codigoPostalFiscal, setCodigoPostalFiscal] = useState('');
+  const [savingCliente, setSavingCliente] = useState(false);
+  const [deletingClienteId, setDeletingClienteId] = useState('');
+  const [savingFiscal, setSavingFiscal] = useState(false);
+  const [savingAbono, setSavingAbono] = useState(false);
+  const [loadingFiscalId, setLoadingFiscalId] = useState('');
 
   const fetchClientes = async () => {
     try {
@@ -95,6 +101,7 @@ export function ClientesView() {
   };
 
   const handleSaveCliente = async () => {
+    if (savingCliente) return;
     const cliente: Cliente = {
       id: currentId,
       nombre: nombre.trim(),
@@ -103,6 +110,7 @@ export function ClientesView() {
       limiteCredito: Number(limiteCredito || 0),
       saldoDeudor: 0,
     };
+    setSavingCliente(true);
     try {
       if (editMode) {
         await invoke('update_cliente', { id: currentId, cliente });
@@ -113,16 +121,21 @@ export function ClientesView() {
       fetchClientes();
     } catch (error) {
       alert(`Error al guardar cliente: ${error}`);
+    } finally {
+      setSavingCliente(false);
     }
   };
 
   const handleDeleteCliente = async (id: string) => {
     if (!confirm('¿Eliminar cliente?')) return;
+    setDeletingClienteId(id);
     try {
       await invoke('delete_cliente', { id });
       fetchClientes();
     } catch (error) {
       alert(`Error al eliminar cliente: ${error}`);
+    } finally {
+      setDeletingClienteId('');
     }
   };
 
@@ -133,6 +146,7 @@ export function ClientesView() {
   };
 
   const handleOpenFiscal = async (cliente: Cliente) => {
+    setLoadingFiscalId(cliente.id);
     setClienteFiscal(cliente);
     setRfc('');
     setRazonSocial(cliente.nombre);
@@ -151,11 +165,14 @@ export function ClientesView() {
       }
     } catch (error) {
       alert(`Error al cargar datos fiscales: ${error}`);
+    } finally {
+      setLoadingFiscalId('');
     }
   };
 
   const handleGuardarFiscal = async () => {
     if (!clienteFiscal) return;
+    setSavingFiscal(true);
     try {
       await invoke('guardar_cliente_datos_fiscales', {
         datos: {
@@ -170,11 +187,14 @@ export function ClientesView() {
       setClienteFiscal(null);
     } catch (error) {
       alert(`Error al guardar datos fiscales: ${error}`);
+    } finally {
+      setSavingFiscal(false);
     }
   };
 
   const handleRegistrarAbono = async () => {
     if (!clienteAbono || !user?.id) return;
+    setSavingAbono(true);
     try {
       await invoke('registrar_abono', {
         abono: {
@@ -190,6 +210,8 @@ export function ClientesView() {
       fetchClientes();
     } catch (error) {
       alert(`Error al registrar abono: ${error}`);
+    } finally {
+      setSavingAbono(false);
     }
   };
 
@@ -241,17 +263,17 @@ export function ClientesView() {
                   <TableCell>${cliente.limiteCredito.toFixed(2)}</TableCell>
                   <TableCell>${cliente.saldoDeudor.toFixed(2)}</TableCell>
                   <TableCell align="right">
-                    <IconButton color="primary" size="small" sx={{ mr: 1 }} onClick={() => handleOpenCliente(cliente)}>
+                    <IconButton color="primary" size="small" sx={{ mr: 1 }} onClick={() => handleOpenCliente(cliente)} disabled={Boolean(deletingClienteId)}>
                       <EditIcon fontSize="small" />
                     </IconButton>
-                    <IconButton color="success" size="small" sx={{ mr: 1 }} onClick={() => handleOpenAbono(cliente)}>
+                    <IconButton color="success" size="small" sx={{ mr: 1 }} onClick={() => handleOpenAbono(cliente)} disabled={Boolean(deletingClienteId)}>
                       <AbonoIcon fontSize="small" />
                     </IconButton>
-                    <IconButton color="info" size="small" sx={{ mr: 1 }} onClick={() => handleOpenFiscal(cliente)}>
-                      <FiscalIcon fontSize="small" />
+                    <IconButton color="info" size="small" sx={{ mr: 1 }} onClick={() => handleOpenFiscal(cliente)} disabled={Boolean(deletingClienteId) || Boolean(loadingFiscalId)}>
+                      {loadingFiscalId === cliente.id ? <CircularProgress size={18} /> : <FiscalIcon fontSize="small" />}
                     </IconButton>
-                    <IconButton color="error" size="small" onClick={() => handleDeleteCliente(cliente.id)}>
-                      <DeleteIcon fontSize="small" />
+                    <IconButton color="error" size="small" onClick={() => handleDeleteCliente(cliente.id)} disabled={Boolean(deletingClienteId)}>
+                      {deletingClienteId === cliente.id ? <CircularProgress size={18} /> : <DeleteIcon fontSize="small" />}
                     </IconButton>
                   </TableCell>
                 </TableRow>
@@ -268,7 +290,7 @@ export function ClientesView() {
         </TableContainer>
       </Paper>
 
-      <Dialog open={openCliente} onClose={() => setOpenCliente(false)} maxWidth="sm" fullWidth>
+      <Dialog open={openCliente} onClose={savingCliente ? undefined : () => setOpenCliente(false)} maxWidth="sm" fullWidth>
         <DialogTitle>{editMode ? 'Editar cliente' : 'Nuevo cliente'}</DialogTitle>
         <Divider />
         <DialogContent sx={{ pt: 3 }}>
@@ -286,14 +308,20 @@ export function ClientesView() {
           </Box>
         </DialogContent>
         <DialogActions sx={{ p: 3, pt: 1 }}>
-          <Button onClick={() => setOpenCliente(false)}>Cancelar</Button>
-          <Button onClick={handleSaveCliente} variant="contained" startIcon={<SaveIcon />} disableElevation disabled={!nombre.trim()}>
-            Guardar
+          <Button onClick={() => setOpenCliente(false)} disabled={savingCliente}>Cancelar</Button>
+          <Button
+            onClick={handleSaveCliente}
+            variant="contained"
+            startIcon={savingCliente ? <CircularProgress size={18} color="inherit" /> : <SaveIcon />}
+            disableElevation
+            disabled={savingCliente || !nombre.trim()}
+          >
+            {savingCliente ? 'Guardando...' : 'Guardar'}
           </Button>
         </DialogActions>
       </Dialog>
 
-      <Dialog open={openAbono} onClose={() => setOpenAbono(false)} maxWidth="xs" fullWidth>
+      <Dialog open={openAbono} onClose={savingAbono ? undefined : () => setOpenAbono(false)} maxWidth="xs" fullWidth>
         <DialogTitle>Registrar abono</DialogTitle>
         <DialogContent sx={{ pt: 2 }}>
           <Typography variant="body2" sx={{ mb: 1.5 }}>
@@ -309,14 +337,19 @@ export function ClientesView() {
           />
         </DialogContent>
         <DialogActions sx={{ p: 2 }}>
-          <Button onClick={() => setOpenAbono(false)}>Cancelar</Button>
-          <Button variant="contained" onClick={handleRegistrarAbono} disabled={!Number(montoAbono || 0)}>
-            Registrar
+          <Button onClick={() => setOpenAbono(false)} disabled={savingAbono}>Cancelar</Button>
+          <Button
+            variant="contained"
+            onClick={handleRegistrarAbono}
+            startIcon={savingAbono ? <CircularProgress size={18} color="inherit" /> : undefined}
+            disabled={savingAbono || !Number(montoAbono || 0)}
+          >
+            {savingAbono ? 'Registrando...' : 'Registrar'}
           </Button>
         </DialogActions>
       </Dialog>
 
-      <Dialog open={openFiscal} onClose={() => setOpenFiscal(false)} maxWidth="sm" fullWidth>
+      <Dialog open={openFiscal} onClose={savingFiscal ? undefined : () => setOpenFiscal(false)} maxWidth="sm" fullWidth>
         <DialogTitle>Datos Fiscales (SAT)</DialogTitle>
         <Divider />
         <DialogContent sx={{ pt: 3 }}>
@@ -361,15 +394,15 @@ export function ClientesView() {
           </Box>
         </DialogContent>
         <DialogActions sx={{ p: 3, pt: 1 }}>
-          <Button onClick={() => setOpenFiscal(false)}>Cancelar</Button>
+          <Button onClick={() => setOpenFiscal(false)} disabled={savingFiscal}>Cancelar</Button>
           <Button
             variant="contained"
-            startIcon={<SaveIcon />}
+            startIcon={savingFiscal ? <CircularProgress size={18} color="inherit" /> : <SaveIcon />}
             onClick={handleGuardarFiscal}
-            disabled={rfc.trim().length < 12 || !razonSocial.trim() || !regimenFiscal || codigoPostalFiscal.trim().length !== 5}
+            disabled={savingFiscal || rfc.trim().length < 12 || !razonSocial.trim() || !regimenFiscal || codigoPostalFiscal.trim().length !== 5}
             disableElevation
           >
-            Guardar datos SAT
+            {savingFiscal ? 'Guardando...' : 'Guardar datos SAT'}
           </Button>
         </DialogActions>
       </Dialog>

@@ -21,6 +21,7 @@ const BACKUP_TABLES: &[&str] = &[
     "usuarios",
     "proveedores",
     "marcas",
+    "categorias",
     "unidades",
     "productos",
     "inventario_sucursal",
@@ -38,6 +39,8 @@ const BACKUP_TABLES: &[&str] = &[
     "mermas_ajustes",
     "movimientos_inventario",
     "facturas_emitidas",
+    "promociones",
+    "promocion_sucursales",
 ];
 
 const SYNC_TABLES: &[&str] = &[
@@ -46,6 +49,7 @@ const SYNC_TABLES: &[&str] = &[
     "usuarios",
     "proveedores",
     "marcas",
+    "categorias",
     "unidades",
     "productos",
     "inventario_sucursal",
@@ -63,6 +67,8 @@ const SYNC_TABLES: &[&str] = &[
     "mermas_ajustes",
     "movimientos_inventario",
     "facturas_emitidas",
+    "promociones",
+    "promocion_sucursales",
 ];
 
 const UUID_SYNC_TABLES: &[&str] = &[
@@ -84,24 +90,14 @@ const SOFT_DELETE_TABLES: &[&str] = &[
     "usuarios",
     "proveedores",
     "marcas",
+    "categorias",
     "unidades",
     "productos",
     "clientes",
+    "promociones",
 ];
 
 const AUTO_SYNC_BATCH_SIZE: usize = 50;
-const DELTA_PULL_TABLES: &[&str] = &[
-    "sucursales",
-    "proveedores",
-    "marcas",
-    "unidades",
-    "usuarios",
-    "productos",
-    "inventario_sucursal",
-    "clientes",
-    "clientes_datos_fiscales",
-];
-
 #[derive(Debug)]
 enum AppError {
     Db(String),
@@ -192,6 +188,13 @@ pub struct Marca {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
+pub struct Categoria {
+    id: String,
+    nombre: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct UnidadMedida {
     id: String,
     nombre: String,
@@ -252,6 +255,64 @@ pub struct ProductoConStock {
     sucursal_id: String,
     stock: f64,
     stock_minimo: f64,
+    precio_original: Option<f64>,
+    precio_descontado: Option<f64>,
+    nombre_promo: Option<String>,
+    promocion_id: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ProductoPromocionPrecio {
+    id: String,
+    codigo_barras: String,
+    codigo_proveedor: String,
+    clave_producto: String,
+    descripcion: String,
+    marca: String,
+    categoria: String,
+    unidad: String,
+    precio_costo: f64,
+    precio_venta: f64,
+    precio_costo_min: f64,
+    precio_costo_max: f64,
+    precio_venta_min: f64,
+    precio_venta_max: f64,
+    sucursales_con_precio: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct Promocion {
+    id: String,
+    nombre: String,
+    tipo_descuento: String,
+    valor: f64,
+    fecha_inicio: String,
+    fecha_fin: String,
+    activo: bool,
+    producto_id: Option<String>,
+    categoria_id: Option<String>,
+    marca: Option<String>,
+    eliminado: bool,
+    updated_at: String,
+    sucursal_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromocionInput {
+    id: String,
+    nombre: String,
+    tipo_descuento: String,
+    valor: f64,
+    fecha_inicio: String,
+    fecha_fin: String,
+    activo: bool,
+    producto_id: Option<String>,
+    categoria_id: Option<String>,
+    marca: Option<String>,
+    sucursal_ids: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -1013,6 +1074,16 @@ fn validate_marca(marca: &Marca) -> Result<(), AppError> {
     Ok(())
 }
 
+fn validate_categoria(categoria: &Categoria) -> Result<(), AppError> {
+    if categoria.id.trim().is_empty() {
+        return Err(AppError::Validation("La categoría necesita identificador interno.".to_string()));
+    }
+    if categoria.nombre.trim().is_empty() {
+        return Err(AppError::Validation("La categoría necesita nombre.".to_string()));
+    }
+    Ok(())
+}
+
 fn validate_unidad(unidad: &UnidadMedida) -> Result<(), AppError> {
     if unidad.id.trim().is_empty() {
         return Err(AppError::Validation("La unidad necesita identificador interno.".to_string()));
@@ -1382,6 +1453,21 @@ fn validate_abrir_caja_input(input: &AbrirCajaInput) -> Result<(), AppError> {
     Ok(())
 }
 
+fn normalize_money(value: f64, field_name: &str, allow_zero: bool) -> Result<f64, AppError> {
+    if !value.is_finite() {
+        return Err(AppError::Validation(format!("{field_name} debe ser un número válido.")));
+    }
+    if value < 0.0 || (!allow_zero && value <= 0.0) {
+        let message = if allow_zero {
+            format!("{field_name} no puede ser negativo.")
+        } else {
+            format!("{field_name} debe ser mayor que cero.")
+        };
+        return Err(AppError::Validation(message));
+    }
+    Ok((value * 100.0).round() / 100.0)
+}
+
 fn validate_movimiento_caja_input(input: &MovimientoCajaInput) -> Result<(), AppError> {
     if input.id.trim().is_empty() || input.sesion_id.trim().is_empty() {
         return Err(AppError::Validation("Datos incompletos para el movimiento de caja.".to_string()));
@@ -1426,6 +1512,10 @@ fn current_session_user(state_sesion: &tauri::State<SesionActual>) -> AppResult<
 
 fn is_superadmin(user: &Usuario) -> bool {
     user.role.eq_ignore_ascii_case("SUPERADMIN")
+}
+
+fn is_admin_or_superadmin_role(role: &str) -> bool {
+    matches!(role.to_ascii_uppercase().as_str(), "ADMIN" | "SUPERADMIN")
 }
 
 fn scoped_sucursal_for_read(user: &Usuario, requested_sucursal_id: Option<String>) -> Option<String> {
@@ -1536,7 +1626,11 @@ fn init_db(conn: &Connection) -> Result<(), AppError> {
         PRAGMA synchronous = NORMAL;
         PRAGMA busy_timeout = 5000;
         PRAGMA foreign_keys = ON;
+        "
+    )?;
 
+    conn.execute_batch(
+        "
         CREATE TABLE IF NOT EXISTS sucursales (
             id TEXT PRIMARY KEY,
             nombre TEXT NOT NULL,
@@ -1598,6 +1692,11 @@ fn init_db(conn: &Connection) -> Result<(), AppError> {
             nombre TEXT NOT NULL UNIQUE
         );
 
+        CREATE TABLE IF NOT EXISTS categorias (
+            id TEXT PRIMARY KEY,
+            nombre TEXT NOT NULL UNIQUE
+        );
+
         CREATE TABLE IF NOT EXISTS unidades (
             id TEXT PRIMARY KEY,
             nombre TEXT NOT NULL UNIQUE,
@@ -1632,6 +1731,33 @@ fn init_db(conn: &Connection) -> Result<(), AppError> {
             PRIMARY KEY (producto_id, sucursal_id),
             FOREIGN KEY (producto_id) REFERENCES productos(id) ON UPDATE CASCADE ON DELETE CASCADE,
             FOREIGN KEY (sucursal_id) REFERENCES sucursales(id) ON UPDATE CASCADE ON DELETE RESTRICT
+        );
+
+        CREATE TABLE IF NOT EXISTS promociones (
+            id TEXT PRIMARY KEY,
+            nombre TEXT NOT NULL,
+            tipo_descuento TEXT NOT NULL CHECK(tipo_descuento IN ('PORCENTAJE', 'MONTO_FIJO')),
+            valor REAL NOT NULL,
+            fecha_inicio TEXT NOT NULL,
+            fecha_fin TEXT NOT NULL,
+            activo INTEGER NOT NULL DEFAULT 1 CHECK(activo IN (0, 1)),
+            producto_id TEXT NULL,
+            categoria_id TEXT NULL,
+            marca TEXT NULL,
+            eliminado INTEGER NOT NULL DEFAULT 0 CHECK(eliminado IN (0, 1)),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            FOREIGN KEY (producto_id) REFERENCES productos(id) ON UPDATE CASCADE ON DELETE RESTRICT
+        );
+
+        CREATE TABLE IF NOT EXISTS promocion_sucursales (
+            promocion_id TEXT NOT NULL,
+            sucursal_id TEXT NOT NULL,
+            eliminado INTEGER NOT NULL DEFAULT 0 CHECK(eliminado IN (0, 1)),
+            sincronizado INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (promocion_id, sucursal_id),
+            FOREIGN KEY (promocion_id) REFERENCES promociones(id) ON UPDATE CASCADE ON DELETE CASCADE,
+            FOREIGN KEY (sucursal_id) REFERENCES sucursales(id) ON UPDATE CASCADE ON DELETE CASCADE
         );
 
         CREATE TABLE IF NOT EXISTS compras (
@@ -1805,6 +1931,7 @@ fn init_db(conn: &Connection) -> Result<(), AppError> {
 
         CREATE INDEX IF NOT EXISTS idx_productos_descripcion ON productos(descripcion);
         CREATE INDEX IF NOT EXISTS idx_marcas_nombre ON marcas(nombre);
+        CREATE INDEX IF NOT EXISTS idx_categorias_nombre ON categorias(nombre);
         CREATE INDEX IF NOT EXISTS idx_unidades_nombre ON unidades(nombre);
         CREATE INDEX IF NOT EXISTS idx_productos_codigo_barras ON productos(codigo_barras);
         CREATE INDEX IF NOT EXISTS idx_productos_clave_producto ON productos(clave_producto);
@@ -1815,6 +1942,10 @@ fn init_db(conn: &Connection) -> Result<(), AppError> {
         CREATE INDEX IF NOT EXISTS idx_productos_codigo_proveedor_nocase ON productos(codigo_proveedor COLLATE NOCASE);
         CREATE INDEX IF NOT EXISTS idx_productos_clave_producto_nocase ON productos(clave_producto COLLATE NOCASE);
         CREATE INDEX IF NOT EXISTS idx_inventario_sucursal_id ON inventario_sucursal(sucursal_id);
+        CREATE INDEX IF NOT EXISTS idx_promociones_producto ON promociones(producto_id);
+        CREATE INDEX IF NOT EXISTS idx_promociones_categoria ON promociones(categoria_id);
+        CREATE INDEX IF NOT EXISTS idx_promociones_vigencia ON promociones(activo, fecha_inicio, fecha_fin, eliminado);
+        CREATE INDEX IF NOT EXISTS idx_promocion_sucursales_sucursal ON promocion_sucursales(sucursal_id);
         CREATE INDEX IF NOT EXISTS idx_compras_sucursal_fecha ON compras(sucursal_id, fecha);
         CREATE INDEX IF NOT EXISTS idx_detalle_compras_compra ON detalle_compras(compra_id);
         CREATE INDEX IF NOT EXISTS idx_ventas_sucursal_fecha ON ventas(sucursal_id, fecha);
@@ -1849,7 +1980,56 @@ fn init_db(conn: &Connection) -> Result<(), AppError> {
     migrate_notificaciones(conn)?;
     migrate_marcas_unidades(conn)?;
     migrate_inventario_empresarial(conn)?;
+    migrate_promociones(conn)?;
     migrate_add_sincronizacion_fields(conn)?;
+    Ok(())
+}
+
+fn migrate_promociones(conn: &Connection) -> Result<(), AppError> {
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS promociones (
+            id TEXT PRIMARY KEY,
+            nombre TEXT NOT NULL,
+            tipo_descuento TEXT NOT NULL CHECK(tipo_descuento IN ('PORCENTAJE', 'MONTO_FIJO')),
+            valor REAL NOT NULL,
+            fecha_inicio TEXT NOT NULL,
+            fecha_fin TEXT NOT NULL,
+            activo INTEGER NOT NULL DEFAULT 1 CHECK(activo IN (0, 1)),
+            producto_id TEXT NULL,
+            categoria_id TEXT NULL,
+            marca TEXT NULL,
+            eliminado INTEGER NOT NULL DEFAULT 0 CHECK(eliminado IN (0, 1)),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            FOREIGN KEY (producto_id) REFERENCES productos(id) ON UPDATE CASCADE ON DELETE RESTRICT
+        );
+
+        CREATE TABLE IF NOT EXISTS promocion_sucursales (
+            promocion_id TEXT NOT NULL,
+            sucursal_id TEXT NOT NULL,
+            eliminado INTEGER NOT NULL DEFAULT 0 CHECK(eliminado IN (0, 1)),
+            sincronizado INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (promocion_id, sucursal_id),
+            FOREIGN KEY (promocion_id) REFERENCES promociones(id) ON UPDATE CASCADE ON DELETE CASCADE,
+            FOREIGN KEY (sucursal_id) REFERENCES sucursales(id) ON UPDATE CASCADE ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_promociones_producto ON promociones(producto_id);
+        CREATE INDEX IF NOT EXISTS idx_promociones_categoria ON promociones(categoria_id);
+        CREATE INDEX IF NOT EXISTS idx_promociones_vigencia ON promociones(activo, fecha_inicio, fecha_fin, eliminado);
+        CREATE INDEX IF NOT EXISTS idx_promocion_sucursales_sucursal ON promocion_sucursales(sucursal_id);
+        ",
+    )?;
+    if !table_has_column(conn, "promocion_sucursales", "eliminado")? {
+        conn.execute(
+            "ALTER TABLE promocion_sucursales ADD COLUMN eliminado INTEGER NOT NULL DEFAULT 0 CHECK(eliminado IN (0, 1))",
+            [],
+        )?;
+    }
+    if !table_has_column(conn, "promociones", "marca")? {
+        conn.execute("ALTER TABLE promociones ADD COLUMN marca TEXT NULL", [])?;
+    }
     Ok(())
 }
 
@@ -1860,12 +2040,17 @@ fn migrate_marcas_unidades(conn: &Connection) -> Result<(), AppError> {
             id TEXT PRIMARY KEY,
             nombre TEXT NOT NULL UNIQUE
         );
+        CREATE TABLE IF NOT EXISTS categorias (
+            id TEXT PRIMARY KEY,
+            nombre TEXT NOT NULL UNIQUE
+        );
         CREATE TABLE IF NOT EXISTS unidades (
             id TEXT PRIMARY KEY,
             nombre TEXT NOT NULL UNIQUE,
             clave_sat TEXT NOT NULL DEFAULT ''
         );
         CREATE INDEX IF NOT EXISTS idx_marcas_nombre ON marcas(nombre);
+        CREATE INDEX IF NOT EXISTS idx_categorias_nombre ON categorias(nombre);
         CREATE INDEX IF NOT EXISTS idx_unidades_nombre ON unidades(nombre);
         ",
     )?;
@@ -1884,6 +2069,23 @@ fn migrate_marcas_unidades(conn: &Connection) -> Result<(), AppError> {
             VALUES (?1, ?2)
             ",
             params![format!("MARCA-{}", normalize_upper_trim(&marca).replace(' ', "-")), marca],
+        )?;
+    }
+
+    let mut stmt = conn.prepare("SELECT DISTINCT TRIM(categoria) FROM productos WHERE TRIM(categoria) <> ''")?;
+    let categorias = stmt.query_map([], |row| row.get::<_, String>(0))?;
+    let mut categorias_existentes = Vec::new();
+    for categoria in categorias {
+        categorias_existentes.push(categoria?);
+    }
+    drop(stmt);
+    for categoria in categorias_existentes {
+        conn.execute(
+            "
+            INSERT OR IGNORE INTO categorias (id, nombre)
+            VALUES (?1, ?2)
+            ",
+            params![format!("CATEGORIA-{}", normalize_upper_trim(&categoria).replace(' ', "-")), categoria],
         )?;
     }
 
@@ -2122,6 +2324,15 @@ fn migrate_add_sincronizacion_fields(conn: &Connection) -> Result<(), AppError> 
         )?;
     }
 
+    conn.execute(
+        "
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_cajas_sesiones_abierta_unica
+        ON cajas_sesiones(usuario_id, sucursal_id)
+        WHERE estado = 'ABIERTA'
+        ",
+        [],
+    )?;
+
     create_sync_dirty_triggers(conn)?;
 
     Ok(())
@@ -2130,6 +2341,7 @@ fn migrate_add_sincronizacion_fields(conn: &Connection) -> Result<(), AppError> 
 fn sync_dirty_predicate(table: &str) -> Option<&'static str> {
     match table {
         "inventario_sucursal" => Some("producto_id = NEW.producto_id AND sucursal_id = NEW.sucursal_id"),
+        "promocion_sucursales" => Some("promocion_id = NEW.promocion_id AND sucursal_id = NEW.sucursal_id"),
         "clientes_datos_fiscales" => Some("cliente_id = NEW.cliente_id"),
         "empresa_config_fiscal" => Some("id = NEW.id"),
         "movimientos_inventario" => Some("uuid = NEW.uuid"),
@@ -2440,6 +2652,49 @@ fn get_sesion_actual(state_sesion: tauri::State<SesionActual>) -> AppResult<Opti
         .lock()
         .map_err(|_| "No se pudo leer la sesión actual.".to_string())?;
     Ok(sesion.clone())
+}
+
+#[tauri::command]
+fn cerrar_sesion_local(
+    state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
+) -> AppResult<()> {
+    let usuario_actual = {
+        let sesion = state_sesion
+            .0
+            .lock()
+            .map_err(|_| "No se pudo leer la sesión actual.".to_string())?;
+        sesion.clone()
+    };
+
+    if let Some(usuario) = usuario_actual {
+        let conn = get_conn(&state_db).map_err(to_command_error)?;
+        let cajas_abiertas: i64 = conn
+            .query_row(
+                "
+                SELECT COUNT(*)
+                FROM cajas_sesiones
+                WHERE usuario_id = ?1
+                  AND sucursal_id = ?2
+                  AND estado = 'ABIERTA'
+                ",
+                params![usuario.id, usuario.sucursal_id],
+                |row| row.get(0),
+            )
+            .map_err(AppError::from)
+            .map_err(to_command_error)?;
+
+        if cajas_abiertas > 0 {
+            return Err("No puedes cerrar sesión mientras tu caja esté ABIERTA. Realiza el corte de caja primero.".to_string());
+        }
+    }
+
+    let mut sesion = state_sesion
+        .0
+        .lock()
+        .map_err(|_| "No se pudo cerrar la sesión actual.".to_string())?;
+    *sesion = None;
+    Ok(())
 }
 
 #[tauri::command]
@@ -2959,6 +3214,83 @@ fn delete_marca(state_db: tauri::State<DbState>, id: String) -> AppResult<()> {
 }
 
 #[tauri::command]
+fn get_categorias(state_db: tauri::State<DbState>) -> AppResult<Vec<Categoria>> {
+    let conn = get_conn(&state_db).map_err(to_command_error)?;
+    let mut stmt = conn
+        .prepare("SELECT id, nombre FROM categorias WHERE eliminado = 0 ORDER BY nombre")
+        .map_err(AppError::from)
+        .map_err(to_command_error)?;
+    let iter = stmt
+        .query_map([], |row| Ok(Categoria { id: row.get(0)?, nombre: row.get(1)? }))
+        .map_err(AppError::from)
+        .map_err(to_command_error)?;
+    let mut categorias = Vec::new();
+    for item in iter {
+        categorias.push(item.map_err(AppError::from).map_err(to_command_error)?);
+    }
+    Ok(categorias)
+}
+
+#[tauri::command]
+fn create_categoria(state_db: tauri::State<DbState>, categoria: Categoria) -> AppResult<()> {
+    validate_categoria(&categoria).map_err(to_command_error)?;
+    let conn = get_conn(&state_db).map_err(to_command_error)?;
+    conn.execute(
+        "INSERT INTO categorias (id, nombre) VALUES (?1, ?2)",
+        params![categoria.id, categoria.nombre.trim()],
+    )
+    .map_err(|error| map_write_error(error, "categoría"))
+    .map_err(to_command_error)?;
+    Ok(())
+}
+
+#[tauri::command]
+fn update_categoria(state_db: tauri::State<DbState>, id: String, categoria: Categoria) -> AppResult<()> {
+    validate_categoria(&categoria).map_err(to_command_error)?;
+    let conn = get_conn(&state_db).map_err(to_command_error)?;
+    let affected = conn
+        .execute(
+            "UPDATE categorias SET nombre = ?1 WHERE id = ?2 AND eliminado = 0",
+            params![categoria.nombre.trim(), id],
+        )
+        .map_err(|error| map_write_error(error, "categoría"))
+        .map_err(to_command_error)?;
+    if affected == 0 {
+        return Err("No se encontró la categoría que intentas actualizar.".to_string());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn delete_categoria(state_db: tauri::State<DbState>, id: String) -> AppResult<()> {
+    let conn = get_conn(&state_db).map_err(to_command_error)?;
+    let categoria_nombre: String = conn
+        .query_row("SELECT nombre FROM categorias WHERE id = ?1 AND eliminado = 0", [&id], |row| row.get(0))
+        .optional()
+        .map_err(AppError::from)
+        .map_err(to_command_error)?
+        .ok_or_else(|| "No se encontró la categoría que intentas eliminar.".to_string())?;
+    let active_products: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM productos WHERE categoria = ?1 AND eliminado = 0",
+            [&categoria_nombre],
+            |row| row.get(0),
+        )
+        .map_err(AppError::from)
+        .map_err(to_command_error)?;
+    if active_products > 0 {
+        return Err("No se puede eliminar la categoría porque tiene productos asociados.".to_string());
+    }
+    conn.execute(
+        "UPDATE categorias SET eliminado = 1, sincronizado = 0, updated_at = datetime('now') WHERE id = ?1 AND eliminado = 0",
+        [&id],
+    )
+    .map_err(|error| map_write_error(error, "categoría"))
+    .map_err(to_command_error)?;
+    Ok(())
+}
+
+#[tauri::command]
 fn get_unidades(state_db: tauri::State<DbState>) -> AppResult<Vec<UnidadMedida>> {
     let conn = get_conn(&state_db).map_err(to_command_error)?;
     let mut stmt = conn
@@ -3263,6 +3595,97 @@ fn registrar_abono(state_db: tauri::State<DbState>, abono: AbonoCreditoInput) ->
     Ok(())
 }
 
+#[derive(Debug)]
+struct ActivePromotion {
+    id: String,
+    nombre: String,
+    tipo_descuento: String,
+    valor: f64,
+}
+
+fn discounted_price(precio: f64, tipo_descuento: &str, valor: f64) -> f64 {
+    let result = match tipo_descuento {
+        "PORCENTAJE" => precio * (1.0 - (valor / 100.0)),
+        "MONTO_FIJO" => precio - valor,
+        _ => precio,
+    };
+    round_money(result.max(0.0))
+}
+
+fn find_active_promotion(
+    conn: &Connection,
+    producto_id: &str,
+    categoria: &str,
+    marca: &str,
+    sucursal_id: &str,
+    precio_venta: f64,
+) -> Result<Option<ActivePromotion>, AppError> {
+    let mut stmt = conn.prepare(
+        "
+        SELECT pr.id, pr.nombre, pr.tipo_descuento, pr.valor
+        FROM promociones pr
+        INNER JOIN promocion_sucursales ps ON ps.promocion_id = pr.id
+        WHERE ps.sucursal_id = ?1
+          AND ps.eliminado = 0
+          AND pr.activo = 1
+          AND pr.eliminado = 0
+          AND datetime('now') >= datetime(pr.fecha_inicio)
+          AND datetime('now') <= datetime(pr.fecha_fin)
+          AND (
+            pr.producto_id = ?2
+            OR (
+              pr.producto_id IS NULL
+              AND COALESCE(NULLIF(pr.categoria_id, ''), '') = ?3
+            )
+            OR (
+              pr.producto_id IS NULL
+              AND pr.categoria_id IS NULL
+              AND COALESCE(NULLIF(pr.marca, ''), '') = ?4
+            )
+          )
+        ORDER BY pr.updated_at DESC
+        ",
+    )?;
+
+    let rows = stmt.query_map(params![sucursal_id, producto_id, categoria, marca], |row| {
+        Ok(ActivePromotion {
+            id: row.get(0)?,
+            nombre: row.get(1)?,
+            tipo_descuento: row.get(2)?,
+            valor: row.get(3)?,
+        })
+    })?;
+
+    let mut best: Option<ActivePromotion> = None;
+    let mut best_price = f64::MAX;
+    for item in rows {
+        let promo = item?;
+        let price = discounted_price(precio_venta, &promo.tipo_descuento, promo.valor);
+        if price < best_price {
+            best_price = price;
+            best = Some(promo);
+        }
+    }
+    Ok(best)
+}
+
+fn apply_active_promotion(conn: &Connection, product: &mut ProductoConStock) -> Result<(), AppError> {
+    let Some(promo) = find_active_promotion(conn, &product.id, &product.categoria, &product.marca, &product.sucursal_id, product.precio_venta)? else {
+        return Ok(());
+    };
+
+    let original = round_money(product.precio_venta);
+    let discounted = discounted_price(original, &promo.tipo_descuento, promo.valor);
+    if discounted < original {
+        product.precio_original = Some(original);
+        product.precio_descontado = Some(discounted);
+        product.nombre_promo = Some(promo.nombre);
+        product.promocion_id = Some(promo.id);
+        product.precio_venta = discounted;
+    }
+    Ok(())
+}
+
 #[tauri::command]
 fn get_productos_por_sucursal(
     state_db: tauri::State<DbState>,
@@ -3320,6 +3743,10 @@ fn get_productos_por_sucursal(
                 sucursal_id: row.get(14)?,
                 stock: row.get(15)?,
                 stock_minimo: row.get(16)?,
+                precio_original: None,
+                precio_descontado: None,
+                nombre_promo: None,
+                promocion_id: None,
             })
         })
         .map_err(AppError::from)
@@ -3327,7 +3754,9 @@ fn get_productos_por_sucursal(
 
     let mut productos = Vec::new();
     for item in iter {
-        productos.push(item.map_err(AppError::from).map_err(to_command_error)?);
+        let mut product = item.map_err(AppError::from).map_err(to_command_error)?;
+        apply_active_promotion(&conn, &mut product).map_err(to_command_error)?;
+        productos.push(product);
     }
 
     Ok(productos)
@@ -3422,6 +3851,436 @@ fn buscar_productos_por_sucursal(
                 sucursal_id: row.get(14)?,
                 stock: row.get(15)?,
                 stock_minimo: row.get(16)?,
+                precio_original: None,
+                precio_descontado: None,
+                nombre_promo: None,
+                promocion_id: None,
+            })
+        })
+        .map_err(AppError::from)
+        .map_err(to_command_error)?;
+
+    let mut productos = Vec::new();
+    for item in iter {
+        let mut product = item.map_err(AppError::from).map_err(to_command_error)?;
+        apply_active_promotion(&conn, &mut product).map_err(to_command_error)?;
+        productos.push(product);
+    }
+
+    Ok(productos)
+}
+
+#[tauri::command]
+fn asegurar_producto_venta_diversa(
+    state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
+    sucursal_id: String,
+) -> AppResult<ProductoConStock> {
+    let user = current_session_user(&state_sesion)?;
+    if !is_admin_or_superadmin_role(&user.role) {
+        return Err("Solo ADMIN o SUPERADMIN pueden usar venta rápida de artículo diverso.".to_string());
+    }
+    if !is_superadmin(&user) && user.sucursal_id != sucursal_id {
+        return Err("No puedes crear venta rápida para otra sucursal.".to_string());
+    }
+
+    let conn = get_conn(&state_db).map_err(to_command_error)?;
+    conn.execute(
+        "
+        INSERT OR IGNORE INTO proveedores (
+            id, nombre, contacto_nombre, telefono, email, direccion, eliminado, sincronizado, updated_at
+        ) VALUES (
+            'PROVEEDOR-VENTA-DIVERSA', 'Proveedor interno venta diversa', '', '', '', '',
+            0, 0, datetime('now')
+        )
+        ",
+        [],
+    )
+    .map_err(|error| map_write_error(error, "proveedor interno"))
+    .map_err(to_command_error)?;
+
+    conn.execute(
+        "
+        INSERT INTO productos (
+            id, codigo_barras, codigo_proveedor, proveedor_id, clave_producto, descripcion,
+            marca, categoria, unidad, precio_costo, costo_promedio, precio_venta,
+            sat_clave_prod_serv, sat_clave_unidad, eliminado, sincronizado, updated_at
+        ) VALUES (
+            'VENTA-DIVERSA', 'VENTA-DIVERSA', 'VENTA-DIVERSA', 'PROVEEDOR-VENTA-DIVERSA',
+            'VENTA_DIVERSA', 'Artículo diverso', 'Sin marca', 'Venta rápida', 'Pieza',
+            0, 0, 0, '01010101', 'H87', 0, 0, datetime('now')
+        )
+        ON CONFLICT(id) DO UPDATE SET
+            eliminado = 0,
+            sincronizado = 0,
+            updated_at = datetime('now')
+        ",
+        [],
+    )
+    .map_err(|error| map_write_error(error, "producto de venta diversa"))
+    .map_err(to_command_error)?;
+
+    conn.execute(
+        "
+        INSERT INTO inventario_sucursal (
+            producto_id, sucursal_id, stock, stock_minimo, costo_promedio, precio_venta,
+            sincronizado, updated_at
+        ) VALUES (
+            'VENTA-DIVERSA', ?1, 1000000, 0, 0, 0, 0, datetime('now')
+        )
+        ON CONFLICT(producto_id, sucursal_id) DO UPDATE SET
+            stock = CASE WHEN inventario_sucursal.stock < 100000 THEN 1000000 ELSE inventario_sucursal.stock END,
+            sincronizado = 0,
+            updated_at = datetime('now')
+        ",
+        [&sucursal_id],
+    )
+    .map_err(|error| map_write_error(error, "inventario de venta diversa"))
+    .map_err(to_command_error)?;
+
+    Ok(ProductoConStock {
+        id: "VENTA-DIVERSA".to_string(),
+        codigo_barras: "VENTA-DIVERSA".to_string(),
+        codigo_proveedor: "VENTA-DIVERSA".to_string(),
+        proveedor_id: "PROVEEDOR-VENTA-DIVERSA".to_string(),
+        clave_producto: "VENTA_DIVERSA".to_string(),
+        descripcion: "Artículo diverso".to_string(),
+        marca: "Sin marca".to_string(),
+        categoria: "Venta rápida".to_string(),
+        unidad: "Pieza".to_string(),
+        precio_costo: 0.0,
+        costo_promedio: 0.0,
+        precio_venta: 0.0,
+        sat_clave_prod_serv: "01010101".to_string(),
+        sat_clave_unidad: "H87".to_string(),
+        sucursal_id,
+        stock: 1000000.0,
+        stock_minimo: 0.0,
+        precio_original: None,
+        precio_descontado: None,
+        nombre_promo: None,
+        promocion_id: None,
+    })
+}
+
+fn normalize_promocion_input(input: PromocionInput) -> PromocionInput {
+    PromocionInput {
+        id: input.id.trim().to_string(),
+        nombre: input.nombre.trim().to_string(),
+        tipo_descuento: input.tipo_descuento.trim().to_uppercase(),
+        valor: input.valor,
+        fecha_inicio: input.fecha_inicio.trim().to_string(),
+        fecha_fin: input.fecha_fin.trim().to_string(),
+        activo: input.activo,
+        producto_id: input
+            .producto_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string),
+        categoria_id: input
+            .categoria_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string),
+        marca: input
+            .marca
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string),
+        sucursal_ids: input
+            .sucursal_ids
+            .into_iter()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .collect(),
+    }
+}
+
+fn validate_promocion_input(input: &PromocionInput) -> AppResult<()> {
+    if input.id.is_empty() || input.nombre.is_empty() {
+        return Err("La promoción necesita identificador y nombre.".to_string());
+    }
+    if !matches!(input.tipo_descuento.as_str(), "PORCENTAJE" | "MONTO_FIJO") {
+        return Err("El tipo de descuento debe ser PORCENTAJE o MONTO_FIJO.".to_string());
+    }
+    if input.valor <= 0.0 {
+        return Err("El valor del descuento debe ser mayor que cero.".to_string());
+    }
+    if input.tipo_descuento == "PORCENTAJE" && input.valor > 100.0 {
+        return Err("El porcentaje de descuento no puede ser mayor a 100%.".to_string());
+    }
+    if input.fecha_inicio.is_empty() || input.fecha_fin.is_empty() {
+        return Err("La promoción necesita fecha de inicio y fecha fin.".to_string());
+    }
+    
+    let has_producto = input.producto_id.is_some();
+    let has_categoria = input.categoria_id.is_some();
+    let has_marca = input.marca.is_some();
+    
+    if !has_producto && !has_categoria && !has_marca {
+        return Err("Selecciona un producto, una categoría o una marca para la promoción.".to_string());
+    }
+    
+    let active_targets = [has_producto, has_categoria, has_marca].iter().filter(|&&b| b).count();
+    if active_targets > 1 {
+        return Err("La promoción debe aplicar a producto, categoría o marca, pero solo a uno a la vez.".to_string());
+    }
+
+    if input.sucursal_ids.is_empty() {
+        return Err("Selecciona al menos una sucursal para la promoción.".to_string());
+    }
+    Ok(())
+}
+
+fn scoped_promocion_sucursales(actor: &Usuario, requested: &[String]) -> Vec<String> {
+    if is_superadmin(actor) {
+        requested.to_vec()
+    } else {
+        vec![actor.sucursal_id.clone()]
+    }
+}
+
+fn ensure_sucursales_exist(conn: &Connection, sucursal_ids: &[String]) -> AppResult<()> {
+    for sucursal_id in sucursal_ids {
+        let exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sucursales WHERE id = ?1 AND eliminado = 0",
+                [sucursal_id],
+                |row| row.get(0),
+            )
+            .map_err(AppError::from)
+            .map_err(to_command_error)?;
+        if exists == 0 {
+            return Err(format!("La sucursal {sucursal_id} no existe o está eliminada."));
+        }
+    }
+    Ok(())
+}
+
+fn validate_promocion_no_loss(
+    conn: &Connection,
+    input: &PromocionInput,
+    sucursal_ids: &[String],
+) -> AppResult<()> {
+    let placeholders = vec!["?"; sucursal_ids.len()].join(", ");
+    let target_filter = if input.producto_id.is_some() {
+        "p.id = ?"
+    } else if input.categoria_id.is_some() {
+        "p.categoria = ?"
+    } else {
+        "p.marca = ?"
+    };
+    let sql = format!(
+        "
+        SELECT p.descripcion, s.nombre,
+               COALESCE(NULLIF(i.precio_venta, 0), p.precio_venta) AS precio,
+               COALESCE(NULLIF(i.costo_promedio, 0), NULLIF(p.costo_promedio, 0), p.precio_costo) AS costo
+        FROM productos p
+        INNER JOIN inventario_sucursal i ON i.producto_id = p.id
+        INNER JOIN sucursales s ON s.id = i.sucursal_id
+        WHERE p.eliminado = 0
+          AND i.sucursal_id IN ({placeholders})
+          AND {target_filter}
+        "
+    );
+    let mut values: Vec<Value> = sucursal_ids.iter().cloned().map(Value::Text).collect();
+    values.push(Value::Text(
+        input
+            .producto_id
+            .clone()
+            .or_else(|| input.categoria_id.clone())
+            .or_else(|| input.marca.clone())
+            .unwrap_or_default(),
+    ));
+
+    let mut stmt = conn.prepare(&sql).map_err(AppError::from).map_err(to_command_error)?;
+    let mut rows = stmt
+        .query(params_from_iter(values.iter()))
+        .map_err(AppError::from)
+        .map_err(to_command_error)?;
+    let mut checked = 0;
+    while let Some(row) = rows.next().map_err(AppError::from).map_err(to_command_error)? {
+        checked += 1;
+        let descripcion: String = row.get(0).map_err(AppError::from).map_err(to_command_error)?;
+        let sucursal: String = row.get(1).map_err(AppError::from).map_err(to_command_error)?;
+        let precio: f64 = row.get(2).map_err(AppError::from).map_err(to_command_error)?;
+        let costo: f64 = row.get(3).map_err(AppError::from).map_err(to_command_error)?;
+        let precio_final = discounted_price(precio, &input.tipo_descuento, input.valor);
+        if precio_final + 0.0001 < costo {
+            return Err(format!(
+                "Promoción rechazada: '{}' en '{}' quedaría en ${:.2}, por debajo de su costo ${:.2}.",
+                descripcion, sucursal, precio_final, costo
+            ));
+        }
+    }
+
+    if checked == 0 {
+        return Err("La promoción no coincide con productos activos en las sucursales seleccionadas.".to_string());
+    }
+    Ok(())
+}
+
+fn get_promocion_sucursal_ids(conn: &Connection, promocion_id: &str) -> AppResult<Vec<String>> {
+    let mut stmt = conn
+        .prepare("SELECT sucursal_id FROM promocion_sucursales WHERE promocion_id = ?1 AND eliminado = 0 ORDER BY sucursal_id")
+        .map_err(AppError::from)
+        .map_err(to_command_error)?;
+    let iter = stmt
+        .query_map([promocion_id], |row| row.get::<_, String>(0))
+        .map_err(AppError::from)
+        .map_err(to_command_error)?;
+    let mut ids = Vec::new();
+    for item in iter {
+        ids.push(item.map_err(AppError::from).map_err(to_command_error)?);
+    }
+    Ok(ids)
+}
+
+#[tauri::command]
+fn get_promociones(
+    state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
+) -> AppResult<Vec<Promocion>> {
+    let conn = get_conn(&state_db).map_err(to_command_error)?;
+    let actor = current_session_user(&state_sesion)?;
+    let mut sql = String::from(
+        "
+        SELECT DISTINCT pr.id, pr.nombre, pr.tipo_descuento, pr.valor, pr.fecha_inicio, pr.fecha_fin,
+               pr.activo, pr.producto_id, pr.categoria_id, pr.marca, pr.eliminado, pr.updated_at
+        FROM promociones pr
+        INNER JOIN promocion_sucursales ps ON ps.promocion_id = pr.id
+        WHERE pr.eliminado = 0
+          AND ps.eliminado = 0
+        ",
+    );
+    let mut params_vec: Vec<String> = Vec::new();
+    if !is_superadmin(&actor) {
+        sql.push_str(" AND ps.sucursal_id = ?1");
+        params_vec.push(actor.sucursal_id.clone());
+    }
+    sql.push_str(" ORDER BY pr.fecha_inicio DESC, pr.nombre");
+
+    let mut stmt = conn.prepare(&sql).map_err(AppError::from).map_err(to_command_error)?;
+    let iter = stmt
+        .query_map(params_from_iter(params_vec.iter()), |row| {
+            let activo_int: i64 = row.get(6)?;
+            let eliminado_int: i64 = row.get(10)?;
+            Ok(Promocion {
+                id: row.get(0)?,
+                nombre: row.get(1)?,
+                tipo_descuento: row.get(2)?,
+                valor: row.get(3)?,
+                fecha_inicio: row.get(4)?,
+                fecha_fin: row.get(5)?,
+                activo: activo_int == 1,
+                producto_id: row.get(7)?,
+                categoria_id: row.get(8)?,
+                marca: row.get(9)?,
+                eliminado: eliminado_int == 1,
+                updated_at: row.get(11)?,
+                sucursal_ids: Vec::new(),
+            })
+        })
+        .map_err(AppError::from)
+        .map_err(to_command_error)?;
+
+    let mut promociones = Vec::new();
+    for item in iter {
+        let mut promo = item.map_err(AppError::from).map_err(to_command_error)?;
+        promo.sucursal_ids = get_promocion_sucursal_ids(&conn, &promo.id)?;
+        promociones.push(promo);
+    }
+    Ok(promociones)
+}
+
+#[tauri::command]
+fn get_productos_para_promociones(
+    state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
+    sucursal_ids: Vec<String>,
+) -> AppResult<Vec<ProductoPromocionPrecio>> {
+    let conn = get_conn(&state_db).map_err(to_command_error)?;
+    let actor = current_session_user(&state_sesion)?;
+    let scoped_ids = if is_superadmin(&actor) {
+        if sucursal_ids.is_empty() {
+            let mut stmt = conn
+                .prepare("SELECT id FROM sucursales WHERE eliminado = 0 ORDER BY nombre")
+                .map_err(AppError::from)
+                .map_err(to_command_error)?;
+            let iter = stmt
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(AppError::from)
+                .map_err(to_command_error)?;
+            let mut ids = Vec::new();
+            for item in iter {
+                ids.push(item.map_err(AppError::from).map_err(to_command_error)?);
+            }
+            ids
+        } else {
+            sucursal_ids
+        }
+    } else {
+        vec![actor.sucursal_id]
+    };
+
+    if scoped_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    ensure_sucursales_exist(&conn, &scoped_ids)?;
+
+    let placeholders = vec!["?"; scoped_ids.len()].join(", ");
+    let sql = format!(
+        "
+        SELECT
+            p.id,
+            p.codigo_barras,
+            p.codigo_proveedor,
+            p.clave_producto,
+            p.descripcion,
+            p.marca,
+            p.categoria,
+            p.unidad,
+            MIN(COALESCE(NULLIF(i.costo_promedio, 0), NULLIF(p.costo_promedio, 0), p.precio_costo)) AS precio_costo_min,
+            MAX(COALESCE(NULLIF(i.costo_promedio, 0), NULLIF(p.costo_promedio, 0), p.precio_costo)) AS precio_costo_max,
+            MIN(COALESCE(NULLIF(i.precio_venta, 0), p.precio_venta)) AS precio_venta_min,
+            MAX(COALESCE(NULLIF(i.precio_venta, 0), p.precio_venta)) AS precio_venta_max,
+            COUNT(DISTINCT i.sucursal_id) AS sucursales_con_precio
+        FROM productos p
+        INNER JOIN inventario_sucursal i ON i.producto_id = p.id
+        WHERE p.eliminado = 0
+          AND i.sucursal_id IN ({placeholders})
+        GROUP BY p.id, p.codigo_barras, p.codigo_proveedor, p.clave_producto,
+                 p.descripcion, p.marca, p.categoria, p.unidad
+        ORDER BY p.descripcion COLLATE NOCASE
+        "
+    );
+
+    let mut stmt = conn.prepare(&sql).map_err(AppError::from).map_err(to_command_error)?;
+    let iter = stmt
+        .query_map(params_from_iter(scoped_ids.iter()), |row| {
+            let precio_costo_min: f64 = row.get(8)?;
+            let precio_costo_max: f64 = row.get(9)?;
+            let precio_venta_min: f64 = row.get(10)?;
+            let precio_venta_max: f64 = row.get(11)?;
+            Ok(ProductoPromocionPrecio {
+                id: row.get(0)?,
+                codigo_barras: row.get(1)?,
+                codigo_proveedor: row.get(2)?,
+                clave_producto: row.get(3)?,
+                descripcion: row.get(4)?,
+                marca: row.get(5)?,
+                categoria: row.get(6)?,
+                unidad: row.get(7)?,
+                precio_costo: precio_costo_max,
+                precio_venta: precio_venta_min,
+                precio_costo_min,
+                precio_costo_max,
+                precio_venta_min,
+                precio_venta_max,
+                sucursales_con_precio: row.get(12)?,
             })
         })
         .map_err(AppError::from)
@@ -3431,8 +4290,124 @@ fn buscar_productos_por_sucursal(
     for item in iter {
         productos.push(item.map_err(AppError::from).map_err(to_command_error)?);
     }
-
     Ok(productos)
+}
+
+#[tauri::command]
+fn guardar_promocion(
+    state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
+    promocion: PromocionInput,
+) -> AppResult<()> {
+    let promocion = normalize_promocion_input(promocion);
+    validate_promocion_input(&promocion)?;
+    let actor = current_session_user(&state_sesion)?;
+    let sucursal_ids = scoped_promocion_sucursales(&actor, &promocion.sucursal_ids);
+    let mut conn = get_conn(&state_db).map_err(to_command_error)?;
+    ensure_sucursales_exist(&conn, &sucursal_ids)?;
+    validate_promocion_no_loss(&conn, &promocion, &sucursal_ids)?;
+
+    if !is_superadmin(&actor) {
+        let current_ids = get_promocion_sucursal_ids(&conn, &promocion.id).unwrap_or_default();
+        if !current_ids.is_empty() && !current_ids.iter().all(|id| id == &actor.sucursal_id) {
+            return Err("Operación inválida: un administrador solo puede modificar promociones de su sucursal.".to_string());
+        }
+    }
+
+    let tx = conn.transaction().map_err(AppError::from).map_err(to_command_error)?;
+    tx.execute(
+        "
+        INSERT INTO promociones (
+            id, nombre, tipo_descuento, valor, fecha_inicio, fecha_fin, activo,
+            producto_id, categoria_id, marca, eliminado, sincronizado, updated_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 0, 0, datetime('now'))
+        ON CONFLICT(id) DO UPDATE SET
+            nombre = excluded.nombre,
+            tipo_descuento = excluded.tipo_descuento,
+            valor = excluded.valor,
+            fecha_inicio = excluded.fecha_inicio,
+            fecha_fin = excluded.fecha_fin,
+            activo = excluded.activo,
+            producto_id = excluded.producto_id,
+            categoria_id = excluded.categoria_id,
+            marca = excluded.marca,
+            eliminado = 0,
+            sincronizado = 0,
+            updated_at = datetime('now')
+        ",
+        params![
+            promocion.id,
+            promocion.nombre,
+            promocion.tipo_descuento,
+            promocion.valor,
+            promocion.fecha_inicio,
+            promocion.fecha_fin,
+            if promocion.activo { 1 } else { 0 },
+            promocion.producto_id,
+            promocion.categoria_id,
+            promocion.marca
+        ],
+    )
+    .map_err(|error| map_write_error(error, "promoción"))
+    .map_err(to_command_error)?;
+
+    tx.execute(
+        "
+        UPDATE promocion_sucursales
+        SET eliminado = 1,
+            sincronizado = 0,
+            updated_at = datetime('now')
+        WHERE promocion_id = ?1
+        ",
+        [&promocion.id],
+    )
+    .map_err(|error| map_write_error(error, "sucursales de promoción"))
+    .map_err(to_command_error)?;
+    for sucursal_id in sucursal_ids {
+        tx.execute(
+            "
+            INSERT INTO promocion_sucursales (promocion_id, sucursal_id, eliminado, sincronizado, updated_at)
+            VALUES (?1, ?2, 0, 0, datetime('now'))
+            ON CONFLICT(promocion_id, sucursal_id) DO UPDATE SET
+                eliminado = 0,
+                sincronizado = 0,
+                updated_at = datetime('now')
+            ",
+            params![promocion.id, sucursal_id],
+        )
+        .map_err(|error| map_write_error(error, "sucursales de promoción"))
+        .map_err(to_command_error)?;
+    }
+
+    tx.commit().map_err(AppError::from).map_err(to_command_error)?;
+    Ok(())
+}
+
+#[tauri::command]
+fn eliminar_promocion(
+    state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
+    id: String,
+) -> AppResult<()> {
+    let conn = get_conn(&state_db).map_err(to_command_error)?;
+    let actor = current_session_user(&state_sesion)?;
+    if !is_superadmin(&actor) {
+        let current_ids = get_promocion_sucursal_ids(&conn, &id)?;
+        if current_ids.is_empty() || !current_ids.iter().all(|sucursal_id| sucursal_id == &actor.sucursal_id) {
+            return Err("Operación inválida: un administrador solo puede eliminar promociones de su sucursal.".to_string());
+        }
+    }
+    let affected = conn
+        .execute(
+            "UPDATE promociones SET eliminado = 1, activo = 0, sincronizado = 0, updated_at = datetime('now') WHERE id = ?1 AND eliminado = 0",
+            [id],
+        )
+        .map_err(|error| map_write_error(error, "promoción"))
+        .map_err(to_command_error)?;
+    if affected == 0 {
+        return Err("No se encontró la promoción indicada.".to_string());
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -4049,9 +5024,12 @@ fn abrir_caja(
     apertura: AbrirCajaInput,
 ) -> AppResult<CajaEstado> {
     validate_abrir_caja_input(&apertura).map_err(to_command_error)?;
-    let conn = get_conn(&state_db).map_err(to_command_error)?;
+    let monto_inicial = normalize_money(apertura.monto_inicial, "El fondo inicial", true)
+        .map_err(to_command_error)?;
+    let mut conn = get_conn(&state_db).map_err(to_command_error)?;
+    let tx = conn.transaction().map_err(AppError::from).map_err(to_command_error)?;
 
-    let abierta_actual: i64 = conn
+    let abierta_actual: i64 = tx
         .query_row(
             "
             SELECT COUNT(*)
@@ -4068,18 +5046,20 @@ fn abrir_caja(
         return Err("Ya existe una caja ABIERTA para este usuario en esta sucursal.".to_string());
     }
 
-    conn.execute(
+    tx.execute(
         "
         INSERT INTO cajas_sesiones (
-            id, usuario_id, sucursal_id, fecha_apertura, monto_inicial, fecha_cierre, monto_final_real, monto_esperado, estado
-        ) VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL, ?5, 'ABIERTA')
+            id, usuario_id, sucursal_id, fecha_apertura, monto_inicial, fecha_cierre,
+            monto_final_real, monto_esperado, estado, sync_uuid, sincronizado, updated_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL, ?5, 'ABIERTA', ?6, 0, datetime('now'))
         ",
         params![
             apertura.id,
             apertura.usuario_id,
             apertura.sucursal_id,
             apertura.fecha_apertura,
-            apertura.monto_inicial
+            monto_inicial,
+            generate_uuid_like()
         ],
     )
     .map_err(|error| map_write_error(error, "sesión de caja"))
@@ -4090,14 +5070,16 @@ fn abrir_caja(
         usuario_id: apertura.usuario_id,
         sucursal_id: apertura.sucursal_id,
         fecha_apertura: apertura.fecha_apertura,
-        monto_inicial: apertura.monto_inicial,
+        monto_inicial,
         fecha_cierre: None,
         monto_final_real: None,
-        monto_esperado: apertura.monto_inicial,
+        monto_esperado: monto_inicial,
         estado: "ABIERTA".to_string(),
     };
 
-    calcular_resumen_caja(&conn, &sesion).map_err(to_command_error)
+    let resumen = calcular_resumen_caja(&tx, &sesion).map_err(to_command_error)?;
+    tx.commit().map_err(AppError::from).map_err(to_command_error)?;
+    Ok(resumen)
 }
 
 #[tauri::command]
@@ -4106,9 +5088,12 @@ fn registrar_movimiento_caja(
     movimiento: MovimientoCajaInput,
 ) -> AppResult<CajaEstado> {
     validate_movimiento_caja_input(&movimiento).map_err(to_command_error)?;
-    let conn = get_conn(&state_db).map_err(to_command_error)?;
+    let monto = normalize_money(movimiento.monto, "El monto del movimiento", false)
+        .map_err(to_command_error)?;
+    let mut conn = get_conn(&state_db).map_err(to_command_error)?;
+    let tx = conn.transaction().map_err(AppError::from).map_err(to_command_error)?;
 
-    let sesion = conn
+    let sesion = tx
         .query_row(
             "
             SELECT id, usuario_id, sucursal_id, fecha_apertura, monto_inicial, fecha_cierre, monto_final_real, monto_esperado, estado
@@ -4137,27 +5122,36 @@ fn registrar_movimiento_caja(
         return Err("Solo se pueden registrar movimientos en una caja ABIERTA.".to_string());
     }
 
-    conn.execute(
-        "INSERT INTO caja_movimientos (id, sesion_id, tipo, monto, motivo) VALUES (?1, ?2, ?3, ?4, ?5)",
+    tx.execute(
+        "
+        INSERT INTO caja_movimientos (id, sesion_id, tipo, monto, motivo, sync_uuid, sincronizado, updated_at)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, datetime('now'))
+        ",
         params![
             movimiento.id,
             movimiento.sesion_id,
             movimiento.tipo,
-            movimiento.monto,
-            movimiento.motivo
+            monto,
+            movimiento.motivo.trim(),
+            generate_uuid_like()
         ],
     )
     .map_err(|error| map_write_error(error, "movimiento de caja"))
     .map_err(to_command_error)?;
 
-    let resumen = calcular_resumen_caja(&conn, &sesion).map_err(to_command_error)?;
-    conn.execute(
-        "UPDATE cajas_sesiones SET monto_esperado = ?1 WHERE id = ?2",
+    let resumen = calcular_resumen_caja(&tx, &sesion).map_err(to_command_error)?;
+    let affected = tx
+        .execute(
+        "UPDATE cajas_sesiones SET monto_esperado = ?1, sincronizado = 0, updated_at = datetime('now') WHERE id = ?2 AND estado = 'ABIERTA'",
         params![resumen.monto_esperado_actual, sesion.id],
     )
     .map_err(AppError::from)
     .map_err(to_command_error)?;
+    if affected != 1 {
+        return Err("La caja cambió de estado antes de confirmar el movimiento. Intenta de nuevo.".to_string());
+    }
 
+    tx.commit().map_err(AppError::from).map_err(to_command_error)?;
     Ok(resumen)
 }
 
@@ -4167,9 +5161,12 @@ fn cerrar_caja(
     cierre: CerrarCajaInput,
 ) -> AppResult<CajaEstado> {
     validate_cerrar_caja_input(&cierre).map_err(to_command_error)?;
-    let conn = get_conn(&state_db).map_err(to_command_error)?;
+    let monto_final_real = normalize_money(cierre.monto_final_real, "El monto final real", true)
+        .map_err(to_command_error)?;
+    let mut conn = get_conn(&state_db).map_err(to_command_error)?;
+    let tx = conn.transaction().map_err(AppError::from).map_err(to_command_error)?;
 
-    let sesion = conn
+    let sesion = tx
         .query_row(
             "
             SELECT id, usuario_id, sucursal_id, fecha_apertura, monto_inicial, fecha_cierre, monto_final_real, monto_esperado, estado
@@ -4198,30 +5195,41 @@ fn cerrar_caja(
         return Err("La caja seleccionada ya está cerrada.".to_string());
     }
 
-    let resumen = calcular_resumen_caja(&conn, &sesion).map_err(to_command_error)?;
-    conn.execute(
+    let resumen = calcular_resumen_caja(&tx, &sesion).map_err(to_command_error)?;
+    if resumen.monto_esperado_actual > 0.0 && monto_final_real <= 0.0 {
+        return Err("No puedes cerrar la caja en $0.00 cuando el monto esperado es mayor a cero.".to_string());
+    }
+
+    let affected = tx.execute(
         "
         UPDATE cajas_sesiones
         SET fecha_cierre = ?1,
             monto_final_real = ?2,
             monto_esperado = ?3,
-            estado = 'CERRADA'
-        WHERE id = ?4
+            estado = 'CERRADA',
+            sincronizado = 0,
+            updated_at = datetime('now')
+        WHERE id = ?4 AND estado = 'ABIERTA'
         ",
         params![
             cierre.fecha_cierre,
-            cierre.monto_final_real,
+            monto_final_real,
             resumen.monto_esperado_actual,
             cierre.sesion_id
         ],
     )
     .map_err(|error| map_write_error(error, "cierre de caja"))
     .map_err(to_command_error)?;
+    if affected != 1 {
+        return Err("La caja ya no está ABIERTA. No se aplicó el cierre.".to_string());
+    }
+
+    tx.commit().map_err(AppError::from).map_err(to_command_error)?;
 
     Ok(CajaEstado {
         sesion: CajaSesion {
             fecha_cierre: Some(cierre.fecha_cierre),
-            monto_final_real: Some(cierre.monto_final_real),
+            monto_final_real: Some(monto_final_real),
             monto_esperado: resumen.monto_esperado_actual,
             estado: "CERRADA".to_string(),
             ..sesion
@@ -4692,6 +5700,32 @@ fn round_money(value: f64) -> f64 {
     (value * 100.0).round() / 100.0
 }
 
+fn money_to_cents(value: f64) -> i64 {
+    (value * 100.0).round() as i64
+}
+
+fn cents_to_money(value: i64) -> f64 {
+    value as f64 / 100.0
+}
+
+fn validate_sat_concept_keys(clave_prod_serv: &str, clave_unidad: &str, descripcion: &str) -> AppResult<()> {
+    let clave_prod_serv = clave_prod_serv.trim();
+    let clave_unidad = clave_unidad.trim();
+    if clave_prod_serv.len() != 8 || !clave_prod_serv.chars().all(|c| c.is_ascii_digit()) {
+        return Err(format!(
+            "El producto '{}' debe tener Clave Producto/Servicio SAT de 8 digitos.",
+            descripcion
+        ));
+    }
+    if clave_unidad.len() != 3 {
+        return Err(format!(
+            "El producto '{}' debe tener Clave Unidad SAT de exactamente 3 caracteres.",
+            descripcion
+        ));
+    }
+    Ok(())
+}
+
 fn cfdi_forma_pago(metodo_pago: &str) -> String {
     match metodo_pago {
         "EFECTIVO" => "01",
@@ -4942,9 +5976,11 @@ fn get_payload_factura(
             let clave_prod_serv: String = row.get(4)?;
             let clave_unidad: String = row.get(5)?;
             let cantidad: f64 = row.get(6)?;
-            let valor_unitario: f64 = row.get(7)?;
+            let precio_neto_unitario: f64 = row.get(7)?;
+            let valor_unitario = round_money(precio_neto_unitario / 1.16);
             let importe = round_money(cantidad * valor_unitario);
-            let iva = round_money(importe * 0.16);
+            let total_linea = round_money(cantidad * precio_neto_unitario);
+            let iva = round_money(total_linea - importe);
 
             Ok(CfdiConcepto {
                 producto_id,
@@ -4954,7 +5990,7 @@ fn get_payload_factura(
                 clave_unidad,
                 unidad,
                 descripcion,
-                valor_unitario: round_money(valor_unitario),
+                valor_unitario,
                 importe,
                 objeto_imp: "02".to_string(),
                 impuestos: vec![CfdiImpuestoTraslado {
@@ -4972,12 +6008,11 @@ fn get_payload_factura(
     let mut conceptos = Vec::new();
     for item in iter {
         let concepto = item.map_err(AppError::from).map_err(to_command_error)?;
-        if concepto.clave_prod_serv.trim().is_empty() || concepto.clave_unidad.trim().is_empty() {
-            return Err(format!(
-                "El producto '{}' no tiene claves SAT completas.",
-                concepto.descripcion
-            ));
-        }
+        validate_sat_concept_keys(
+            &concepto.clave_prod_serv,
+            &concepto.clave_unidad,
+            &concepto.descripcion,
+        )?;
         conceptos.push(concepto);
     }
     drop(stmt);
@@ -5022,15 +6057,17 @@ fn get_payload_factura(
     tx.execute(
         "
         INSERT OR IGNORE INTO facturas_emitidas (
-            id, venta_id, uuid, rfc_receptor, monto_total, estado, fecha_emision, pdf_path, xml_path
-        ) VALUES (?1, ?2, NULL, ?3, ?4, 'PENDIENTE', ?5, NULL, NULL)
+            id, venta_id, uuid, rfc_receptor, monto_total, estado, fecha_emision, pdf_path, xml_path,
+            sync_uuid, sincronizado, updated_at
+        ) VALUES (?1, ?2, NULL, ?3, ?4, 'PENDIENTE', ?5, NULL, NULL, ?6, 0, datetime('now'))
         ",
         params![
             format!("FAC-{}", venta_id),
             venta_id,
             payload.receptor.rfc,
             payload.total,
-            venta_fecha
+            venta_fecha,
+            generate_uuid_like()
         ],
     )
     .map_err(|error| map_write_error(error, "factura"))
@@ -5777,6 +6814,23 @@ fn mark_table_ids_synced(conn: &Connection, table: &str, ids: &[String], synced_
         }
         return Ok(());
     }
+    if table == "promocion_sucursales" {
+        for id in ids {
+            let Some((promocion_id, sucursal_id)) = id.split_once('|') else {
+                continue;
+            };
+            conn.execute(
+                "
+                UPDATE promocion_sucursales
+                SET sincronizado = 1,
+                    updated_at = ?1
+                WHERE promocion_id = ?2 AND sucursal_id = ?3
+                ",
+                params![synced_at, promocion_id, sucursal_id],
+            )?;
+        }
+        return Ok(());
+    }
 
     let key_column = match table {
         "clientes_datos_fiscales" => "cliente_id",
@@ -5829,7 +6883,9 @@ fn max_synced_updated_at(conn: &Connection, table: &str) -> Result<String, AppEr
 fn pull_conflict_columns(table: &str) -> &'static [&'static str] {
     match table {
         "inventario_sucursal" => &["producto_id", "sucursal_id"],
+        "promocion_sucursales" => &["promocion_id", "sucursal_id"],
         "clientes_datos_fiscales" => &["cliente_id"],
+        "movimientos_inventario" => &["uuid"],
         _ => &["id"],
     }
 }
@@ -6030,7 +7086,7 @@ fn run_auto_pull_once(pool: &DbPool) -> AppResult<usize> {
     let sucursal_ids = get_local_sucursal_ids(&conn).map_err(to_command_error)?;
     let mut total = 0;
 
-    for table in DELTA_PULL_TABLES {
+    for table in BACKUP_TABLES {
         total += pull_delta_table(&mut conn, &client, &config, table, &sucursal_ids)?;
     }
 
@@ -6189,6 +7245,19 @@ fn run_auto_sync_once(pool: &DbPool) -> AppResult<usize> {
             ),
         ),
         (
+            "categorias",
+            "id",
+            format!(
+                "
+                SELECT id AS __local_id, id, nombre, eliminado, 1 AS sincronizado, updated_at
+                FROM categorias
+                WHERE sincronizado = 0
+                ORDER BY updated_at
+                LIMIT {limit}
+                "
+            ),
+        ),
+        (
             "unidades",
             "id",
             format!(
@@ -6238,6 +7307,34 @@ fn run_auto_sync_once(pool: &DbPool) -> AppResult<usize> {
                 SELECT producto_id || '|' || sucursal_id AS __local_id, producto_id, sucursal_id,
                        stock, stock_minimo, costo_promedio, precio_venta, 1 AS sincronizado, updated_at
                 FROM inventario_sucursal
+                WHERE sincronizado = 0
+                ORDER BY updated_at
+                LIMIT {limit}
+                "
+            ),
+        ),
+        (
+            "promociones",
+            "id",
+            format!(
+                "
+                SELECT id AS __local_id, id, nombre, tipo_descuento, valor, fecha_inicio, fecha_fin,
+                       activo, producto_id, categoria_id, marca, eliminado, 1 AS sincronizado, updated_at
+                FROM promociones
+                WHERE sincronizado = 0
+                ORDER BY updated_at
+                LIMIT {limit}
+                "
+            ),
+        ),
+        (
+            "promocion_sucursales",
+            "promocion_id,sucursal_id",
+            format!(
+                "
+                SELECT promocion_id || '|' || sucursal_id AS __local_id, promocion_id, sucursal_id,
+                       eliminado, 1 AS sincronizado, updated_at
+                FROM promocion_sucursales
                 WHERE sincronizado = 0
                 ORDER BY updated_at
                 LIMIT {limit}
@@ -6707,7 +7804,7 @@ fn sincronizar_hacia_nube(state_db: tauri::State<DbState>) -> AppResult<SyncUplo
         .build()
         .map_err(|error| format!("No se pudo preparar la conexión HTTP: {error}"))?;
 
-    let upload_plan: [(&str, &str, &str); 22] = [
+    let upload_plan = [
         (
             "sucursales",
             "id",
@@ -6746,6 +7843,15 @@ fn sincronizar_hacia_nube(state_db: tauri::State<DbState>) -> AppResult<SyncUplo
             ",
         ),
         (
+            "categorias",
+            "id",
+            "
+            SELECT id, nombre, eliminado, 1 AS sincronizado, updated_at
+            FROM categorias
+            WHERE sincronizado = 0
+            ",
+        ),
+        (
             "unidades",
             "id",
             "
@@ -6780,6 +7886,25 @@ fn sincronizar_hacia_nube(state_db: tauri::State<DbState>) -> AppResult<SyncUplo
             "
             SELECT producto_id, sucursal_id, stock, stock_minimo, costo_promedio, precio_venta, 1 AS sincronizado, updated_at
             FROM inventario_sucursal
+            WHERE sincronizado = 0
+            ",
+        ),
+        (
+            "promociones",
+            "id",
+            "
+            SELECT id, nombre, tipo_descuento, valor, fecha_inicio, fecha_fin, activo,
+                   producto_id, categoria_id, marca, eliminado, 1 AS sincronizado, updated_at
+            FROM promociones
+            WHERE sincronizado = 0
+            ",
+        ),
+        (
+            "promocion_sucursales",
+            "promocion_id,sucursal_id",
+            "
+            SELECT promocion_id, sucursal_id, eliminado, 1 AS sincronizado, updated_at
+            FROM promocion_sucursales
             WHERE sincronizado = 0
             ",
         ),
@@ -7000,6 +8125,7 @@ fn cancelar_venta(
     state_db: tauri::State<DbState>,
     venta_id: String,
     usuario_autorizo_id: String,
+    usuario_autorizo_clave: String,
     motivo_cancelacion: String,
     fecha_cancelacion: String,
 ) -> AppResult<()> {
@@ -7007,10 +8133,11 @@ fn cancelar_venta(
         return Err("Falta el identificador de la venta.".to_string());
     }
     if usuario_autorizo_id.trim().is_empty()
+        || usuario_autorizo_clave.trim().is_empty()
         || motivo_cancelacion.trim().is_empty()
         || fecha_cancelacion.trim().is_empty()
     {
-        return Err("La cancelación requiere usuario autorizador, motivo y fecha.".to_string());
+        return Err("La cancelación requiere usuario autorizador, contraseña/PIN, motivo y fecha.".to_string());
     }
 
     let mut conn = get_conn(&state_db).map_err(to_command_error)?;
@@ -7036,16 +8163,30 @@ fn cancelar_venta(
         return Err("La venta ya fue cancelada previamente.".to_string());
     }
 
-    let usuario_autorizo_exists: i64 = tx
+    let (usuario_autorizo_role, usuario_autorizo_sucursal_id, usuario_autorizo_password): (String, String, String) = tx
         .query_row(
-            "SELECT COUNT(*) FROM usuarios WHERE id = ?1 AND eliminado = 0",
+            "SELECT role, sucursal_id, password_hash FROM usuarios WHERE id = ?1 AND eliminado = 0",
             [&usuario_autorizo_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .map_err(AppError::from)
         .map_err(to_command_error)?;
-    if usuario_autorizo_exists == 0 {
-        return Err("El usuario que autoriza la cancelación no existe.".to_string());
+
+    if !matches!(usuario_autorizo_role.as_str(), "ADMIN" | "SUPERADMIN") {
+        return Err("Solo un ADMIN o SUPERADMIN puede autorizar cancelaciones.".to_string());
+    }
+    if usuario_autorizo_role != "SUPERADMIN" && usuario_autorizo_sucursal_id != sucursal_id {
+        return Err("El ADMIN autorizador solo puede cancelar ventas de su propia sucursal.".to_string());
+    }
+    let password_ok = verify_password_and_migrate(
+        &tx,
+        &usuario_autorizo_id,
+        &usuario_autorizo_clave,
+        &usuario_autorizo_password,
+    )
+    .map_err(to_command_error)?;
+    if !password_ok {
+        return Err("Contraseña/PIN de autorización inválido.".to_string());
     }
 
     let caja_id: String = tx
@@ -7154,14 +8295,15 @@ fn cancelar_venta(
     let movimiento_id = format!("DEV-{}-{}", venta_id, fecha_cancelacion);
     tx.execute(
         "
-        INSERT INTO caja_movimientos (id, sesion_id, tipo, monto, motivo)
-        VALUES (?1, ?2, 'EGRESO', ?3, ?4)
+        INSERT INTO caja_movimientos (id, sesion_id, tipo, monto, motivo, sync_uuid, sincronizado, updated_at)
+        VALUES (?1, ?2, 'EGRESO', ?3, ?4, ?5, 0, datetime('now'))
         ",
         params![
             movimiento_id,
             caja_id,
             total,
-            format!("DEVOLUCIÓN EN VENTA #{} - {}", venta_id, motivo_cancelacion)
+            format!("DEVOLUCIÓN EN VENTA #{} - {}", venta_id, motivo_cancelacion),
+            generate_uuid_like()
         ],
     )
     .map_err(|error| map_write_error(error, "movimiento de caja"))
@@ -7283,6 +8425,7 @@ fn registrar_traspaso(
 #[tauri::command]
 fn recibir_traspaso(
     state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
     input: RecibirTraspasoInput,
 ) -> AppResult<()> {
     if input.traspaso_id.trim().is_empty()
@@ -7290,6 +8433,11 @@ fn recibir_traspaso(
         || input.fecha_recepcion.trim().is_empty()
     {
         return Err("Datos incompletos para recibir el traspaso.".to_string());
+    }
+
+    let usuario_sesion = current_session_user(&state_sesion)?;
+    if usuario_sesion.id != input.usuario_recibio_id {
+        return Err("Operación inválida: el usuario receptor debe coincidir con la sesión activa.".to_string());
     }
 
     let mut conn = get_conn(&state_db).map_err(to_command_error)?;
@@ -7306,6 +8454,10 @@ fn recibir_traspaso(
 
     if estado != "EN_TRANSITO" {
         return Err(format!("El traspaso no puede recibirse porque está en estado {estado}."));
+    }
+
+    if !is_superadmin(&usuario_sesion) && usuario_sesion.sucursal_id != sucursal_destino_id {
+        return Err("Operación inválida: solo la sucursal destino puede recibir este traspaso.".to_string());
     }
 
     let usuario_exists: i64 = tx
@@ -7705,17 +8857,13 @@ fn registrar_venta(
     let mut conn = get_conn(&state_db).map_err(to_command_error)?;
     let tx = conn.transaction().map_err(AppError::from).map_err(to_command_error)?;
 
-    let usuario_exists: i64 = tx
+    let usuario_role: String = tx
         .query_row(
-            "SELECT COUNT(*) FROM usuarios WHERE id = ?1 AND eliminado = 0",
+            "SELECT role FROM usuarios WHERE id = ?1 AND eliminado = 0",
             [&venta.usuario_id],
             |row| row.get(0),
         )
-        .map_err(AppError::from)
-        .map_err(to_command_error)?;
-    if usuario_exists == 0 {
-        return Err("El usuario de la venta ya no existe.".to_string());
-    }
+        .map_err(|_| "El usuario de la venta ya no existe.".to_string())?;
 
     let sucursal_exists: i64 = tx
         .query_row(
@@ -7745,10 +8893,89 @@ fn registrar_venta(
         return Err("No puedes vender sin una caja ABIERTA. Abre caja para continuar.".to_string());
     }
 
-    let mut total = 0.0_f64;
+    let mut detalles_calculados: Vec<(String, String, f64, f64, f64)> = Vec::new();
+    let mut total_centavos = 0_i64;
     for detalle in &venta.detalles {
-        total += detalle.cantidad * detalle.precio_venta_pactado;
+        let mut producto: ProductoConStock = tx
+            .query_row(
+                "
+                SELECT
+                    p.id,
+                    p.codigo_barras,
+                    p.codigo_proveedor,
+                    p.proveedor_id,
+                    p.clave_producto,
+                    p.descripcion,
+                    p.marca,
+                    p.categoria,
+                    p.unidad,
+                    COALESCE(NULLIF(i.costo_promedio, 0), NULLIF(p.costo_promedio, 0), p.precio_costo) AS precio_costo_local,
+                    COALESCE(NULLIF(i.costo_promedio, 0), NULLIF(p.costo_promedio, 0), p.precio_costo) AS costo_promedio,
+                    COALESCE(NULLIF(i.precio_venta, 0), p.precio_venta) AS precio_venta_local,
+                    p.sat_clave_prod_serv,
+                    p.sat_clave_unidad,
+                    i.sucursal_id,
+                    i.stock,
+                    i.stock_minimo
+                FROM productos p
+                INNER JOIN inventario_sucursal i ON i.producto_id = p.id
+                WHERE p.id = ?1
+                  AND i.sucursal_id = ?2
+                  AND p.eliminado = 0
+                ",
+                params![detalle.producto_id, venta.sucursal_id],
+                |row| {
+                    Ok(ProductoConStock {
+                        id: row.get(0)?,
+                        codigo_barras: row.get(1)?,
+                        codigo_proveedor: row.get(2)?,
+                        proveedor_id: row.get(3)?,
+                        clave_producto: row.get(4)?,
+                        descripcion: row.get(5)?,
+                        marca: row.get(6)?,
+                        categoria: row.get(7)?,
+                        unidad: row.get(8)?,
+                        precio_costo: row.get(9)?,
+                        costo_promedio: row.get(10)?,
+                        precio_venta: row.get(11)?,
+                        sat_clave_prod_serv: row.get(12)?,
+                        sat_clave_unidad: row.get(13)?,
+                        sucursal_id: row.get(14)?,
+                        stock: row.get(15)?,
+                        stock_minimo: row.get(16)?,
+                        precio_original: None,
+                        precio_descontado: None,
+                        nombre_promo: None,
+                        promocion_id: None,
+                    })
+                },
+            )
+            .map_err(|_| format!("El producto {} no existe en el inventario de la sucursal.", detalle.producto_id))?;
+
+        let es_venta_diversa = producto.clave_producto == "VENTA_DIVERSA";
+        let precio_servidor = if es_venta_diversa {
+            if !is_admin_or_superadmin_role(&usuario_role) {
+                return Err("Solo ADMIN o SUPERADMIN pueden cobrar artículo diverso.".to_string());
+            }
+            if detalle.precio_venta_pactado <= 0.0 {
+                return Err("El artículo diverso requiere un precio mayor a cero.".to_string());
+            }
+            round_money(detalle.precio_venta_pactado)
+        } else {
+            apply_active_promotion(&tx, &mut producto).map_err(to_command_error)?;
+            round_money(producto.precio_venta)
+        };
+        let costo_unitario = round_money(producto.costo_promedio);
+        total_centavos += money_to_cents(detalle.cantidad * precio_servidor);
+        detalles_calculados.push((
+            detalle.id.clone(),
+            detalle.producto_id.clone(),
+            detalle.cantidad,
+            precio_servidor,
+            costo_unitario,
+        ));
     }
+    let total = cents_to_money(total_centavos);
 
     if venta.metodo_pago == "CREDITO" {
         let cliente_id = venta
@@ -7779,7 +9006,12 @@ fn registrar_venta(
     }
 
     tx.execute(
-        "INSERT INTO ventas (id, usuario_id, sucursal_id, fecha, total, metodo_pago, cliente_id, estado) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'COMPLETADA')",
+        "
+        INSERT INTO ventas (
+            id, usuario_id, sucursal_id, fecha, total, metodo_pago, cliente_id, estado,
+            sync_uuid, sincronizado, updated_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'COMPLETADA', ?8, 0, datetime('now'))
+        ",
         params![
             venta.id,
             venta.usuario_id,
@@ -7787,26 +9019,29 @@ fn registrar_venta(
             venta.fecha,
             total,
             venta.metodo_pago,
-            venta.cliente_id
+            venta.cliente_id,
+            generate_uuid_like()
         ],
     )
     .map_err(|error| map_write_error(error, "venta"))
     .map_err(to_command_error)?;
 
-    for detalle in &venta.detalles {
-        let (_stock_actual, costo_unitario) =
-            inventario_costo_promedio(&tx, &detalle.producto_id, &venta.sucursal_id)
-                .map_err(to_command_error)?;
-
+    for (detalle_id, producto_id, cantidad, precio_servidor, costo_unitario) in &detalles_calculados {
         tx.execute(
-            "INSERT INTO detalle_ventas (id, venta_id, producto_id, cantidad, precio_venta_pactado, costo_unitario_pactado) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "
+            INSERT INTO detalle_ventas (
+                id, venta_id, producto_id, cantidad, precio_venta_pactado, costo_unitario_pactado,
+                sync_uuid, sincronizado, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, datetime('now'))
+            ",
             params![
-                detalle.id,
+                detalle_id,
                 venta.id,
-                detalle.producto_id,
-                detalle.cantidad,
-                detalle.precio_venta_pactado,
-                costo_unitario
+                producto_id,
+                cantidad,
+                precio_servidor,
+                costo_unitario,
+                generate_uuid_like()
             ],
         )
         .map_err(|error| map_write_error(error, "detalle de venta"))
@@ -7819,7 +9054,7 @@ fn registrar_venta(
             SET stock = stock - ?1
             WHERE producto_id = ?2 AND sucursal_id = ?3 AND stock >= ?1
             ",
-            params![detalle.cantidad, detalle.producto_id, venta.sucursal_id],
+            params![cantidad, producto_id, venta.sucursal_id],
             )
             .map_err(|error| map_write_error(error, "inventario"))
             .map_err(to_command_error)?;
@@ -7827,19 +9062,19 @@ fn registrar_venta(
         if affected != 1 {
             return Err(format!(
                 "Stock insuficiente para producto {}. Operación cancelada.",
-                detalle.producto_id
+                producto_id
             ));
         }
 
         insertar_movimiento_inventario(
             &tx,
-            &detalle.producto_id,
+            producto_id,
             &venta.sucursal_id,
             "VENTA",
             "VENTA",
             &venta.id,
-            -detalle.cantidad,
-            Some(costo_unitario),
+            -*cantidad,
+            Some(*costo_unitario),
             Some(&venta.usuario_id),
             &venta.fecha,
         )
@@ -7950,6 +9185,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_sesion_actual,
+            cerrar_sesion_local,
             update_mi_perfil,
             necesita_configuracion_inicial,
             crear_configuracion_inicial,
@@ -7967,6 +9203,10 @@ pub fn run() {
             create_marca,
             update_marca,
             delete_marca,
+            get_categorias,
+            create_categoria,
+            update_categoria,
+            delete_categoria,
             get_unidades,
             create_unidad,
             update_unidad,
@@ -7983,10 +9223,15 @@ pub fn run() {
             delete_sucursal,
             get_productos_por_sucursal,
             buscar_productos_por_sucursal,
+            asegurar_producto_venta_diversa,
             get_productos_catalogo,
             create_producto_catalogo,
             update_producto_catalogo,
             guardar_inventario_sucursal,
+            get_promociones,
+            get_productos_para_promociones,
+            guardar_promocion,
+            eliminar_promocion,
             create_producto,
             update_producto,
             delete_producto,

@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import {
   Box,
   Button,
+  CircularProgress,
   Dialog,
   DialogActions,
   DialogContent,
@@ -32,6 +33,8 @@ export function UnidadesView() {
   const [currentId, setCurrentId] = useState('');
   const [nombre, setNombre] = useState('');
   const [claveSat, setClaveSat] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [deletingId, setDeletingId] = useState('');
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -49,7 +52,9 @@ export function UnidadesView() {
   };
 
   const handleSave = async () => {
+    if (saving) return;
     const unidad: UnidadMedida = { id: currentId, nombre: nombre.trim(), claveSat: claveSat.trim().toUpperCase() };
+    setSaving(true);
     try {
       if (editMode) {
         await invoke('update_unidad', { id: currentId, unidad });
@@ -60,16 +65,21 @@ export function UnidadesView() {
       await refreshCatalogos();
     } catch (error) {
       alert(`Error al guardar: ${error}`);
+    } finally {
+      setSaving(false);
     }
   };
 
   const handleDelete = async (id: string) => {
     if (!confirm('¿Eliminar esta unidad?')) return;
+    setDeletingId(id);
     try {
       await invoke('delete_unidad', { id });
       await refreshCatalogos();
     } catch (error) {
       alert(`Error al eliminar: ${error}`);
+    } finally {
+      setDeletingId('');
     }
   };
 
@@ -112,11 +122,11 @@ export function UnidadesView() {
                   <TableCell>{unidad.nombre}</TableCell>
                   <TableCell>{unidad.claveSat || '-'}</TableCell>
                   <TableCell align="right">
-                    <IconButton color="primary" size="small" onClick={() => handleOpen(unidad)} sx={{ mr: 1 }}>
+                    <IconButton color="primary" size="small" onClick={() => handleOpen(unidad)} sx={{ mr: 1 }} disabled={Boolean(deletingId)}>
                       <EditIcon fontSize="small" />
                     </IconButton>
-                    <IconButton color="error" size="small" onClick={() => handleDelete(unidad.id)}>
-                      <DeleteIcon fontSize="small" />
+                    <IconButton color="error" size="small" onClick={() => handleDelete(unidad.id)} disabled={Boolean(deletingId)}>
+                      {deletingId === unidad.id ? <CircularProgress size={18} /> : <DeleteIcon fontSize="small" />}
                     </IconButton>
                   </TableCell>
                 </TableRow>
@@ -133,7 +143,7 @@ export function UnidadesView() {
         </TableContainer>
       </Paper>
 
-      <Dialog open={open} onClose={() => setOpen(false)} maxWidth="xs" fullWidth>
+      <Dialog open={open} onClose={saving ? undefined : () => setOpen(false)} maxWidth="xs" fullWidth>
         <DialogTitle sx={{ fontWeight: 600 }}>{editMode ? 'Editar unidad' : 'Nueva unidad'}</DialogTitle>
         <Divider />
         <DialogContent sx={{ pt: 3, display: 'flex', flexDirection: 'column', gap: 2 }}>
@@ -149,9 +159,14 @@ export function UnidadesView() {
           />
         </DialogContent>
         <DialogActions sx={{ p: 3, pt: 1 }}>
-          <Button onClick={() => setOpen(false)}>Cancelar</Button>
-          <Button variant="contained" startIcon={<SaveIcon />} onClick={handleSave} disabled={!nombre.trim() || !claveSat.trim()}>
-            Guardar
+          <Button onClick={() => setOpen(false)} disabled={saving}>Cancelar</Button>
+          <Button
+            variant="contained"
+            startIcon={saving ? <CircularProgress size={18} color="inherit" /> : <SaveIcon />}
+            onClick={handleSave}
+            disabled={saving || !nombre.trim() || !claveSat.trim()}
+          >
+            {saving ? 'Guardando...' : 'Guardar'}
           </Button>
         </DialogActions>
       </Dialog>

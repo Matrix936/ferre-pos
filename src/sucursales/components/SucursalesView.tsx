@@ -10,6 +10,7 @@ import {
   TableHead, 
   TableRow, 
   Button, 
+  CircularProgress,
   IconButton, 
   Dialog, 
   DialogTitle, 
@@ -35,6 +36,8 @@ export function SucursalesView() {
   const [telefono, setTelefono] = useState('');
   const [codigoPostal, setCodigoPostal] = useState('');
   const [search, setSearch] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [deletingId, setDeletingId] = useState('');
 
   const handleOpen = (sucursal?: Sucursal) => {
     if (sucursal) {
@@ -60,6 +63,7 @@ export function SucursalesView() {
   };
 
   const handleSave = async () => {
+    if (saving) return;
     const sucursal: Sucursal = {
       id: currentId,
       nombre,
@@ -68,6 +72,7 @@ export function SucursalesView() {
       codigoPostal,
     };
 
+    setSaving(true);
     try {
       if (editMode) {
         await invoke('update_sucursal', { id: currentId, sucursal });
@@ -79,17 +84,22 @@ export function SucursalesView() {
     } catch (error) {
       console.error('Error al guardar sucursal:', error);
       alert(`Error al guardar: ${error}`);
+    } finally {
+      setSaving(false);
     }
   };
 
   const handleDelete = async (id: string) => {
     if (confirm('¿Está seguro de que desea eliminar esta sucursal?')) {
+      setDeletingId(id);
       try {
         await invoke('delete_sucursal', { id });
         await refreshCatalogos();
       } catch (error) {
         console.error('Error al eliminar sucursal:', error);
         alert(`Error al eliminar: ${error}`);
+      } finally {
+        setDeletingId('');
       }
     }
   };
@@ -168,11 +178,11 @@ export function SucursalesView() {
                   <TableCell>{sucursal.telefono}</TableCell>
                   <TableCell>{sucursal.codigoPostal || '-'}</TableCell>
                   <TableCell align="right">
-                    <IconButton color="primary" onClick={() => handleOpen(sucursal)} size="small" sx={{ mr: 1 }}>
+                    <IconButton color="primary" onClick={() => handleOpen(sucursal)} size="small" sx={{ mr: 1 }} disabled={Boolean(deletingId)}>
                       <EditIcon fontSize="small" />
                     </IconButton>
-                    <IconButton color="error" onClick={() => handleDelete(sucursal.id)} size="small">
-                      <DeleteIcon fontSize="small" />
+                    <IconButton color="error" onClick={() => handleDelete(sucursal.id)} size="small" disabled={Boolean(deletingId)}>
+                      {deletingId === sucursal.id ? <CircularProgress size={18} /> : <DeleteIcon fontSize="small" />}
                     </IconButton>
                   </TableCell>
                 </TableRow>
@@ -189,7 +199,7 @@ export function SucursalesView() {
         </TableContainer>
       </Paper>
 
-      <Dialog open={open} onClose={handleClose} maxWidth="sm" fullWidth slotProps={{ paper: { sx: { borderRadius: 2 } } }}>
+      <Dialog open={open} onClose={saving ? undefined : handleClose} maxWidth="sm" fullWidth slotProps={{ paper: { sx: { borderRadius: 2 } } }}>
         <DialogTitle sx={{ fontWeight: 600, pb: 1 }}>
           {editMode ? 'Editar sucursal' : 'Nueva sucursal'}
         </DialogTitle>
@@ -227,18 +237,18 @@ export function SucursalesView() {
           </Box>
         </DialogContent>
         <DialogActions sx={{ p: 3, pt: 1 }}>
-          <Button onClick={handleClose} sx={{ borderRadius: '8px' }}>
+          <Button onClick={handleClose} disabled={saving} sx={{ borderRadius: '8px' }}>
             Cancelar
           </Button>
           <Button 
             onClick={handleSave} 
             variant="contained" 
             disableElevation
-            startIcon={<SaveIcon />}
-            disabled={!nombre || !direccion || !codigoPostal || !currentId}
+            startIcon={saving ? <CircularProgress size={18} color="inherit" /> : <SaveIcon />}
+            disabled={saving || !nombre || !direccion || !codigoPostal || !currentId}
             sx={{ borderRadius: '8px', px: 3 }}
           >
-            Guardar
+            {saving ? 'Guardando...' : 'Guardar'}
           </Button>
         </DialogActions>
       </Dialog>

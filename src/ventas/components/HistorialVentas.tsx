@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import {
+  Alert,
   Box,
   Button,
+  CircularProgress,
   Dialog,
   DialogActions,
   DialogContent,
@@ -58,6 +60,10 @@ export function HistorialVentasView() {
   const [selectedVenta, setSelectedVenta] = useState<HistorialVenta | null>(null);
   const [detalle, setDetalle] = useState<HistorialVentaDetalle[]>([]);
   const [loadingCancel, setLoadingCancel] = useState(false);
+  const [openCancelDialog, setOpenCancelDialog] = useState(false);
+  const [motivoCancelacion, setMotivoCancelacion] = useState('');
+  const [usuarioAutorizoClave, setUsuarioAutorizoClave] = useState('');
+  const [cancelError, setCancelError] = useState('');
 
   const fetchVentas = async () => {
     const filtro = {
@@ -83,28 +89,41 @@ export function HistorialVentasView() {
   const handleCancelarVenta = async () => {
     if (!selectedVenta) return;
     if (!user) {
-      alert('No hay una sesión activa para autorizar la cancelación.');
+      setCancelError('No hay una sesión activa para autorizar la cancelación.');
       return;
     }
-    const motivoCancelacion = prompt('Motivo de cancelación');
-    if (!motivoCancelacion?.trim()) return;
-    if (!confirm('¿Seguro que deseas cancelar esta venta?')) return;
+    if (!motivoCancelacion.trim() || !usuarioAutorizoClave.trim()) {
+      setCancelError('Motivo y contraseña/PIN de autorización son obligatorios.');
+      return;
+    }
     setLoadingCancel(true);
+    setCancelError('');
     try {
       await invoke('cancelar_venta', {
         ventaId: selectedVenta.id,
         usuarioAutorizoId: user.id,
+        usuarioAutorizoClave: usuarioAutorizoClave.trim(),
         motivoCancelacion: motivoCancelacion.trim(),
         fechaCancelacion: new Date().toISOString(),
       });
       const ventaActualizada = { ...selectedVenta, estado: 'CANCELADA' };
       setSelectedVenta(ventaActualizada);
       setVentas((prev) => prev.map((v) => (v.id === ventaActualizada.id ? ventaActualizada : v)));
+      setOpenCancelDialog(false);
+      setMotivoCancelacion('');
+      setUsuarioAutorizoClave('');
     } catch (error) {
-      alert(`Error al cancelar venta: ${error}`);
+      setCancelError(`Error al cancelar venta: ${error}`);
     } finally {
       setLoadingCancel(false);
     }
+  };
+
+  const openCancelacion = () => {
+    setMotivoCancelacion('');
+    setUsuarioAutorizoClave('');
+    setCancelError('');
+    setOpenCancelDialog(true);
   };
 
   return (
@@ -210,13 +229,50 @@ export function HistorialVentasView() {
             <Button
               color="error"
               variant="contained"
-              onClick={handleCancelarVenta}
+              onClick={openCancelacion}
               disabled={!selectedVenta || selectedVenta.estado === 'CANCELADA' || loadingCancel}
+              startIcon={loadingCancel ? <CircularProgress size={18} color="inherit" /> : undefined}
             >
-              Cancelar Venta
+              {loadingCancel ? 'Cancelando...' : 'Cancelar Venta'}
             </Button>
           </RoleGuard>
-          <Button onClick={() => setSelectedVenta(null)}>Cerrar</Button>
+          <Button onClick={() => setSelectedVenta(null)} disabled={loadingCancel}>Cerrar</Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={openCancelDialog} onClose={loadingCancel ? undefined : () => setOpenCancelDialog(false)} maxWidth="xs" fullWidth>
+        <DialogTitle>Autorizar cancelación</DialogTitle>
+        <DialogContent sx={{ '&&': { pt: 2.5 }, display: 'flex', flexDirection: 'column', gap: 2 }}>
+          <Alert severity="warning">
+            La venta se cancelará, el stock regresará a la sucursal y se registrará la salida de efectivo en caja.
+          </Alert>
+          {cancelError && <Alert severity="error">{cancelError}</Alert>}
+          <TextField
+            label="Motivo de cancelación"
+            value={motivoCancelacion}
+            onChange={(e) => setMotivoCancelacion(e.target.value)}
+            multiline
+            minRows={3}
+            autoFocus
+          />
+          <TextField
+            label="Contraseña/PIN autorizador"
+            type="password"
+            value={usuarioAutorizoClave}
+            onChange={(e) => setUsuarioAutorizoClave(e.target.value)}
+          />
+        </DialogContent>
+        <DialogActions sx={{ p: 2 }}>
+          <Button onClick={() => setOpenCancelDialog(false)} disabled={loadingCancel}>Cancelar</Button>
+          <Button
+            color="error"
+            variant="contained"
+            onClick={handleCancelarVenta}
+            disabled={loadingCancel || !motivoCancelacion.trim() || !usuarioAutorizoClave.trim()}
+            startIcon={loadingCancel ? <CircularProgress size={18} color="inherit" /> : undefined}
+          >
+            {loadingCancel ? 'Cancelando...' : 'Confirmar cancelación'}
+          </Button>
         </DialogActions>
       </Dialog>
     </Box>

@@ -5,6 +5,7 @@ import {
   Autocomplete,
   Box,
   Button,
+  CircularProgress,
   MenuItem,
   Paper,
   Snackbar,
@@ -169,8 +170,15 @@ export function NuevaCompra() {
             freeSolo
             options={productosBusqueda}
             getOptionLabel={(option) => (typeof option === 'string' ? option : option.descripcion)}
+            filterOptions={(options) => options}
+            noOptionsText="Escribe al menos 3 caracteres para buscar coincidencias"
             inputValue={search}
             onInputChange={(_, value, reason) => {
+              if (reason === 'reset') {
+                setSearch('');
+                setProductosBusqueda([]);
+                return;
+              }
               setSearch(value);
               if (reason !== 'input' || !value.trim()) {
                 setProductosBusqueda([]);
@@ -284,11 +292,11 @@ export function NuevaCompra() {
         </Typography>
         <Button
           variant="contained"
-          startIcon={<SaveIcon />}
+          startIcon={loading ? <CircularProgress size={18} color="inherit" /> : <SaveIcon />}
           onClick={handleRegistrar}
           disabled={loading || !proveedorId || !sucursalCompraId || detalle.length === 0}
         >
-          Registrar entrada
+          {loading ? 'Registrando...' : 'Registrar entrada'}
         </Button>
       </Box>
 

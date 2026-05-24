@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import {
   Box,
   Button,
+  CircularProgress,
   Dialog,
   DialogActions,
   DialogContent,
@@ -31,6 +32,8 @@ export function MarcasView() {
   const [editMode, setEditMode] = useState(false);
   const [currentId, setCurrentId] = useState('');
   const [nombre, setNombre] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [deletingId, setDeletingId] = useState('');
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -45,7 +48,9 @@ export function MarcasView() {
   };
 
   const handleSave = async () => {
+    if (saving) return;
     const marca: Marca = { id: currentId, nombre: nombre.trim() };
+    setSaving(true);
     try {
       if (editMode) {
         await invoke('update_marca', { id: currentId, marca });
@@ -56,16 +61,21 @@ export function MarcasView() {
       await refreshCatalogos();
     } catch (error) {
       alert(`Error al guardar: ${error}`);
+    } finally {
+      setSaving(false);
     }
   };
 
   const handleDelete = async (id: string) => {
     if (!confirm('¿Eliminar esta marca?')) return;
+    setDeletingId(id);
     try {
       await invoke('delete_marca', { id });
       await refreshCatalogos();
     } catch (error) {
       alert(`Error al eliminar: ${error}`);
+    } finally {
+      setDeletingId('');
     }
   };
 
@@ -103,11 +113,11 @@ export function MarcasView() {
                 <TableRow key={marca.id} hover>
                   <TableCell>{marca.nombre}</TableCell>
                   <TableCell align="right">
-                    <IconButton color="primary" size="small" onClick={() => handleOpen(marca)} sx={{ mr: 1 }}>
+                    <IconButton color="primary" size="small" onClick={() => handleOpen(marca)} sx={{ mr: 1 }} disabled={Boolean(deletingId)}>
                       <EditIcon fontSize="small" />
                     </IconButton>
-                    <IconButton color="error" size="small" onClick={() => handleDelete(marca.id)}>
-                      <DeleteIcon fontSize="small" />
+                    <IconButton color="error" size="small" onClick={() => handleDelete(marca.id)} disabled={Boolean(deletingId)}>
+                      {deletingId === marca.id ? <CircularProgress size={18} /> : <DeleteIcon fontSize="small" />}
                     </IconButton>
                   </TableCell>
                 </TableRow>
@@ -124,16 +134,21 @@ export function MarcasView() {
         </TableContainer>
       </Paper>
 
-      <Dialog open={open} onClose={() => setOpen(false)} maxWidth="xs" fullWidth>
+      <Dialog open={open} onClose={saving ? undefined : () => setOpen(false)} maxWidth="xs" fullWidth>
         <DialogTitle sx={{ fontWeight: 600 }}>{editMode ? 'Editar marca' : 'Nueva marca'}</DialogTitle>
         <Divider />
         <DialogContent sx={{ pt: 3 }}>
           <TextField label="Nombre" value={nombre} onChange={(event) => setNombre(event.target.value)} fullWidth required />
         </DialogContent>
         <DialogActions sx={{ p: 3, pt: 1 }}>
-          <Button onClick={() => setOpen(false)}>Cancelar</Button>
-          <Button variant="contained" startIcon={<SaveIcon />} onClick={handleSave} disabled={!nombre.trim()}>
-            Guardar
+          <Button onClick={() => setOpen(false)} disabled={saving}>Cancelar</Button>
+          <Button
+            variant="contained"
+            startIcon={saving ? <CircularProgress size={18} color="inherit" /> : <SaveIcon />}
+            onClick={handleSave}
+            disabled={saving || !nombre.trim()}
+          >
+            {saving ? 'Guardando...' : 'Guardar'}
           </Button>
         </DialogActions>
       </Dialog>

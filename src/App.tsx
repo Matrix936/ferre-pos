@@ -12,9 +12,11 @@ import { RoleGuard } from "./auth/components/RoleGuard";
 import { MiPerfilView } from "./perfil/components/MiPerfilView";
 import { InventarioView } from "./inventario/components/InventarioView";
 import { ProductosView } from "./productos/components/ProductosView";
+import { PromocionesView } from "./promociones/components/PromocionesView";
 import { MermasAjustesView } from "./inventario/components/MermasAjustes";
 import { ProveedoresView } from "./proveedores/components/ProveedoresView";
 import { MarcasView } from "./catalogos/components/MarcasView";
+import { CategoriasView } from "./catalogos/components/CategoriasView";
 import { UnidadesView } from "./catalogos/components/UnidadesView";
 import { NuevaCompra } from "./compras/components/NuevaCompra";
 import { NuevaVenta } from "./ventas/components/NuevaVenta";
@@ -66,6 +68,11 @@ function Root() {
             <ProductosView />
           </RoleGuard>
         } />
+        <Route path="/promociones" element={
+          <RoleGuard allowedRoles={["SUPERADMIN", "ADMIN"]}>
+            <PromocionesView />
+          </RoleGuard>
+        } />
         <Route path="/inventario/mermas" element={
           <RoleGuard allowedRoles={["SUPERADMIN", "ADMIN"]}>
             <MermasAjustesView />
@@ -81,6 +88,12 @@ function Root() {
         <Route path="/marcas" element={
           <RoleGuard allowedRoles={["SUPERADMIN", "ADMIN"]}>
             <MarcasView />
+          </RoleGuard>
+        } />
+
+        <Route path="/categorias" element={
+          <RoleGuard allowedRoles={["SUPERADMIN", "ADMIN"]}>
+            <CategoriasView />
           </RoleGuard>
         } />
 

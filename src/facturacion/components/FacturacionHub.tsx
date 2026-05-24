@@ -5,6 +5,7 @@ import {
   Box,
   Button,
   Chip,
+  CircularProgress,
   Dialog,
   DialogActions,
   DialogContent,
@@ -148,11 +149,11 @@ export function FacturacionHub() {
                     <Button
                       size="small"
                       variant="outlined"
-                      startIcon={<FacturarIcon />}
+                      startIcon={loadingVentaId === venta.id ? <CircularProgress size={16} /> : <FacturarIcon />}
                       onClick={() => handleGenerarFactura(venta)}
-                      disabled={loadingVentaId === venta.id}
+                      disabled={Boolean(loadingVentaId)}
                     >
-                      Generar Factura
+                      {loadingVentaId === venta.id ? 'Generando...' : 'Generar Factura'}
                     </Button>
                   </TableCell>
                 </TableRow>
@@ -213,7 +214,7 @@ export function FacturacionHub() {
         </TableContainer>
       </Paper>
 
-      <Dialog open={Boolean(payload)} onClose={() => setPayload(null)} maxWidth="md" fullWidth>
+      <Dialog open={Boolean(payload)} onClose={loadingTimbrado ? undefined : () => setPayload(null)} maxWidth="md" fullWidth>
         <DialogTitle>Payload CFDI 4.0</DialogTitle>
         <DialogContent>
           <Box
@@ -232,15 +233,15 @@ export function FacturacionHub() {
           </Box>
         </DialogContent>
         <DialogActions sx={{ p: 2 }}>
-          <Button onClick={() => setPayload(null)}>Cerrar</Button>
+          <Button onClick={() => setPayload(null)} disabled={loadingTimbrado}>Cerrar</Button>
           <Button
             variant="contained"
-            startIcon={<TimbrarIcon />}
+            startIcon={loadingTimbrado ? <CircularProgress size={18} color="inherit" /> : <TimbrarIcon />}
             onClick={handleSimularTimbrado}
             disabled={loadingTimbrado}
             disableElevation
           >
-            Simular Timbrado
+            {loadingTimbrado ? 'Timbrando...' : 'Simular Timbrado'}
           </Button>
         </DialogActions>
       </Dialog>

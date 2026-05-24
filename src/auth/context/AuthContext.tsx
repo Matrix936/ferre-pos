@@ -5,7 +5,7 @@ import { User, AuthState } from '../types';
 interface AuthContextType extends AuthState {
   login: (user: User) => void;
   updateUser: (user: User) => void;
-  logout: () => void;
+  logout: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -42,7 +42,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setState({ user, isAuthenticated: true, isLoading: false });
   };
 
-  const logout = () => {
+  const logout = async () => {
+    await invoke('cerrar_sesion_local');
+
+    try {
+      const maybeSupabase = (globalThis as { supabase?: { auth?: { signOut?: () => Promise<unknown> } } }).supabase;
+      await maybeSupabase?.auth?.signOut?.();
+    } catch (error) {
+      console.error('Error al cerrar sesión de Supabase:', error);
+    }
+
+    localStorage.clear();
+    sessionStorage.clear();
     setState({ user: null, isAuthenticated: false, isLoading: false });
   };
 

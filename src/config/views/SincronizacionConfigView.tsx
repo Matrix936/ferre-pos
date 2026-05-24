@@ -47,6 +47,7 @@ export function SincronizacionConfigView() {
   const [isConnected, setIsConnected] = useState(false);
   const [isBusy, setIsBusy] = useState(false);
   const [isBusyBackup, setIsBusyBackup] = useState(false);
+  const [backupAction, setBackupAction] = useState<'download' | 'apply' | 'upload' | 'restore' | ''>('');
   const [errorMessage, setErrorMessage] = useState('');
   const [backupMessage, setBackupMessage] = useState('');
 
@@ -114,6 +115,7 @@ export function SincronizacionConfigView() {
 
   const handleDownloadBackup = async () => {
     setIsBusyBackup(true);
+    setBackupAction('download');
     setBackupMessage('');
     try {
       const path = await invoke<string>('crear_respaldo_local');
@@ -125,6 +127,7 @@ export function SincronizacionConfigView() {
       window.alert(message);
     } finally {
       setIsBusyBackup(false);
+      setBackupAction('');
     }
   };
 
@@ -140,6 +143,7 @@ export function SincronizacionConfigView() {
     if (!confirmed) return;
 
     setIsBusyBackup(true);
+    setBackupAction('apply');
     setBackupMessage('');
     try {
       const backupJson = await file.text();
@@ -152,6 +156,7 @@ export function SincronizacionConfigView() {
       window.alert(message);
     } finally {
       setIsBusyBackup(false);
+      setBackupAction('');
     }
   };
 
@@ -162,6 +167,7 @@ export function SincronizacionConfigView() {
     if (!confirmed) return;
 
     setIsBusyBackup(true);
+    setBackupAction('restore');
     setBackupMessage('Descargando datos de la nube, por favor espera...');
     try {
       await invoke('sincronizar_desde_nube');
@@ -173,11 +179,13 @@ export function SincronizacionConfigView() {
       window.alert(message);
     } finally {
       setIsBusyBackup(false);
+      setBackupAction('');
     }
   };
 
   const handleUploadToCloud = async () => {
     setIsBusyBackup(true);
+    setBackupAction('upload');
     setBackupMessage('Subiendo cambios locales a Supabase...');
     try {
       const result = await invoke<SyncUploadResult>('sincronizar_hacia_nube');
@@ -196,6 +204,7 @@ export function SincronizacionConfigView() {
       window.alert(message);
     } finally {
       setIsBusyBackup(false);
+      setBackupAction('');
     }
   };
 
@@ -406,11 +415,11 @@ export function SincronizacionConfigView() {
                 onClick={handleDownloadBackup}
                 disabled={isBusyBackup}
                 sx={actionCardSx}
-                startIcon={<DownloadIcon color="primary" />}
+                startIcon={backupAction === 'download' ? <CircularProgress size={16} /> : <DownloadIcon color="primary" />}
               >
                 <Box>
                   <Typography variant="body2" sx={{ fontWeight: 700 }}>
-                    Guardar respaldo
+                    {backupAction === 'download' ? 'Guardando respaldo...' : 'Guardar respaldo'}
                   </Typography>
                   <Typography variant="caption" color="text.secondary">
                     Exportar archivo .JSON local
@@ -424,11 +433,11 @@ export function SincronizacionConfigView() {
                 onClick={() => fileInputRef.current?.click()}
                 disabled={isBusyBackup}
                 sx={actionCardSx}
-                startIcon={<UploadIcon color="success" />}
+                startIcon={backupAction === 'apply' ? <CircularProgress size={16} /> : <UploadIcon color="success" />}
               >
                 <Box>
                   <Typography variant="body2" sx={{ fontWeight: 700 }}>
-                    Restaurar archivo
+                    {backupAction === 'apply' ? 'Restaurando archivo...' : 'Restaurar archivo'}
                   </Typography>
                   <Typography variant="caption" color="text.secondary">
                     Importar desde .JSON
@@ -444,11 +453,11 @@ export function SincronizacionConfigView() {
                     onClick={handleUploadToCloud}
                     disabled={isBusyBackup}
                     sx={actionCardSx}
-                    startIcon={isBusyBackup ? <CircularProgress size={16} /> : <CloudUploadSyncIcon color="primary" />}
+                    startIcon={backupAction === 'upload' ? <CircularProgress size={16} /> : <CloudUploadSyncIcon color="primary" />}
                   >
                     <Box>
                       <Typography variant="body2" sx={{ fontWeight: 700 }}>
-                        Subir cambios
+                        {backupAction === 'upload' ? 'Subiendo cambios...' : 'Subir cambios'}
                       </Typography>
                       <Typography variant="caption" color="text.secondary">
                         Enviar pendientes locales a Supabase
@@ -474,13 +483,13 @@ export function SincronizacionConfigView() {
                       fullWidth
                       color="warning"
                       variant="contained"
-                      startIcon={isBusyBackup ? <CircularProgress size={16} color="inherit" /> : <CloudDownloadIcon />}
+                      startIcon={backupAction === 'restore' ? <CircularProgress size={16} color="inherit" /> : <CloudDownloadIcon />}
                       onClick={handleRestoreFromCloud}
                       disabled={isBusyBackup}
                       disableElevation
                       sx={{ borderRadius: 999, fontWeight: 700 }}
                     >
-                      {isBusyBackup ? 'Procesando...' : 'Restaurar nube'}
+                      {backupAction === 'restore' ? 'Restaurando nube...' : 'Restaurar nube'}
                     </Button>
                   </Alert>
                 </>

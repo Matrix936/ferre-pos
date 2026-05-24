@@ -6,6 +6,7 @@ import {
   Box,
   Button,
   Chip,
+  CircularProgress,
   MenuItem,
   Paper,
   Snackbar,
@@ -61,6 +62,7 @@ export function NuevoTraspasoView() {
   const [snackbar, setSnackbar] = useState('');
   const [loading, setLoading] = useState(false);
   const [receivingId, setReceivingId] = useState<string | null>(null);
+  const [refreshingHistorial, setRefreshingHistorial] = useState(false);
   const searchDebounced = useDebouncedValue(search, 300);
 
   const fetchHistorial = async () => {
@@ -180,10 +182,9 @@ export function NuevoTraspasoView() {
 
   const handleRecibirTraspaso = async (traspaso: HistorialTraspaso) => {
     if (!user?.id) return;
-    const canReceive =
-      user.role === 'SUPERADMIN' || user.role === 'ADMIN' || user.sucursalId === traspaso.sucursalDestinoId;
+    const canReceive = user.role === 'SUPERADMIN' || user.sucursalId === traspaso.sucursalDestinoId;
     if (!canReceive) {
-      setSnackbar('Solo la sucursal destino o un administrador puede recibir este traspaso.');
+      setSnackbar('Solo SUPERADMIN o la sucursal destino pueden recibir este traspaso.');
       return;
     }
 
@@ -207,6 +208,17 @@ export function NuevoTraspasoView() {
   };
 
   const pendientes = historial.filter((item) => item.estado === 'EN_TRANSITO');
+
+  const handleRefreshHistorial = async () => {
+    setRefreshingHistorial(true);
+    try {
+      await fetchHistorial();
+    } catch (error) {
+      setSnackbar(`Error al actualizar: ${error}`);
+    } finally {
+      setRefreshingHistorial(false);
+    }
+  };
 
   return (
     <Box sx={{ maxWidth: 1280, mx: 'auto', mt: 2 }}>
@@ -237,8 +249,15 @@ export function NuevoTraspasoView() {
             freeSolo
             options={productosBusqueda}
             getOptionLabel={(option) => (typeof option === 'string' ? option : option.descripcion)}
+            filterOptions={(options) => options}
+            noOptionsText="Escribe al menos 3 caracteres para buscar coincidencias"
             inputValue={search}
             onInputChange={(_, value, reason) => {
+              if (reason === 'reset') {
+                setSearch('');
+                setProductosBusqueda([]);
+                return;
+              }
               setSearch(value);
               if (reason !== 'input' || !value.trim()) {
                 setProductosBusqueda([]);
@@ -336,11 +355,11 @@ export function NuevoTraspasoView() {
       <Box sx={{ display: 'flex', justifyContent: 'flex-end', mt: 2 }}>
         <Button
           variant="contained"
-          startIcon={<TraspasoIcon />}
+          startIcon={loading ? <CircularProgress size={18} color="inherit" /> : <TraspasoIcon />}
           onClick={handleConfirmar}
           disabled={loading || invalidSucursales || detalle.length === 0}
         >
-          Confirmar Traspaso
+          {loading ? 'Registrando...' : 'Confirmar Traspaso'}
         </Button>
       </Box>
 
@@ -358,8 +377,14 @@ export function NuevoTraspasoView() {
               La mercancía en tránsito no aparece en el inventario destino hasta confirmarse aquí.
             </Typography>
           </Box>
-          <Button variant="outlined" size="small" onClick={() => fetchHistorial().catch((error) => setSnackbar(`Error al actualizar: ${error}`))}>
-            Actualizar
+          <Button
+            variant="outlined"
+            size="small"
+            onClick={handleRefreshHistorial}
+            disabled={refreshingHistorial}
+            startIcon={refreshingHistorial ? <CircularProgress size={16} /> : undefined}
+          >
+            {refreshingHistorial ? 'Actualizando...' : 'Actualizar'}
           </Button>
         </Stack>
 
@@ -378,8 +403,7 @@ export function NuevoTraspasoView() {
             </TableHead>
             <TableBody>
               {pendientes.map((traspaso) => {
-                const canReceive =
-                  user?.role === 'SUPERADMIN' || user?.role === 'ADMIN' || user?.sucursalId === traspaso.sucursalDestinoId;
+                const canReceive = user?.role === 'SUPERADMIN' || user?.sucursalId === traspaso.sucursalDestinoId;
                 return (
                   <TableRow key={traspaso.id} hover>
                     <TableCell>{traspaso.id.slice(0, 8)}</TableCell>
@@ -396,8 +420,9 @@ export function NuevoTraspasoView() {
                         size="small"
                         onClick={() => handleRecibirTraspaso(traspaso)}
                         disabled={!canReceive || receivingId === traspaso.id}
+                        startIcon={receivingId === traspaso.id ? <CircularProgress size={16} color="inherit" /> : undefined}
                       >
-                        Recibir
+                        {receivingId === traspaso.id ? 'Recibiendo...' : 'Recibir'}
                       </Button>
                     </TableCell>
                   </TableRow>

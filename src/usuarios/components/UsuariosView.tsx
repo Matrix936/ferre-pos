@@ -10,6 +10,7 @@ import {
   TableHead, 
   TableRow, 
   Button, 
+  CircularProgress,
   Chip, 
   IconButton, 
   Dialog, 
@@ -73,6 +74,8 @@ export function UsuariosView() {
   const [sucursalId, setSucursalId] = useState('');
   const [password, setPassword] = useState('');
   const [search, setSearch] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [deletingId, setDeletingId] = useState('');
 
   const canManageUsuario = (usuario: Usuario) => {
     if (!usuarioSesion || usuario.id === usuarioSesion.id) return false;
@@ -122,6 +125,7 @@ export function UsuariosView() {
   };
 
   const handleSave = async () => {
+    if (saving) return;
     const effectiveRole: Role = isAdmin ? 'USUARIO' : role;
     const effectiveSucursalId = isAdmin ? usuarioSesion?.sucursalId || '' : sucursalId;
 
@@ -138,6 +142,7 @@ export function UsuariosView() {
       sucursalId: effectiveSucursalId,
     };
 
+    setSaving(true);
     try {
       if (editMode) {
         await invoke('update_usuario', { id: currentId, usuario });
@@ -149,6 +154,8 @@ export function UsuariosView() {
     } catch (error) {
       console.error('Error al guardar usuario:', error);
       alert(`Error al guardar: ${error}`);
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -160,12 +167,15 @@ export function UsuariosView() {
     }
 
     if (confirm('¿Está seguro de que desea eliminar este usuario?')) {
+      setDeletingId(id);
       try {
         await invoke('delete_usuario', { id });
         await refreshCatalogos();
       } catch (error) {
         console.error('Error al eliminar usuario:', error);
         alert(`Error al eliminar: ${error}`);
+      } finally {
+        setDeletingId('');
       }
     }
   };
@@ -260,7 +270,7 @@ export function UsuariosView() {
                       color="primary"
                       onClick={() => handleOpen(usuario)}
                       size="small"
-                      disabled={!canManageUsuario(usuario)}
+                      disabled={!canManageUsuario(usuario) || Boolean(deletingId)}
                       sx={{ mr: 1 }}
                     >
                       <EditIcon fontSize="small" />
@@ -269,9 +279,9 @@ export function UsuariosView() {
                       color="error"
                       onClick={() => handleDelete(usuario.id)}
                       size="small"
-                      disabled={!canManageUsuario(usuario)}
+                      disabled={!canManageUsuario(usuario) || Boolean(deletingId)}
                     >
-                      <DeleteIcon fontSize="small" />
+                      {deletingId === usuario.id ? <CircularProgress size={18} /> : <DeleteIcon fontSize="small" />}
                     </IconButton>
                   </TableCell>
                 </TableRow>
@@ -288,7 +298,7 @@ export function UsuariosView() {
         </TableContainer>
       </Paper>
 
-      <Dialog open={open} onClose={handleClose} maxWidth="sm" fullWidth slotProps={{ paper: { sx: { borderRadius: 2 } } }}>
+      <Dialog open={open} onClose={saving ? undefined : handleClose} maxWidth="sm" fullWidth slotProps={{ paper: { sx: { borderRadius: 2 } } }}>
         <DialogTitle sx={{ fontWeight: 600, pb: 1 }}>
           {editMode ? 'Editar usuario' : 'Nuevo usuario'}
         </DialogTitle>
@@ -367,18 +377,18 @@ export function UsuariosView() {
           </Box>
         </DialogContent>
         <DialogActions sx={{ p: 3, pt: 1 }}>
-          <Button onClick={handleClose} sx={{ borderRadius: '8px' }}>
+          <Button onClick={handleClose} disabled={saving} sx={{ borderRadius: '8px' }}>
             Cancelar
           </Button>
           <Button 
             onClick={handleSave} 
             variant="contained" 
             disableElevation
-            startIcon={<SaveIcon />}
-            disabled={!nombres || !apellidoPaterno || !email || (!editMode && !password) || !(isAdmin ? usuarioSesion?.sucursalId : sucursalId)}
+            startIcon={saving ? <CircularProgress size={18} color="inherit" /> : <SaveIcon />}
+            disabled={saving || !nombres || !apellidoPaterno || !email || (!editMode && !password) || !(isAdmin ? usuarioSesion?.sucursalId : sucursalId)}
             sx={{ borderRadius: '8px', px: 3 }}
           >
-            Guardar
+            {saving ? 'Guardando...' : 'Guardar'}
           </Button>
         </DialogActions>
       </Dialog>

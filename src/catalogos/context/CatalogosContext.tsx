@@ -1,7 +1,7 @@
 import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useAuth } from '../../auth/context/AuthContext';
-import { Marca, Proveedor, UnidadMedida } from '../../inventario/types';
+import { Categoria, Marca, Proveedor, UnidadMedida } from '../../inventario/types';
 import { Sucursal } from '../../sucursales/types';
 import { Usuario } from '../../usuarios/types';
 
@@ -9,6 +9,7 @@ interface CatalogosContextType {
   sucursales: Sucursal[];
   proveedores: Proveedor[];
   marcas: Marca[];
+  categorias: Categoria[];
   unidades: UnidadMedida[];
   usuarios: Usuario[];
   isLoading: boolean;
@@ -23,6 +24,7 @@ export const CatalogosProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   const [sucursales, setSucursales] = useState<Sucursal[]>([]);
   const [proveedores, setProveedores] = useState<Proveedor[]>([]);
   const [marcas, setMarcas] = useState<Marca[]>([]);
+  const [categorias, setCategorias] = useState<Categoria[]>([]);
   const [unidades, setUnidades] = useState<UnidadMedida[]>([]);
   const [usuarios, setUsuarios] = useState<Usuario[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -33,6 +35,7 @@ export const CatalogosProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       setSucursales([]);
       setProveedores([]);
       setMarcas([]);
+      setCategorias([]);
       setUnidades([]);
       setUsuarios([]);
       setError(null);
@@ -42,16 +45,18 @@ export const CatalogosProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     setIsLoading(true);
     setError(null);
     try {
-      const [sucursalesData, proveedoresData, marcasData, unidadesData, usuariosData] = await Promise.all([
+      const [sucursalesData, proveedoresData, marcasData, categoriasData, unidadesData, usuariosData] = await Promise.all([
         invoke<Sucursal[]>('get_sucursales'),
         invoke<Proveedor[]>('get_proveedores'),
         invoke<Marca[]>('get_marcas'),
+        invoke<Categoria[]>('get_categorias'),
         invoke<UnidadMedida[]>('get_unidades'),
         invoke<Usuario[]>('get_usuarios'),
       ]);
       setSucursales(sucursalesData);
       setProveedores(proveedoresData);
       setMarcas(marcasData);
+      setCategorias(categoriasData);
       setUnidades(unidadesData);
       setUsuarios(usuariosData);
     } catch (err) {
@@ -73,6 +78,7 @@ export const CatalogosProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         sucursales,
         proveedores,
         marcas,
+        categorias,
         unidades,
         usuarios,
         isLoading,

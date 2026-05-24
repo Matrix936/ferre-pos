@@ -2,14 +2,15 @@ import { useEffect, useMemo, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import {
   Alert,
+  Autocomplete,
   Box,
   Button,
+  CircularProgress,
   Dialog,
   DialogActions,
   DialogContent,
   DialogTitle,
   Divider,
-  MenuItem,
   Paper,
   Table,
   TableBody,
@@ -24,6 +25,14 @@ import { Add as AddIcon, Edit as EditIcon, Save as SaveIcon } from '@mui/icons-m
 import { useCatalogos } from '../../catalogos/context/CatalogosContext';
 import { ProductoCatalogo } from '../../inventario/types';
 import { TableActions } from '../../shared/components/TableActions';
+
+const filterByText = <T,>(items: T[], inputValue: string, getText: (item: T) => string) => {
+  const query = inputValue.trim().toLowerCase();
+  if (query.length < 2) return [];
+  return items
+    .filter((item) => getText(item).toLowerCase().includes(query))
+    .slice(0, 20);
+};
 
 const emptyProduct = (): ProductoCatalogo => ({
   id: crypto.randomUUID(),
@@ -42,13 +51,14 @@ const emptyProduct = (): ProductoCatalogo => ({
 });
 
 export function ProductosView() {
-  const { proveedores, marcas, unidades } = useCatalogos();
+  const { proveedores, marcas, categorias, unidades } = useCatalogos();
   const [productos, setProductos] = useState<ProductoCatalogo[]>([]);
   const [search, setSearch] = useState('');
   const [open, setOpen] = useState(false);
   const [editMode, setEditMode] = useState(false);
   const [producto, setProducto] = useState<ProductoCatalogo>(emptyProduct);
   const [warning, setWarning] = useState('');
+  const [saving, setSaving] = useState(false);
 
   const fetchProductos = async () => {
     const data = await invoke<ProductoCatalogo[]>('get_productos_catalogo');
@@ -68,6 +78,13 @@ export function ProductosView() {
     );
   }, [productos, search]);
 
+  const unidadSeleccionada = useMemo(
+    () => unidades.find((unidad) => unidad.nombre === producto.unidad) ?? null,
+    [producto.unidad, unidades],
+  );
+
+  const satClaveUnidadDerivada = unidadSeleccionada?.claveSat ?? '';
+
   const handleOpen = (item?: ProductoCatalogo) => {
     setWarning('');
     setEditMode(Boolean(item));
@@ -80,10 +97,12 @@ export function ProductosView() {
   };
 
   const handleSave = async () => {
+    if (saving) return;
     if (!producto.proveedorId.trim()) {
       setWarning('Selecciona un proveedor válido.');
       return;
     }
+    setSaving(true);
     try {
       const payload = {
         ...producto,
@@ -96,7 +115,7 @@ export function ProductosView() {
         categoria: producto.categoria.trim(),
         unidad: producto.unidad.trim(),
         satClaveProdServ: producto.satClaveProdServ.trim().toUpperCase(),
-        satClaveUnidad: producto.satClaveUnidad.trim().toUpperCase(),
+        satClaveUnidad: satClaveUnidadDerivada.trim().toUpperCase(),
         precioCosto: 0,
         precioVenta: 0,
       };
@@ -109,6 +128,8 @@ export function ProductosView() {
       await fetchProductos();
     } catch (error) {
       alert(`Error al guardar: ${error}`);
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -191,7 +212,7 @@ export function ProductosView() {
         </TableContainer>
       </Paper>
 
-      <Dialog open={open} onClose={() => setOpen(false)} maxWidth="md" fullWidth>
+      <Dialog open={open} onClose={saving ? undefined : () => setOpen(false)} maxWidth="md" fullWidth>
         <DialogTitle sx={{ fontWeight: 600 }}>{editMode ? 'Editar producto' : 'Nuevo producto'}</DialogTitle>
         <Divider />
         <DialogContent sx={{ pt: 3 }}>
@@ -203,37 +224,58 @@ export function ProductosView() {
             )}
             <TextField label="Código de barras" value={producto.codigoBarras} onChange={(e) => update('codigoBarras', e.target.value)} fullWidth />
             <TextField label="Código de proveedor" value={producto.codigoProveedor} onChange={(e) => update('codigoProveedor', e.target.value)} fullWidth />
-            <TextField select label="Proveedor" value={producto.proveedorId} onChange={(e) => update('proveedorId', e.target.value)} fullWidth required>
-              <MenuItem value=""><em>Selecciona proveedor</em></MenuItem>
-              {proveedores.map((proveedor) => (
-                <MenuItem key={proveedor.id} value={proveedor.id}>{proveedor.nombre}</MenuItem>
-              ))}
-            </TextField>
+            <Autocomplete
+              options={proveedores}
+              value={proveedores.find((proveedor) => proveedor.id === producto.proveedorId) ?? null}
+              onChange={(_, value) => update('proveedorId', value?.id ?? '')}
+              getOptionLabel={(option) => option.nombre}
+              isOptionEqualToValue={(option, value) => typeof value !== 'string' && option.id === value.id}
+              filterOptions={(options, state) => filterByText(options, state.inputValue, (option) => option.nombre)}
+              noOptionsText="Escribe al menos 2 letras para buscar proveedor"
+              renderInput={(params) => <TextField {...params} label="Proveedor" fullWidth required />}
+            />
             <TextField label="Clave interna" value={producto.claveProducto} onChange={(e) => update('claveProducto', e.target.value)} fullWidth />
             <TextField label="Descripción" value={producto.descripcion} onChange={(e) => update('descripcion', e.target.value)} fullWidth required />
-            <TextField select label="Marca" value={producto.marca} onChange={(e) => update('marca', e.target.value)} fullWidth>
-              <MenuItem value=""><em>Sin marca</em></MenuItem>
-              {marcas.map((marca) => (
-                <MenuItem key={marca.id} value={marca.nombre}>{marca.nombre}</MenuItem>
-              ))}
-            </TextField>
-            <TextField label="Categoría" value={producto.categoria} onChange={(e) => update('categoria', e.target.value)} fullWidth />
-            <TextField
-              select
-              label="Unidad"
-              value={producto.unidad}
-              onChange={(e) => {
-                const selected = unidades.find((unidad) => unidad.nombre === e.target.value);
-                update('unidad', e.target.value);
-                if (selected?.claveSat) update('satClaveUnidad', selected.claveSat);
+            <Autocomplete
+              options={marcas}
+              value={marcas.find((marca) => marca.nombre === producto.marca) ?? null}
+              onChange={(_, value) => update('marca', value?.nombre ?? '')}
+              getOptionLabel={(option) => option.nombre}
+              isOptionEqualToValue={(option, value) => option.id === value.id}
+              filterOptions={(options, state) => filterByText(options, state.inputValue, (option) => option.nombre)}
+              noOptionsText="Escribe al menos 2 letras para buscar marcas"
+              renderInput={(params) => <TextField {...params} label="Marca" fullWidth />}
+            />
+            <Autocomplete
+              options={categorias}
+              value={categorias.find((categoria) => categoria.nombre === producto.categoria) ?? null}
+              onChange={(_, value) => update('categoria', value?.nombre ?? '')}
+              getOptionLabel={(option) => option.nombre}
+              isOptionEqualToValue={(option, value) => option.id === value.id}
+              filterOptions={(options, state) => filterByText(options, state.inputValue, (option) => option.nombre)}
+              noOptionsText="Escribe al menos 2 letras para buscar categorías"
+              renderInput={(params) => <TextField {...params} label="Categoría" fullWidth />}
+            />
+            <Autocomplete
+              options={unidades}
+              value={unidades.find((unidad) => unidad.nombre === producto.unidad) ?? null}
+              onChange={(_, value) => {
+                update('unidad', value?.nombre ?? '');
+                update('satClaveUnidad', value?.claveSat ?? '');
               }}
-              fullWidth
-            >
-              <MenuItem value=""><em>Sin unidad</em></MenuItem>
-              {unidades.map((unidad) => (
-                <MenuItem key={unidad.id} value={unidad.nombre}>{unidad.nombre}</MenuItem>
-              ))}
-            </TextField>
+              getOptionLabel={(option) => option.nombre}
+              isOptionEqualToValue={(option, value) => option.id === value.id}
+              filterOptions={(options, state) => filterByText(options, state.inputValue, (option) => `${option.nombre} ${option.claveSat ?? ''}`)}
+              noOptionsText="Escribe al menos 2 letras para buscar unidades"
+              renderInput={(params) => (
+                <TextField
+                  {...params}
+                  label="Unidad"
+                  helperText={satClaveUnidadDerivada ? `Clave SAT: ${satClaveUnidadDerivada}` : ' '}
+                  fullWidth
+                />
+              )}
+            />
             <TextField
               label="Clave Producto/Servicio SAT"
               value={producto.satClaveProdServ}
@@ -242,25 +284,26 @@ export function ProductosView() {
               helperText="Ej. 27111700"
               slotProps={{ htmlInput: { maxLength: 8 } }}
             />
-            <TextField
-              label="Clave Unidad SAT"
-              value={producto.satClaveUnidad}
-              onChange={(e) => update('satClaveUnidad', e.target.value.toUpperCase())}
-              required
-              helperText="Ej. H87, KGM"
-              slotProps={{ htmlInput: { maxLength: 3 } }}
-            />
           </Box>
         </DialogContent>
         <DialogActions sx={{ p: 3, pt: 1 }}>
-          <Button onClick={() => setOpen(false)}>Cancelar</Button>
+          <Button onClick={() => setOpen(false)} disabled={saving}>Cancelar</Button>
           <Button
             variant="contained"
-            startIcon={<SaveIcon />}
+            startIcon={saving ? <CircularProgress size={18} color="inherit" /> : <SaveIcon />}
             onClick={handleSave}
-            disabled={!producto.descripcion.trim() || !producto.proveedorId.trim() || !producto.satClaveProdServ.trim() || !producto.satClaveUnidad.trim()}
+            disabled={
+              saving ||
+              !producto.descripcion.trim() ||
+              !producto.proveedorId.trim() ||
+              !producto.marca.trim() ||
+              !producto.categoria.trim() ||
+              !producto.unidad.trim() ||
+              !producto.satClaveProdServ.trim() ||
+              !satClaveUnidadDerivada.trim()
+            }
           >
-            Guardar
+            {saving ? 'Guardando...' : 'Guardar'}
           </Button>
         </DialogActions>
       </Dialog>
