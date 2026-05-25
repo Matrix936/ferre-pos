@@ -50,6 +50,8 @@ interface HistorialTraspaso {
   observacionesRecepcion?: string | null;
 }
 
+const QUANTITY_PATTERN = /^\d+(\.\d{0,3})?$/;
+
 export function NuevoTraspasoView() {
   const { user } = useAuth();
   const { sucursales } = useCatalogos();
@@ -109,6 +111,14 @@ export function NuevoTraspasoView() {
     () => !origenId || !destinoId || origenId === destinoId,
     [origenId, destinoId],
   );
+  const detalleValido = detalle.every((row) => {
+    const cantidad = row.cantidad.trim();
+    return (
+      QUANTITY_PATTERN.test(cantidad) &&
+      Number(cantidad) > 0 &&
+      Number(cantidad) <= row.stockDisponible
+    );
+  });
 
   const addProducto = (producto: ProductoInventario) => {
     if (detalle.some((row) => row.productoId === producto.id)) return;
@@ -145,6 +155,16 @@ export function NuevoTraspasoView() {
     }
     if (detalle.length === 0) {
       setSnackbar('Agrega al menos un producto.');
+      return;
+    }
+    const invalidos = detalle.find(
+      (row) =>
+        !QUANTITY_PATTERN.test(row.cantidad.trim()) ||
+        Number(row.cantidad) <= 0 ||
+        Number(row.cantidad) > row.stockDisponible,
+    );
+    if (invalidos) {
+      setSnackbar(`Revisa la cantidad de ${invalidos.descripcion}. Debe ser mayor a cero, máximo 3 decimales y no superar stock.`);
       return;
     }
     const excedidos = detalle.find((row) => Number(row.cantidad || 0) > row.stockDisponible);
@@ -315,7 +335,10 @@ export function NuevoTraspasoView() {
             <TableBody>
               {detalle.map((row) => {
                 const cantidad = Number(row.cantidad || 0);
+                const invalidFormat = Boolean(row.cantidad) && !QUANTITY_PATTERN.test(row.cantidad.trim());
+                const nonPositive = Boolean(row.cantidad) && cantidad <= 0;
                 const exceeds = cantidad > row.stockDisponible;
+                const hasError = invalidFormat || nonPositive || exceeds;
                 return (
                   <TableRow key={row.productoId} hover>
                     <TableCell>{row.descripcion}</TableCell>
@@ -327,9 +350,15 @@ export function NuevoTraspasoView() {
                         size="small"
                         value={row.cantidad}
                         onChange={(e) => updateCantidad(row.productoId, e.target.value)}
-                        error={exceeds}
-                        helperText={exceeds ? 'Supera stock disponible' : ' '}
-                        slotProps={{ htmlInput: { min: 0.01, step: '0.01', max: row.stockDisponible } }}
+                        error={hasError}
+                        helperText={
+                          invalidFormat || nonPositive
+                            ? 'Mayor a 0, máximo 3 decimales.'
+                            : exceeds
+                              ? 'Supera stock disponible'
+                              : ' '
+                        }
+                        slotProps={{ htmlInput: { min: 0.001, step: '0.001', max: row.stockDisponible, inputMode: 'decimal' } }}
                       />
                     </TableCell>
                     <TableCell align="right">
@@ -357,7 +386,7 @@ export function NuevoTraspasoView() {
           variant="contained"
           startIcon={loading ? <CircularProgress size={18} color="inherit" /> : <TraspasoIcon />}
           onClick={handleConfirmar}
-          disabled={loading || invalidSucursales || detalle.length === 0}
+          disabled={loading || invalidSucursales || detalle.length === 0 || !detalleValido}
         >
           {loading ? 'Registrando...' : 'Confirmar Traspaso'}
         </Button>

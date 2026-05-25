@@ -29,4 +29,35 @@ export default defineConfig(async () => ({
       ignored: ["**/src-tauri/**"],
     },
   },
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          const normalizedId = id.replaceAll("\\", "/");
+
+          if (!normalizedId.includes("/node_modules/")) {
+            return undefined;
+          }
+
+          if (normalizedId.includes("/@mui/") || normalizedId.includes("/@emotion/")) {
+            return "mui-vendor";
+          }
+
+          if (
+            normalizedId.includes("/react/") ||
+            normalizedId.includes("/react-dom/") ||
+            normalizedId.includes("/react-router-dom/")
+          ) {
+            return "react-vendor";
+          }
+
+          if (normalizedId.includes("/@tauri-apps/")) {
+            return "tauri-vendor";
+          }
+
+          return undefined;
+        },
+      },
+    },
+  },
 }));

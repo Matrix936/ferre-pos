@@ -107,6 +107,8 @@ export function PromocionesView() {
   const [tipoAlcance, setTipoAlcance] = useState<TipoAlcance>('');
   const [valorError, setValorError] = useState('');
   const [alcanceError, setAlcanceError] = useState('');
+  const [fechaError, setFechaError] = useState('');
+  const [sucursalesError, setSucursalesError] = useState('');
   const [sucursalIds, setSucursalIds] = useState<string[]>([]);
   const [deletingId, setDeletingId] = useState('');
 
@@ -201,6 +203,8 @@ export function PromocionesView() {
     setTipoAlcance('');
     setValorError('');
     setAlcanceError('');
+    setFechaError('');
+    setSucursalesError('');
     setSucursalIds(isSuperAdmin ? [] : user?.sucursalId ? [user.sucursalId] : []);
     setError('');
   };
@@ -223,6 +227,8 @@ export function PromocionesView() {
       setTipoAlcance(promo.productoId ? 'PRODUCTO' : promo.categoriaId ? 'CATEGORIA' : promo.marca ? 'MARCA' : '');
       setValorError('');
       setAlcanceError('');
+      setFechaError('');
+      setSucursalesError('');
       setSucursalIds(isSuperAdmin ? promo.sucursalIds : user?.sucursalId ? [user.sucursalId] : []);
       setError('');
       fetchProductosPromociones(isSuperAdmin ? promo.sucursalIds : user?.sucursalId ? [user.sucursalId] : []).catch((err) => setError(String(err)));
@@ -236,6 +242,7 @@ export function PromocionesView() {
   const toggleAll = () => {
     if (!isSuperAdmin) return;
     const next = allSelected ? [] : sucursalesDisponibles.map((sucursal) => sucursal.id);
+    setSucursalesError('');
     setSucursalIds(next);
     fetchProductosPromociones(next).catch((err) => setError(String(err)));
   };
@@ -258,6 +265,7 @@ export function PromocionesView() {
     setMarcaId('');
     setMarcaInput('');
     setAlcanceError('');
+    setSucursalesError('');
   };
 
   const validateValor = () => {
@@ -294,14 +302,31 @@ export function PromocionesView() {
     return '';
   };
 
+  const validateFechas = () => {
+    if (!fechaInicio || !fechaFin) return 'Captura fecha de inicio y fecha fin.';
+    const inicio = new Date(fechaInicio).getTime();
+    const fin = new Date(fechaFin).getTime();
+    if (!Number.isFinite(inicio) || !Number.isFinite(fin)) return 'Las fechas de la promoción no son válidas.';
+    if (fin <= inicio) return 'La fecha fin debe ser posterior a la fecha de inicio.';
+    return '';
+  };
+
+  const validateSucursales = (ids: string[]) => (
+    ids.length === 0 ? 'Selecciona al menos una sucursal para aplicar la promoción.' : ''
+  );
+
   const handleSave = async () => {
     const finalSucursalIds = isSuperAdmin ? sucursalIds : user?.sucursalId ? [user.sucursalId] : [];
 
     const nextAlcanceError = validateAlcance();
     const nextValorError = validateValor();
+    const nextFechaError = validateFechas();
+    const nextSucursalesError = validateSucursales(finalSucursalIds);
     setAlcanceError(nextAlcanceError);
     setValorError(nextValorError);
-    if (nextAlcanceError || nextValorError) {
+    setFechaError(nextFechaError);
+    setSucursalesError(nextSucursalesError);
+    if (nextAlcanceError || nextValorError || nextFechaError || nextSucursalesError) {
       return;
     }
 
@@ -655,8 +680,32 @@ export function PromocionesView() {
                 Vigencia
               </Typography>
               <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', md: '1fr 1fr' }, gap: 2 }}>
-                <TextField label="Fecha inicio" type="datetime-local" value={fechaInicio} onChange={(e) => setFechaInicio(e.target.value)} slotProps={{ inputLabel: { shrink: true } }} required />
-                <TextField label="Fecha fin" type="datetime-local" value={fechaFin} onChange={(e) => setFechaFin(e.target.value)} slotProps={{ inputLabel: { shrink: true } }} required />
+                <TextField
+                  label="Fecha inicio"
+                  type="datetime-local"
+                  value={fechaInicio}
+                  onChange={(e) => {
+                    setFechaInicio(e.target.value);
+                    setFechaError('');
+                  }}
+                  error={Boolean(fechaError)}
+                  helperText={fechaError || ' '}
+                  slotProps={{ inputLabel: { shrink: true } }}
+                  required
+                />
+                <TextField
+                  label="Fecha fin"
+                  type="datetime-local"
+                  value={fechaFin}
+                  onChange={(e) => {
+                    setFechaFin(e.target.value);
+                    setFechaError('');
+                  }}
+                  error={Boolean(fechaError)}
+                  helperText={fechaError || ' '}
+                  slotProps={{ inputLabel: { shrink: true } }}
+                  required
+                />
               </Box>
             </Box>
 
@@ -664,6 +713,11 @@ export function PromocionesView() {
             <Typography variant="subtitle2" sx={{ fontWeight: 800, mb: 1 }}>
               Sucursales
             </Typography>
+            {sucursalesError && (
+              <Typography variant="body2" color="error" sx={{ mb: 1 }}>
+                {sucursalesError}
+              </Typography>
+            )}
             {isSuperAdmin && (
               <FormControlLabel
                 control={<Checkbox checked={allSelected} indeterminate={sucursalIds.length > 0 && !allSelected} onChange={toggleAll} />}
@@ -677,7 +731,10 @@ export function PromocionesView() {
                   control={
                     <Checkbox
                       checked={sucursalIds.includes(sucursal.id)}
-                      onChange={() => toggleSucursal(sucursal.id)}
+                      onChange={() => {
+                        setSucursalesError('');
+                        toggleSucursal(sucursal.id);
+                      }}
                       disabled={!isSuperAdmin}
                     />
                   }
@@ -694,7 +751,7 @@ export function PromocionesView() {
             variant="contained"
             startIcon={saving ? <CircularProgress size={18} color="inherit" /> : <SaveIcon />}
             onClick={handleSave}
-            disabled={saving || !nombre || !valor || !fechaInicio || !fechaFin || !tipoAlcance}
+            disabled={saving || !nombre || !valor || !fechaInicio || !fechaFin || !tipoAlcance || (isSuperAdmin && sucursalIds.length === 0)}
           >
             {saving ? 'Guardando...' : 'Guardar'}
           </Button>

@@ -52,6 +52,8 @@ const parseMoneyInput = (value: string, fieldName: string, allowZero = true) => 
   return amount;
 };
 
+const toCents = (value: number) => Math.round(value * 100);
+
 export function CajaView() {
   const { user } = useAuth();
   const [cajaActual, setCajaActual] = useState<CajaEstado | null>(null);
@@ -75,6 +77,11 @@ export function CajaView() {
   const montoInicialValido = MONEY_PATTERN.test(montoInicial.trim() || '0');
   const montoMovimientoValido = MONEY_PATTERN.test(montoMovimiento.trim()) && Number(montoMovimiento) > 0;
   const montoFinalRealValido = MONEY_PATTERN.test(montoFinalReal.trim() || '0');
+  const egresoSuperaCaja =
+    Boolean(cajaActual) &&
+    tipoMovimiento === 'EGRESO' &&
+    montoMovimientoValido &&
+    toCents(Number(montoMovimiento)) > toCents(cajaActual!.montoEsperadoActual);
   const cierreEnCeroInvalido =
     Boolean(cajaActual) &&
     cajaActual!.montoEsperadoActual > 0 &&
@@ -122,6 +129,15 @@ export function CajaView() {
     setLoading(true);
     try {
       const monto = parseMoneyInput(montoMovimiento, 'El monto del movimiento', false);
+      if (
+        tipoMovimiento === 'EGRESO' &&
+        cajaActual &&
+        toCents(monto) > toCents(cajaActual.montoEsperadoActual)
+      ) {
+        throw new Error(
+          `No puedes registrar un egreso mayor al efectivo esperado en caja ($${cajaActual.montoEsperadoActual.toFixed(2)}).`
+        );
+      }
       const data = await invoke<CajaEstado>('registrar_movimiento_caja', {
         movimiento: {
           id: crypto.randomUUID(),
@@ -150,6 +166,15 @@ export function CajaView() {
       const montoContado = parseMoneyInput(montoFinalReal || '0', 'El monto contado físicamente');
       if (cajaActual.montoEsperadoActual > 0 && montoContado <= 0) {
         throw new Error('No puedes cerrar la caja en $0.00 cuando el monto esperado es mayor a cero.');
+      }
+      const diferenciaCierre = Math.round((montoContado - cajaActual.montoEsperadoActual) * 100) / 100;
+      if (
+        diferenciaCierre !== 0 &&
+        !window.confirm(
+          `La caja cerrará con una diferencia de ${diferenciaCierre >= 0 ? '+' : ''}$${diferenciaCierre.toFixed(2)}. ¿Confirmas el corte?`
+        )
+      ) {
+        return;
       }
 
       await invoke('cerrar_caja', {
@@ -253,8 +278,14 @@ export function CajaView() {
             type="number"
             value={montoMovimiento}
             onChange={(e) => setMontoMovimiento(e.target.value)}
-            error={Boolean(montoMovimiento) && !montoMovimientoValido}
-            helperText={Boolean(montoMovimiento) && !montoMovimientoValido ? 'Debe ser mayor a 0 y tener máximo 2 decimales.' : ' '}
+            error={(Boolean(montoMovimiento) && !montoMovimientoValido) || egresoSuperaCaja}
+            helperText={
+              egresoSuperaCaja
+                ? `El egreso no puede superar el efectivo esperado ($${cajaActual?.montoEsperadoActual.toFixed(2) || '0.00'}).`
+                : Boolean(montoMovimiento) && !montoMovimientoValido
+                  ? 'Debe ser mayor a 0 y tener máximo 2 decimales.'
+                  : ' '
+            }
             slotProps={{ htmlInput: { min: 0.01, step: '0.01', inputMode: 'decimal' } }}
           />
           <TextField label="Motivo" value={motivoMovimiento} onChange={(e) => setMotivoMovimiento(e.target.value)} />
@@ -264,7 +295,7 @@ export function CajaView() {
           <Button
             variant="contained"
             onClick={handleGuardarMovimiento}
-            disabled={loading || !motivoMovimiento.trim() || !montoMovimientoValido}
+            disabled={loading || !motivoMovimiento.trim() || !montoMovimientoValido || egresoSuperaCaja}
             startIcon={loading ? <CircularProgress size={18} color="inherit" /> : <SaveIcon />}
           >
             {loading ? 'Guardando...' : 'Guardar'}

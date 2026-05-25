@@ -102,6 +102,8 @@ export interface RegistrarVentaPayload {
   fecha: string;
   metodoPago: string;
   clienteId?: string;
+  efectivoRecibido?: number;
+  cambioEntregado?: number;
   detalles: VentaDetallePayload[];
 }
 

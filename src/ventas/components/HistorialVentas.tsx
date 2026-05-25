@@ -20,15 +20,20 @@ import {
   TextField,
   Typography,
 } from '@mui/material';
+import { Print as PrintIcon } from '@mui/icons-material';
 import { RoleGuard } from '../../auth/components/RoleGuard';
 import { useAuth } from '../../auth/context/AuthContext';
 import { useCatalogos } from '../../catalogos/context/CatalogosContext';
+import { useConfig } from '../../config/context/ConfigContext';
+import { TicketPreview } from './TicketPreview';
 
 interface HistorialVenta {
   id: string;
   fecha: string;
   total: number;
   metodoPago: string;
+  efectivoRecibido?: number | null;
+  cambioEntregado?: number | null;
   estado: string;
   sucursalId: string;
   sucursalNombre: string;
@@ -48,9 +53,18 @@ interface HistorialVentaDetalle {
   precioVentaPactado: number;
 }
 
+interface EmpresaConfigFiscal {
+  rfc: string;
+  razonSocial: string;
+  regimenFiscal: string;
+  registroPatronal?: string | null;
+  actualizadoAt: string;
+}
+
 export function HistorialVentasView() {
   const { user } = useAuth();
   const { sucursales, usuarios } = useCatalogos();
+  const { logo } = useConfig();
   const isSuperAdmin = user?.role === 'SUPERADMIN';
   const [ventas, setVentas] = useState<HistorialVenta[]>([]);
   const [fechaInicio, setFechaInicio] = useState('');
@@ -64,6 +78,9 @@ export function HistorialVentasView() {
   const [motivoCancelacion, setMotivoCancelacion] = useState('');
   const [usuarioAutorizoClave, setUsuarioAutorizoClave] = useState('');
   const [cancelError, setCancelError] = useState('');
+  const [printing, setPrinting] = useState(false);
+  const [detailError, setDetailError] = useState('');
+  const [empresaConfig, setEmpresaConfig] = useState<EmpresaConfigFiscal | null>(null);
 
   const fetchVentas = async () => {
     const filtro = {
@@ -80,10 +97,68 @@ export function HistorialVentasView() {
     fetchVentas().catch((error) => console.error('Error historial ventas:', error));
   }, [fechaInicio, fechaFin, sucursalId, usuarioId, user?.sucursalId, isSuperAdmin]);
 
+  useEffect(() => {
+    invoke<EmpresaConfigFiscal | null>('get_empresa_config')
+      .then(setEmpresaConfig)
+      .catch((error) => console.error('Error configuración fiscal:', error));
+  }, []);
+
   const openDetalle = async (venta: HistorialVenta) => {
     setSelectedVenta(venta);
-    const data = await invoke<HistorialVentaDetalle[]>('get_detalle_venta', { ventaId: venta.id });
-    setDetalle(data);
+    setDetalle([]);
+    setDetailError('');
+    try {
+      const data = await invoke<HistorialVentaDetalle[]>('get_detalle_venta', { ventaId: venta.id });
+      setDetalle(data);
+    } catch (error) {
+      setDetailError(`Error al cargar detalle: ${error}`);
+    }
+  };
+
+  const handleCloseDetalle = () => {
+    if (printing || loadingCancel) return;
+    setSelectedVenta(null);
+    setDetalle([]);
+    setDetailError('');
+  };
+
+  const handleReimprimirTicket = async () => {
+    if (!selectedVenta || detalle.length === 0) return;
+    const printerName = window.prompt('Nombre o ruta de la impresora térmica', '\\\\localhost\\IMPRESORA_TICKETS');
+    if (!printerName?.trim()) return;
+
+    setPrinting(true);
+    setDetailError('');
+    try {
+      await invoke('imprimir_ticket_y_abrir_caja', {
+        printerName: printerName.trim(),
+        paperWidth: 42,
+        abrirCajon: false,
+        ticket: {
+          folio: selectedVenta.id.slice(0, 8).toUpperCase(),
+          fecha: new Date(selectedVenta.fecha).toLocaleString(),
+          cajero: selectedVenta.usuarioNombre,
+          sucursal: selectedVenta.sucursalNombre,
+          metodoPago: selectedVenta.metodoPago,
+          productos: detalle.map((item) => ({
+            descripcion: item.descripcion,
+            cantidad: item.cantidad,
+            precioUnitario: item.precioVentaPactado,
+            importe: item.cantidad * item.precioVentaPactado,
+          })),
+          subtotal: selectedVenta.total / 1.16,
+          descuento: 0,
+          total: selectedVenta.total,
+          recibido: selectedVenta.metodoPago === 'EFECTIVO' ? selectedVenta.efectivoRecibido ?? selectedVenta.total : undefined,
+          cambio: selectedVenta.metodoPago === 'EFECTIVO' ? selectedVenta.cambioEntregado ?? 0 : undefined,
+          mensaje: '¡Gracias por su compra!',
+        },
+      });
+    } catch (error) {
+      setDetailError(`Error al reimprimir ticket: ${error}`);
+    } finally {
+      setPrinting(false);
+    }
   };
 
   const handleCancelarVenta = async () => {
@@ -195,34 +270,41 @@ export function HistorialVentasView() {
         </TableContainer>
       </Paper>
 
-      <Dialog open={Boolean(selectedVenta)} onClose={() => setSelectedVenta(null)} maxWidth="md" fullWidth>
+      <Dialog open={Boolean(selectedVenta)} onClose={handleCloseDetalle} maxWidth="md" fullWidth>
         <DialogTitle>Detalle de Venta</DialogTitle>
-        <DialogContent sx={{ pt: 2 }}>
-          <Typography variant="body2" sx={{ mb: 2 }}>
-            Folio: <strong>{selectedVenta?.id}</strong> · Estado: <strong>{selectedVenta?.estado}</strong>
-          </Typography>
-          <Table size="small">
-            <TableHead>
-              <TableRow>
-                <TableCell>Producto</TableCell>
-                <TableCell>Marca</TableCell>
-                <TableCell align="right">Cantidad</TableCell>
-                <TableCell align="right">Precio</TableCell>
-                <TableCell align="right">Importe</TableCell>
-              </TableRow>
-            </TableHead>
-            <TableBody>
-              {detalle.map((item) => (
-                <TableRow key={item.id}>
-                  <TableCell>{item.descripcion}</TableCell>
-                  <TableCell>{item.marca || '-'}</TableCell>
-                  <TableCell align="right">{item.cantidad}</TableCell>
-                  <TableCell align="right">${item.precioVentaPactado.toFixed(2)}</TableCell>
-                  <TableCell align="right">${(item.cantidad * item.precioVentaPactado).toFixed(2)}</TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
+        <DialogContent sx={{ '&&': { pt: 2.5 } }}>
+          {detailError && <Alert severity="error" sx={{ mb: 2 }}>{detailError}</Alert>}
+          {selectedVenta && (
+            <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', md: 'minmax(320px, 380px) 1fr' }, gap: 3, alignItems: 'start' }}>
+              <TicketPreview
+                venta={selectedVenta}
+                detalles={detalle}
+                empresaNombre={empresaConfig?.razonSocial}
+                rfc={empresaConfig?.rfc}
+                regimenFiscal={empresaConfig?.regimenFiscal}
+                codigoPostal={sucursales.find((sucursal) => sucursal.id === selectedVenta.sucursalId)?.codigoPostal}
+                logoSrc={logo || undefined}
+              />
+              <Paper elevation={0} sx={{ p: 2, borderRadius: 2, border: '1px solid', borderColor: 'divider' }}>
+                <Typography variant="subtitle1" sx={{ fontWeight: 800, mb: 1 }}>
+                  Resumen de venta
+                </Typography>
+                <Typography variant="body2" color="text.secondary">
+                  Folio completo
+                </Typography>
+                <Typography variant="body2" sx={{ fontWeight: 700, mb: 2, wordBreak: 'break-all' }}>
+                  {selectedVenta.id}
+                </Typography>
+                <Typography variant="body2">Estado: <strong>{selectedVenta.estado}</strong></Typography>
+                <Typography variant="body2">Sucursal: <strong>{selectedVenta.sucursalNombre}</strong></Typography>
+                <Typography variant="body2">Cajero: <strong>{selectedVenta.usuarioNombre}</strong></Typography>
+                <Typography variant="body2">Productos: <strong>{detalle.length}</strong></Typography>
+                <Typography variant="h5" sx={{ fontWeight: 900, mt: 2 }}>
+                  ${selectedVenta.total.toFixed(2)}
+                </Typography>
+              </Paper>
+            </Box>
+          )}
         </DialogContent>
         <DialogActions sx={{ p: 2 }}>
           <RoleGuard allowedRoles={['SUPERADMIN', 'ADMIN']}>
@@ -236,7 +318,15 @@ export function HistorialVentasView() {
               {loadingCancel ? 'Cancelando...' : 'Cancelar Venta'}
             </Button>
           </RoleGuard>
-          <Button onClick={() => setSelectedVenta(null)} disabled={loadingCancel}>Cerrar</Button>
+          <Button
+            variant="outlined"
+            startIcon={printing ? <CircularProgress size={18} /> : <PrintIcon />}
+            onClick={handleReimprimirTicket}
+            disabled={printing || loadingCancel || detalle.length === 0}
+          >
+            {printing ? 'Reimprimiendo...' : 'Reimprimir Ticket'}
+          </Button>
+          <Button onClick={handleCloseDetalle} disabled={loadingCancel || printing}>Cerrar</Button>
         </DialogActions>
       </Dialog>
 

@@ -40,6 +40,8 @@ const regimenesFiscales = [
   { value: '626', label: '626 - Régimen Simplificado de Confianza' },
 ];
 
+const MONEY_PATTERN = /^\d+(\.\d{0,2})?$/;
+
 export function ClientesView() {
   const { user } = useAuth();
   const [clientes, setClientes] = useState<Cliente[]>([]);
@@ -52,6 +54,7 @@ export function ClientesView() {
   const [telefono, setTelefono] = useState('');
   const [direccion, setDireccion] = useState('');
   const [limiteCredito, setLimiteCredito] = useState('0');
+  const [saldoEdicion, setSaldoEdicion] = useState(0);
 
   const [openAbono, setOpenAbono] = useState(false);
   const [clienteAbono, setClienteAbono] = useState<Cliente | null>(null);
@@ -67,6 +70,18 @@ export function ClientesView() {
   const [savingFiscal, setSavingFiscal] = useState(false);
   const [savingAbono, setSavingAbono] = useState(false);
   const [loadingFiscalId, setLoadingFiscalId] = useState('');
+  const montoAbonoValido =
+    MONEY_PATTERN.test(montoAbono.trim()) &&
+    Number(montoAbono) > 0 &&
+    (!clienteAbono || Number(montoAbono) <= clienteAbono.saldoDeudor);
+  const limiteCreditoValido =
+    MONEY_PATTERN.test(limiteCredito.trim()) &&
+    Number(limiteCredito) >= 0;
+  const limiteCreditoMenorASaldo =
+    editMode &&
+    Number(limiteCredito || 0) > 0 &&
+    Math.round(Number(limiteCredito || 0) * 100) < Math.round(saldoEdicion * 100);
+  const clienteFormInvalido = !nombre.trim() || !limiteCreditoValido || limiteCreditoMenorASaldo;
 
   const fetchClientes = async () => {
     try {
@@ -89,6 +104,7 @@ export function ClientesView() {
       setTelefono(cliente.telefono);
       setDireccion(cliente.direccion);
       setLimiteCredito(String(cliente.limiteCredito));
+      setSaldoEdicion(cliente.saldoDeudor);
     } else {
       setEditMode(false);
       setCurrentId(crypto.randomUUID());
@@ -96,12 +112,25 @@ export function ClientesView() {
       setTelefono('');
       setDireccion('');
       setLimiteCredito('0');
+      setSaldoEdicion(0);
     }
     setOpenCliente(true);
   };
 
   const handleSaveCliente = async () => {
     if (savingCliente) return;
+    if (!nombre.trim()) {
+      alert('Captura el nombre del cliente.');
+      return;
+    }
+    if (!limiteCreditoValido) {
+      alert('Captura un límite de crédito válido, sin negativos y máximo 2 decimales.');
+      return;
+    }
+    if (limiteCreditoMenorASaldo) {
+      alert(`El límite de crédito no puede ser menor al saldo deudor actual ($${saldoEdicion.toFixed(2)}).`);
+      return;
+    }
     const cliente: Cliente = {
       id: currentId,
       nombre: nombre.trim(),
@@ -194,13 +223,18 @@ export function ClientesView() {
 
   const handleRegistrarAbono = async () => {
     if (!clienteAbono || !user?.id) return;
+    if (!montoAbonoValido) {
+      alert('Captura un abono válido, mayor a cero y no superior al saldo deudor.');
+      return;
+    }
+
     setSavingAbono(true);
     try {
       await invoke('registrar_abono', {
         abono: {
           id: crypto.randomUUID(),
           clienteId: clienteAbono.id,
-          monto: Number(montoAbono || 0),
+          monto: Math.round(Number(montoAbono) * 100) / 100,
           fecha: new Date().toISOString(),
           usuarioId: user.id,
         },
@@ -303,6 +337,14 @@ export function ClientesView() {
               type="number"
               value={limiteCredito}
               onChange={(e) => setLimiteCredito(e.target.value)}
+              error={Boolean(limiteCredito) && !limiteCreditoValido}
+              helperText={
+                Boolean(limiteCredito) && !limiteCreditoValido
+                  ? 'Debe ser mayor o igual a cero y tener máximo 2 decimales.'
+                  : limiteCreditoMenorASaldo
+                    ? `No puede ser menor al saldo deudor actual: $${saldoEdicion.toFixed(2)}.`
+                  : 'Usa 0 para clientes sin crédito autorizado.'
+              }
               slotProps={{ htmlInput: { min: 0, step: '0.01' } }}
             />
           </Box>
@@ -314,7 +356,7 @@ export function ClientesView() {
             variant="contained"
             startIcon={savingCliente ? <CircularProgress size={18} color="inherit" /> : <SaveIcon />}
             disableElevation
-            disabled={savingCliente || !nombre.trim()}
+            disabled={savingCliente || clienteFormInvalido}
           >
             {savingCliente ? 'Guardando...' : 'Guardar'}
           </Button>
@@ -327,13 +369,22 @@ export function ClientesView() {
           <Typography variant="body2" sx={{ mb: 1.5 }}>
             Cliente: <strong>{clienteAbono?.nombre}</strong>
           </Typography>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+            Saldo pendiente: ${clienteAbono?.saldoDeudor.toFixed(2) ?? '0.00'}
+          </Typography>
           <TextField
             label="Monto del abono"
             type="number"
             fullWidth
             value={montoAbono}
             onChange={(e) => setMontoAbono(e.target.value)}
-            slotProps={{ htmlInput: { min: 0.01, step: '0.01' } }}
+            error={Boolean(montoAbono) && !montoAbonoValido}
+            helperText={
+              Boolean(montoAbono) && !montoAbonoValido
+                ? 'Debe ser mayor a cero, máximo 2 decimales y no superar el saldo.'
+                : 'El abono se registrará como ingreso en la caja abierta.'
+            }
+            slotProps={{ htmlInput: { min: 0.01, step: '0.01', inputMode: 'decimal' } }}
           />
         </DialogContent>
         <DialogActions sx={{ p: 2 }}>
@@ -342,7 +393,7 @@ export function ClientesView() {
             variant="contained"
             onClick={handleRegistrarAbono}
             startIcon={savingAbono ? <CircularProgress size={18} color="inherit" /> : undefined}
-            disabled={savingAbono || !Number(montoAbono || 0)}
+            disabled={savingAbono || !montoAbonoValido}
           >
             {savingAbono ? 'Registrando...' : 'Registrar'}
           </Button>

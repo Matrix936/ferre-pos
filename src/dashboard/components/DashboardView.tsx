@@ -6,6 +6,8 @@ import {
   Button,
   Card,
   CardContent,
+  CircularProgress,
+  Alert,
   MenuItem,
   Paper,
   Table,
@@ -24,6 +26,8 @@ interface DashboardStats {
   totalVendido: number;
   utilidadNeta: number;
   transacciones: number;
+  ticketPromedio: number;
+  margenPorcentaje: number;
 }
 
 interface ProductoBajoStock {
@@ -50,11 +54,20 @@ export function DashboardView() {
   const [selectedSucursalId, setSelectedSucursalId] = useState('');
   const [fechaInicio, setFechaInicio] = useState('');
   const [fechaFin, setFechaFin] = useState('');
-  const [stats, setStats] = useState<DashboardStats>({ totalVendido: 0, utilidadNeta: 0, transacciones: 0 });
+  const [stats, setStats] = useState<DashboardStats>({
+    totalVendido: 0,
+    utilidadNeta: 0,
+    transacciones: 0,
+    ticketPromedio: 0,
+    margenPorcentaje: 0,
+  });
   const [bajoStock, setBajoStock] = useState<ProductoBajoStock[]>([]);
   const [topVendidos, setTopVendidos] = useState<ProductoMasVendido[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
 
   const isSuperAdmin = user?.role === 'SUPERADMIN';
+  const canViewDashboard = user?.role === 'SUPERADMIN' || user?.role === 'ADMIN';
 
   const filtro = useMemo(
     () => ({
@@ -66,29 +79,37 @@ export function DashboardView() {
   );
 
   const fetchData = async () => {
-    const [statsData, lowStockData, topData] = await Promise.all([
-      invoke<DashboardStats>('get_dashboard_stats', { filtro }),
-      invoke<ProductoBajoStock[]>('get_productos_bajo_stock', { sucursalId: filtro.sucursalId }),
-      invoke<ProductoMasVendido[]>('get_productos_mas_vendidos', { filtro }),
-    ]);
-    setStats(statsData);
-    setBajoStock(lowStockData);
-    setTopVendidos(topData);
+    setLoading(true);
+    setError('');
+    try {
+      const [statsData, lowStockData, topData] = await Promise.all([
+        invoke<DashboardStats>('get_dashboard_stats', { filtro }),
+        invoke<ProductoBajoStock[]>('get_productos_bajo_stock', { sucursalId: filtro.sucursalId }),
+        invoke<ProductoMasVendido[]>('get_productos_mas_vendidos', { filtro }),
+      ]);
+      setStats(statsData);
+      setBajoStock(lowStockData);
+      setTopVendidos(topData);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setLoading(false);
+    }
   };
 
   useEffect(() => {
-    if (!isSuperAdmin) return;
-    fetchData().catch((error) => console.error('Error al cargar dashboard:', error));
-  }, [isSuperAdmin, filtro]);
+    if (!canViewDashboard) return;
+    fetchData();
+  }, [canViewDashboard, filtro]);
 
-  if (!isSuperAdmin) {
+  if (!canViewDashboard) {
     return (
       <Box sx={{ maxWidth: 900, mx: 'auto', mt: 2 }}>
         <Typography variant="h5" sx={{ fontWeight: 700, mb: 1 }}>
           Panel principal
         </Typography>
         <Typography color="text.secondary">
-          Bienvenido. Este panel analítico está disponible para Superadmin.
+          Bienvenido. Este panel analítico está disponible para administradores.
         </Typography>
       </Box>
     );
@@ -100,22 +121,33 @@ export function DashboardView() {
         Dashboard Analítico
       </Typography>
 
+      {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
+
       <Paper elevation={0} sx={{ p: 2, borderRadius: 2, border: '1px solid', borderColor: 'divider', mb: 2 }}>
         <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap' }}>
-          <TextField
-            select
-            label="Sucursal"
-            value={selectedSucursalId}
-            onChange={(event) => setSelectedSucursalId(event.target.value)}
-            sx={{ minWidth: 220 }}
-          >
-            <MenuItem value="">Todas</MenuItem>
-            {sucursales.map((sucursal) => (
-              <MenuItem key={sucursal.id} value={sucursal.id}>
-                {sucursal.nombre}
-              </MenuItem>
-            ))}
-          </TextField>
+          {isSuperAdmin ? (
+            <TextField
+              select
+              label="Sucursal"
+              value={selectedSucursalId}
+              onChange={(event) => setSelectedSucursalId(event.target.value)}
+              sx={{ minWidth: 220 }}
+            >
+              <MenuItem value="">Todas</MenuItem>
+              {sucursales.map((sucursal) => (
+                <MenuItem key={sucursal.id} value={sucursal.id}>
+                  {sucursal.nombre}
+                </MenuItem>
+              ))}
+            </TextField>
+          ) : (
+            <TextField
+              label="Sucursal"
+              value={sucursales.find((sucursal) => sucursal.id === user?.sucursalId)?.nombre ?? 'Mi sucursal'}
+              sx={{ minWidth: 220 }}
+              disabled
+            />
+          )}
           <TextField
             label="Fecha inicio"
             type="date"
@@ -133,7 +165,14 @@ export function DashboardView() {
         </Box>
       </Paper>
 
-      <Box sx={{ display: 'grid', gap: 2, gridTemplateColumns: { xs: '1fr', md: 'repeat(3, 1fr)' }, mb: 2 }}>
+      {loading && (
+        <Paper elevation={0} sx={{ p: 1.5, borderRadius: 2, border: '1px solid', borderColor: 'divider', mb: 2, display: 'flex', alignItems: 'center', gap: 1.5 }}>
+          <CircularProgress size={18} />
+          <Typography variant="body2" color="text.secondary">Actualizando métricas...</Typography>
+        </Paper>
+      )}
+
+      <Box sx={{ display: 'grid', gap: 2, gridTemplateColumns: { xs: '1fr', md: 'repeat(5, 1fr)' }, mb: 2 }}>
         <Card elevation={0} sx={{ border: '1px solid', borderColor: 'divider' }}>
           <CardContent>
             <Typography color="text.secondary" variant="subtitle2">Ventas</Typography>
@@ -144,6 +183,18 @@ export function DashboardView() {
           <CardContent>
             <Typography color="text.secondary" variant="subtitle2">Utilidad Neta</Typography>
             <Typography variant="h4" sx={{ fontWeight: 800, mt: 1 }}>${stats.utilidadNeta.toFixed(2)}</Typography>
+          </CardContent>
+        </Card>
+        <Card elevation={0} sx={{ border: '1px solid', borderColor: 'divider' }}>
+          <CardContent>
+            <Typography color="text.secondary" variant="subtitle2">Margen</Typography>
+            <Typography variant="h4" sx={{ fontWeight: 800, mt: 1 }}>{stats.margenPorcentaje.toFixed(2)}%</Typography>
+          </CardContent>
+        </Card>
+        <Card elevation={0} sx={{ border: '1px solid', borderColor: 'divider' }}>
+          <CardContent>
+            <Typography color="text.secondary" variant="subtitle2">Ticket Promedio</Typography>
+            <Typography variant="h4" sx={{ fontWeight: 800, mt: 1 }}>${stats.ticketPromedio.toFixed(2)}</Typography>
           </CardContent>
         </Card>
         <Card elevation={0} sx={{ border: '1px solid', borderColor: 'divider' }}>

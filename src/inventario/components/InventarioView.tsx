@@ -22,12 +22,35 @@ import {
   TextField,
   Typography,
 } from '@mui/material';
-import { Add as AddIcon, Edit as EditIcon, Save as SaveIcon } from '@mui/icons-material';
+import {
+  Add as AddIcon,
+  DeleteOutlined as DeleteOutlineIcon,
+  Edit as EditIcon,
+  LocalOffer as LocalOfferIcon,
+  Print as PrintIcon,
+  Save as SaveIcon,
+} from '@mui/icons-material';
 import { useAuth } from '../../auth/context/AuthContext';
 import { useCatalogos } from '../../catalogos/context/CatalogosContext';
 import { InventarioSucursalPayload, ProductoCatalogo, ProductoInventario } from '../types';
 import { TableActions } from '../../shared/components/TableActions';
 import { useDebouncedValue } from '../../shared/hooks/useDebouncedValue';
+import { EtiquetasPrecioModal } from './EtiquetasPrecioModal';
+
+const QUANTITY_PATTERN = /^\d+(\.\d{0,3})?$/;
+const MONEY_PATTERN = /^\d+(\.\d{0,2})?$/;
+const isValidQuantity = (value: string) => {
+  const trimmed = value.trim();
+  if (!QUANTITY_PATTERN.test(trimmed)) return false;
+  const parsed = Number(trimmed);
+  return Number.isFinite(parsed) && parsed >= 0;
+};
+const isValidMoney = (value: string) => {
+  const trimmed = value.trim();
+  if (!MONEY_PATTERN.test(trimmed)) return false;
+  const parsed = Number(trimmed);
+  return Number.isFinite(parsed) && parsed >= 0;
+};
 
 export function InventarioView() {
   const { user } = useAuth();
@@ -46,12 +69,19 @@ export function InventarioView() {
   const [stockMinimo, setStockMinimo] = useState('0');
   const [costoPromedio, setCostoPromedio] = useState('0');
   const [precioVenta, setPrecioVenta] = useState('0');
+  const [productosEtiqueta, setProductosEtiqueta] = useState<ProductoInventario[]>([]);
+  const [deletingKey, setDeletingKey] = useState('');
   const [saving, setSaving] = useState(false);
 
   const userSucursalId = user?.sucursalId ?? '';
   const isSuperAdmin = user?.role === 'SUPERADMIN';
   const sucursalConsulta = isSuperAdmin ? selectedSucursalId : userSucursalId;
   const debouncedSearchInput = useDebouncedValue(searchInput, 300);
+  const stockInvalido = Boolean(stock) && !isValidQuantity(stock);
+  const stockMinimoInvalido = Boolean(stockMinimo) && !isValidQuantity(stockMinimo);
+  const costoPromedioInvalido = Boolean(costoPromedio) && !isValidMoney(costoPromedio);
+  const precioVentaInvalido = Boolean(precioVenta) && !isValidMoney(precioVenta);
+  const formInvalido = stockInvalido || stockMinimoInvalido || costoPromedioInvalido || precioVentaInvalido;
 
   const fetchInventario = async () => {
     if (!sucursalConsulta) return;
@@ -87,14 +117,18 @@ export function InventarioView() {
 
   useEffect(() => {
     const q = debouncedSearchInput.trim();
-    if (!sucursalConsulta || q.length <= 2) {
+    if (!sucursalConsulta || q.length < 2) {
       setSearchOptions([]);
+      if (!q) setSearchApplied('');
       return;
     }
     let active = true;
     invoke<ProductoInventario[]>('buscar_productos_por_sucursal', { sucursalId: sucursalConsulta, query: q })
       .then((data) => {
-        if (active) setSearchOptions(data);
+        if (active) {
+          setSearchOptions(data);
+          setSearchApplied(q);
+        }
       })
       .catch((error) => {
         console.error('Error sugerencias inventario:', error);
@@ -160,6 +194,7 @@ export function InventarioView() {
   const handleSave = async () => {
     if (saving) return;
     if (!productoSeleccionado || !stockSucursalId) return;
+    if (formInvalido) return;
     const inventarioPayload: InventarioSucursalPayload = {
       sucursalId: stockSucursalId,
       stock: Number(stock || 0),
@@ -182,6 +217,27 @@ export function InventarioView() {
     }
   };
 
+  const handleEliminarInventario = async (producto: ProductoInventario) => {
+    const key = `${producto.id}-${producto.sucursalId}`;
+    if (deletingKey) return;
+    const confirmed = window.confirm(
+      `¿Quitar "${producto.descripcion}" del inventario de esta sucursal? El producto seguirá existiendo en el catálogo general.`,
+    );
+    if (!confirmed) return;
+    setDeletingKey(key);
+    try {
+      await invoke('eliminar_inventario_sucursal', {
+        productoId: producto.id,
+        sucursalId: producto.sucursalId,
+      });
+      await fetchInventario();
+    } catch (error) {
+      alert(`Error al eliminar del inventario: ${error}`);
+    } finally {
+      setDeletingKey('');
+    }
+  };
+
   const exportRows = useMemo(
     () =>
       inventario.map((producto) => ({
@@ -200,9 +256,19 @@ export function InventarioView() {
     <Box sx={{ maxWidth: 1280, mx: 'auto', mt: 2 }}>
       <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3, gap: 2, flexWrap: 'wrap' }}>
         <Typography variant="h5" sx={{ fontWeight: 700 }}>Inventario por sucursal</Typography>
-        <Button variant="contained" startIcon={<AddIcon />} onClick={openNew} disableElevation>
-          Agregar producto a sucursal
-        </Button>
+        <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
+          <Button
+            variant="outlined"
+            startIcon={<PrintIcon />}
+            onClick={() => setProductosEtiqueta(inventario)}
+            disabled={inventario.length === 0}
+          >
+            Imprimir etiquetas
+          </Button>
+          <Button variant="contained" startIcon={<AddIcon />} onClick={openNew} disableElevation>
+            Agregar producto a sucursal
+          </Button>
+        </Box>
       </Box>
 
       <Paper elevation={0} sx={{ p: 2, borderRadius: 2, border: '1px solid', borderColor: 'divider', mb: 2 }}>
@@ -212,13 +278,11 @@ export function InventarioView() {
             options={searchOptions}
             getOptionLabel={(option) => (typeof option === 'string' ? option : option.descripcion)}
             filterOptions={(options) => options}
-            noOptionsText="Escribe al menos 3 caracteres para buscar coincidencias"
+            noOptionsText="Escribe al menos 2 letras para buscar coincidencias"
             inputValue={searchInput}
             onInputChange={(_, value, reason) => {
               if (reason === 'reset') {
-                setSearchInput('');
                 setSearchOptions([]);
-                setSearchApplied('');
                 return;
               }
               setSearchInput(value);
@@ -289,8 +353,20 @@ export function InventarioView() {
                   <TableCell>{producto.stock}</TableCell>
                   <TableCell>{producto.stockMinimo}</TableCell>
                   <TableCell align="right">
+                    <Button size="small" startIcon={<LocalOfferIcon />} onClick={() => setProductosEtiqueta([producto])}>
+                      Etiqueta
+                    </Button>
                     <Button size="small" startIcon={<EditIcon />} onClick={() => openEdit(producto)}>
                       Editar
+                    </Button>
+                    <Button
+                      size="small"
+                      color="error"
+                      startIcon={<DeleteOutlineIcon />}
+                      onClick={() => handleEliminarInventario(producto)}
+                      disabled={deletingKey === `${producto.id}-${producto.sucursalId}`}
+                    >
+                      Eliminar
                     </Button>
                   </TableCell>
                 </TableRow>
@@ -334,10 +410,42 @@ export function InventarioView() {
               <MenuItem key={sucursal.id} value={sucursal.id}>{sucursal.nombre}</MenuItem>
             ))}
           </TextField>
-          <TextField label="Stock actual" type="number" value={stock} onChange={(e) => setStock(e.target.value)} />
-          <TextField label="Stock mínimo" type="number" value={stockMinimo} onChange={(e) => setStockMinimo(e.target.value)} />
-          <TextField label="Costo promedio en esta sucursal" type="number" value={costoPromedio} onChange={(e) => setCostoPromedio(e.target.value)} />
-          <TextField label="Precio venta en esta sucursal" type="number" value={precioVenta} onChange={(e) => setPrecioVenta(e.target.value)} />
+          <TextField
+            label="Stock actual"
+            type="number"
+            value={stock}
+            onChange={(e) => setStock(e.target.value)}
+            error={stockInvalido}
+            helperText={stockInvalido ? 'Usa máximo 3 decimales.' : ' '}
+            slotProps={{ htmlInput: { min: 0, step: '0.001', inputMode: 'decimal' } }}
+          />
+          <TextField
+            label="Stock mínimo"
+            type="number"
+            value={stockMinimo}
+            onChange={(e) => setStockMinimo(e.target.value)}
+            error={stockMinimoInvalido}
+            helperText={stockMinimoInvalido ? 'Usa máximo 3 decimales.' : ' '}
+            slotProps={{ htmlInput: { min: 0, step: '0.001', inputMode: 'decimal' } }}
+          />
+          <TextField
+            label="Costo promedio en esta sucursal"
+            type="number"
+            value={costoPromedio}
+            onChange={(e) => setCostoPromedio(e.target.value)}
+            error={costoPromedioInvalido}
+            helperText={costoPromedioInvalido ? 'Usa máximo 2 decimales.' : ' '}
+            slotProps={{ htmlInput: { min: 0, step: '0.01', inputMode: 'decimal' } }}
+          />
+          <TextField
+            label="Precio venta en esta sucursal"
+            type="number"
+            value={precioVenta}
+            onChange={(e) => setPrecioVenta(e.target.value)}
+            error={precioVentaInvalido}
+            helperText={precioVentaInvalido ? 'Usa máximo 2 decimales.' : ' '}
+            slotProps={{ htmlInput: { min: 0, step: '0.01', inputMode: 'decimal' } }}
+          />
         </DialogContent>
         <DialogActions sx={{ p: 3, pt: 1 }}>
           <Button onClick={() => setOpen(false)} disabled={saving}>Cancelar</Button>
@@ -345,12 +453,17 @@ export function InventarioView() {
             variant="contained"
             startIcon={saving ? <CircularProgress size={18} color="inherit" /> : <SaveIcon />}
             onClick={handleSave}
-            disabled={saving || !productoSeleccionado || !stockSucursalId}
+            disabled={saving || !productoSeleccionado || !stockSucursalId || formInvalido}
           >
             {saving ? 'Guardando...' : 'Guardar'}
           </Button>
         </DialogActions>
       </Dialog>
+      <EtiquetasPrecioModal
+        open={productosEtiqueta.length > 0}
+        productos={productosEtiqueta}
+        onClose={() => setProductosEtiqueta([])}
+      />
     </Box>
   );
 }

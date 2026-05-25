@@ -32,6 +32,9 @@ interface CompraRow {
   precioCostoPactado: string;
 }
 
+const QUANTITY_PATTERN = /^\d+(\.\d{0,3})?$/;
+const MONEY_PATTERN = /^\d+(\.\d{0,2})?$/;
+
 export function NuevaCompra() {
   const { user } = useAuth();
   const { proveedores, sucursales } = useCatalogos();
@@ -60,7 +63,7 @@ export function NuevaCompra() {
       return;
     }
     let active = true;
-    invoke<ProductoInventario[]>('buscar_productos_por_sucursal', { sucursalId: sucursalCompraId, query })
+    invoke<ProductoInventario[]>('buscar_productos_para_compra', { sucursalId: sucursalCompraId, query })
       .then((data) => {
         if (active) setProductosBusqueda(data);
       })
@@ -82,6 +85,16 @@ export function NuevaCompra() {
       }, 0),
     [detalle],
   );
+  const detalleValido = detalle.every((row) => {
+    const cantidad = row.cantidad.trim();
+    const costo = row.precioCostoPactado.trim();
+    return (
+      QUANTITY_PATTERN.test(cantidad) &&
+      MONEY_PATTERN.test(costo) &&
+      Number(cantidad) > 0 &&
+      Number(costo) > 0
+    );
+  });
 
   const addProducto = (producto: ProductoInventario) => {
     const exists = detalle.some((row) => row.productoId === producto.id);
@@ -114,6 +127,10 @@ export function NuevaCompra() {
 
   const handleRegistrar = async () => {
     if (!proveedorId || !sucursalCompraId || detalle.length === 0) return;
+    if (!detalleValido) {
+      setSnackbar('Error: Revisa cantidades y costos. Cantidad máximo 3 decimales y costo máximo 2 decimales.');
+      return;
+    }
     setLoading(true);
     try {
       const payload: RegistrarCompraPayload = {
@@ -243,6 +260,12 @@ export function NuevaCompra() {
             <TableBody>
               {detalle.map((row) => {
                 const subtotal = Number(row.cantidad || 0) * Number(row.precioCostoPactado || 0);
+                const cantidadInvalida =
+                  Boolean(row.cantidad) &&
+                  (!QUANTITY_PATTERN.test(row.cantidad.trim()) || Number(row.cantidad) <= 0);
+                const costoInvalido =
+                  Boolean(row.precioCostoPactado) &&
+                  (!MONEY_PATTERN.test(row.precioCostoPactado.trim()) || Number(row.precioCostoPactado) <= 0);
                 return (
                   <TableRow key={row.productoId} hover>
                     <TableCell>{row.descripcion}</TableCell>
@@ -253,7 +276,9 @@ export function NuevaCompra() {
                         size="small"
                         value={row.cantidad}
                         onChange={(e) => updateRow(row.productoId, 'cantidad', e.target.value)}
-                        slotProps={{ htmlInput: { min: 0, step: '0.01' } }}
+                        error={cantidadInvalida}
+                        helperText={cantidadInvalida ? 'Mayor a 0, máximo 3 decimales.' : ' '}
+                        slotProps={{ htmlInput: { min: 0.001, step: '0.001', inputMode: 'decimal' } }}
                       />
                     </TableCell>
                     <TableCell sx={{ width: 180 }}>
@@ -262,7 +287,9 @@ export function NuevaCompra() {
                         size="small"
                         value={row.precioCostoPactado}
                         onChange={(e) => updateRow(row.productoId, 'precioCostoPactado', e.target.value)}
-                        slotProps={{ htmlInput: { min: 0, step: '0.01' } }}
+                        error={costoInvalido}
+                        helperText={costoInvalido ? 'Mayor a 0, máximo 2 decimales.' : ' '}
+                        slotProps={{ htmlInput: { min: 0.01, step: '0.01', inputMode: 'decimal' } }}
                       />
                     </TableCell>
                     <TableCell>${subtotal.toFixed(2)}</TableCell>
@@ -294,7 +321,7 @@ export function NuevaCompra() {
           variant="contained"
           startIcon={loading ? <CircularProgress size={18} color="inherit" /> : <SaveIcon />}
           onClick={handleRegistrar}
-          disabled={loading || !proveedorId || !sucursalCompraId || detalle.length === 0}
+          disabled={loading || !proveedorId || !sucursalCompraId || detalle.length === 0 || !detalleValido}
         >
           {loading ? 'Registrando...' : 'Registrar entrada'}
         </Button>

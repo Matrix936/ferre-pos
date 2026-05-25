@@ -6,6 +6,9 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "check:frontend": "tsc --noEmit",
+    "check:backend": "cd src-tauri && cargo check",
+    "qa": "npm run check:frontend && npm run check:backend && npm run build",
     "preview": "vite preview",
     "tauri": "tauri"
   },

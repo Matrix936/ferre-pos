@@ -47,7 +47,7 @@ export function SincronizacionConfigView() {
   const [isConnected, setIsConnected] = useState(false);
   const [isBusy, setIsBusy] = useState(false);
   const [isBusyBackup, setIsBusyBackup] = useState(false);
-  const [backupAction, setBackupAction] = useState<'download' | 'apply' | 'upload' | 'restore' | ''>('');
+  const [backupAction, setBackupAction] = useState<'download' | 'apply' | 'upload' | 'uploadFull' | 'restore' | ''>('');
   const [errorMessage, setErrorMessage] = useState('');
   const [backupMessage, setBackupMessage] = useState('');
 
@@ -200,6 +200,36 @@ export function SincronizacionConfigView() {
       window.alert('Sincronización hacia la nube completada.');
     } catch (error) {
       const message = `Error al subir cambios: ${String(error)}`;
+      setBackupMessage(message);
+      window.alert(message);
+    } finally {
+      setIsBusyBackup(false);
+      setBackupAction('');
+    }
+  };
+
+  const handleUploadFullToCloud = async () => {
+    const confirmed = window.confirm(
+      'ADVERTENCIA:\n\nEsto tomará la base de datos local como fuente principal y subirá todos sus registros a Supabase, sobrescribiendo los datos que coincidan en la nube.\n\nNo elimina registros que existan solo en Supabase. Para un espejo exacto, primero limpia la nube y después ejecuta esta acción.\n\n¿Estás seguro de que quieres continuar?'
+    );
+    if (!confirmed) return;
+
+    setIsBusyBackup(true);
+    setBackupAction('uploadFull');
+    setBackupMessage('Subiendo base local completa a Supabase, por favor espera...');
+    try {
+      const result = await invoke<SyncUploadResult>('subir_base_local_completa_a_nube');
+      const tableSummary = Object.entries(result.porTabla)
+        .map(([table, count]) => `${table}: ${count}`)
+        .join(', ');
+      setBackupMessage(
+        result.totalRegistros > 0
+          ? `Base local subida correctamente. ${result.totalRegistros} registros enviados (${tableSummary}). No se purgaron registros existentes solo en Supabase.`
+          : 'No se encontraron registros locales para subir.'
+      );
+      window.alert('Base local subida a Supabase correctamente.');
+    } catch (error) {
+      const message = `Error al subir base local completa: ${String(error)}`;
       setBackupMessage(message);
       window.alert(message);
     } finally {
@@ -479,18 +509,31 @@ export function SincronizacionConfigView() {
                     <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 2 }}>
                       Descargar la base de datos completa de la nube sobrescribirá los datos locales.
                     </Typography>
-                    <Button
-                      fullWidth
-                      color="warning"
-                      variant="contained"
-                      startIcon={backupAction === 'restore' ? <CircularProgress size={16} color="inherit" /> : <CloudDownloadIcon />}
-                      onClick={handleRestoreFromCloud}
-                      disabled={isBusyBackup}
-                      disableElevation
-                      sx={{ borderRadius: 999, fontWeight: 700 }}
-                    >
-                      {backupAction === 'restore' ? 'Restaurando nube...' : 'Restaurar nube'}
-                    </Button>
+                    <Box sx={{ display: 'grid', gap: 1 }}>
+                      <Button
+                        fullWidth
+                        color="warning"
+                        variant="contained"
+                        startIcon={backupAction === 'restore' ? <CircularProgress size={16} color="inherit" /> : <CloudDownloadIcon />}
+                        onClick={handleRestoreFromCloud}
+                        disabled={isBusyBackup}
+                        disableElevation
+                        sx={{ borderRadius: 999, fontWeight: 700 }}
+                      >
+                        {backupAction === 'restore' ? 'Restaurando nube...' : 'Restaurar nube'}
+                      </Button>
+                      <Button
+                        fullWidth
+                        color="error"
+                        variant="outlined"
+                        startIcon={backupAction === 'uploadFull' ? <CircularProgress size={16} color="inherit" /> : <CloudUploadSyncIcon />}
+                        onClick={handleUploadFullToCloud}
+                        disabled={isBusyBackup}
+                        sx={{ borderRadius: 999, fontWeight: 700 }}
+                      >
+                        {backupAction === 'uploadFull' ? 'Subiendo local...' : 'Subir local a nube'}
+                      </Button>
+                    </Box>
                   </Alert>
                 </>
               )}

@@ -1,4 +1,5 @@
 import React from "react";
+import { Navigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 import { Role } from "../types";
 
@@ -10,14 +11,13 @@ interface RoleGuardProps {
 export function RoleGuard({ children, allowedRoles }: RoleGuardProps) {
   const { user, isAuthenticated } = useAuth();
 
-  // Si no hay usuario, no renderizamos nada (o podríamos redirigir al login)
+  // Mientras AuthProvider resuelve la sesión inicial, evitamos un parpadeo de rutas.
   if (!isAuthenticated || !user) {
     return null;
   }
 
-  // Ocultamos funciones que no corresponden al rol del usuario.
   if (!allowedRoles.includes(user.role)) {
-    return null;
+    return <Navigate to="/" replace />;
   }
 
   return <>{children}</>;

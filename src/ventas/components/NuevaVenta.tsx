@@ -1,4 +1,4 @@
-import { ReactNode, useEffect, useMemo, useRef, useState } from 'react';
+import { ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import {
   Alert,
@@ -39,6 +39,7 @@ import {
 } from '@mui/icons-material';
 import { useAuth } from '../../auth/context/AuthContext';
 import { Cliente, ProductoInventario, RegistrarVentaPayload } from '../../inventario/types';
+import { useBarcodeScanner } from '../../shared/hooks/useBarcodeScanner';
 import { useDebouncedValue } from '../../shared/hooks/useDebouncedValue';
 
 interface VentaRow {
@@ -73,6 +74,18 @@ const formatMoney = (value: number) => `$${fromCents(toCents(value)).toFixed(2)}
 const getPrecioOriginal = (row: VentaRow) => Number(row.precioOriginal || row.precioVenta || 0);
 const getPrecioFinal = (row: VentaRow) => Number(row.precioVenta || 0);
 const getDescuentoUnitario = (row: VentaRow) => Math.max(0, getPrecioOriginal(row) - getPrecioFinal(row));
+const isValidQuantity = (value: string) => {
+  const trimmed = value.trim();
+  if (!/^\d+(\.\d{0,3})?$/.test(trimmed)) return false;
+  const parsed = Number(trimmed);
+  return Number.isFinite(parsed) && parsed > 0;
+};
+const isValidMoney = (value: string) => {
+  const trimmed = value.trim();
+  if (!/^\d+(\.\d{0,2})?$/.test(trimmed)) return false;
+  const parsed = Number(trimmed);
+  return Number.isFinite(parsed) && parsed > 0;
+};
 
 function ShortcutHint({ keys, label }: { keys: string; label: string }) {
   return (
@@ -211,6 +224,17 @@ export function NuevaVenta() {
       }, 0)),
     [carrito],
   );
+  const selectedCliente = useMemo(
+    () => clientes.find((cliente) => cliente.id === clienteId) ?? null,
+    [clientes, clienteId],
+  );
+  const creditoDisponible = selectedCliente
+    ? fromCents(toCents(selectedCliente.limiteCredito) - toCents(selectedCliente.saldoDeudor))
+    : 0;
+  const creditoInsuficiente =
+    metodoPago === 'CREDITO' &&
+    Boolean(selectedCliente) &&
+    toCents(total) > toCents(Math.max(creditoDisponible, 0));
 
   const subtotalSinDescuento = useMemo(
     () =>
@@ -237,6 +261,19 @@ export function NuevaVenta() {
   );
 
   const cambio = useMemo(() => fromCents(toCents(Number(efectivoRecibido || 0)) - toCents(total)), [efectivoRecibido, total]);
+  const carritoInvalido = useMemo(
+    () => carrito.some((row) => !isValidQuantity(row.cantidad) || !isValidMoney(row.precioVenta)),
+    [carrito],
+  );
+  const efectivoFormatoInvalido = metodoPago === 'EFECTIVO' && !/^\d+(\.\d{0,2})?$/.test(efectivoRecibido.trim() || '0');
+  const cobroBloqueado =
+    loading ||
+    carrito.length === 0 ||
+    !cajaAbierta ||
+    carritoInvalido ||
+    efectivoFormatoInvalido ||
+    (metodoPago === 'EFECTIVO' && cambio < 0) ||
+    (metodoPago === 'CREDITO' && (!clienteId || creditoInsuficiente));
 
   const focusSearch = () => {
     window.setTimeout(() => searchInputRef.current?.focus(), 0);
@@ -305,7 +342,11 @@ export function NuevaVenta() {
   };
 
   const prepararCobro = async () => {
-    if (carrito.length === 0 || !cajaAbierta) return;
+    if (loading || carrito.length === 0 || !cajaAbierta) return;
+    if (carritoInvalido) {
+      setSnackbar('Revisa cantidades y precios antes de cobrar.');
+      return;
+    }
     try {
       await refreshCarritoPromociones();
     } catch (error) {
@@ -323,6 +364,50 @@ export function NuevaVenta() {
     lastProductoAddedRef.current = { id: producto.id, at: now };
     addProducto(producto);
   };
+
+  const handleBarcodeScan = useCallback(
+    async (code: string) => {
+      if (!sucursalId) return;
+      if (!cajaAbierta) {
+        setSnackbar('Abre caja antes de escanear productos.');
+        return;
+      }
+
+      try {
+        const data = await invoke<ProductoInventario[]>('buscar_productos_por_sucursal', {
+          sucursalId,
+          query: code,
+        });
+        const normalizedCode = code.trim().toLowerCase();
+        const producto =
+          data.find(
+            (item) =>
+              item.codigoBarras.toLowerCase() === normalizedCode ||
+              item.codigoProveedor.toLowerCase() === normalizedCode ||
+              item.claveProducto.toLowerCase() === normalizedCode,
+          ) ?? data[0];
+
+        if (!producto) {
+          setSnackbar(`No se encontró el código ${code}.`);
+          return;
+        }
+
+        addProductoFromSearch(producto);
+        setBusqueda('');
+        setOpcionesBusqueda([]);
+      } catch (error) {
+        console.error('Error al leer código de barras:', error);
+        setSnackbar(`Error al leer código de barras: ${error}`);
+      }
+    },
+    [sucursalId, cajaAbierta],
+  );
+
+  useBarcodeScanner(handleBarcodeScan, {
+    enabled: Boolean(sucursalId),
+    maxDelayMs: 50,
+    minLength: 3,
+  });
 
   useEffect(() => {
     const q = busquedaDebounced.trim();
@@ -481,9 +566,18 @@ export function NuevaVenta() {
   };
 
   const confirmarCobro = async () => {
+    if (loading) return;
     if (!user?.id || !sucursalId || carrito.length === 0) return;
     if (!cajaAbierta) {
       setSnackbar('No puedes cobrar porque la caja está cerrada.');
+      return;
+    }
+    if (carritoInvalido) {
+      setSnackbar('Revisa cantidades y precios antes de cobrar.');
+      return;
+    }
+    if (efectivoFormatoInvalido) {
+      setSnackbar('El efectivo recibido debe tener máximo 2 decimales.');
       return;
     }
     if (metodoPago === 'EFECTIVO' && cambio < 0) {
@@ -492,6 +586,10 @@ export function NuevaVenta() {
     }
     if (metodoPago === 'CREDITO' && !clienteId) {
       setSnackbar('Selecciona un cliente para venta a crédito.');
+      return;
+    }
+    if (creditoInsuficiente) {
+      setSnackbar('El crédito disponible del cliente no alcanza para esta venta.');
       return;
     }
 
@@ -504,6 +602,8 @@ export function NuevaVenta() {
         fecha: new Date().toISOString(),
         metodoPago,
         clienteId: metodoPago === 'CREDITO' ? clienteId : undefined,
+        efectivoRecibido: metodoPago === 'EFECTIVO' ? fromCents(toCents(Number(efectivoRecibido || 0))) : undefined,
+        cambioEntregado: metodoPago === 'EFECTIVO' ? fromCents(toCents(Math.max(cambio, 0))) : undefined,
         detalles: carrito.map((row) => ({
           id: crypto.randomUUID(),
           productoId: row.productoId,
@@ -588,13 +688,13 @@ export function NuevaVenta() {
 
       if (key === 'F4') {
         event.preventDefault();
-        if (carrito.length > 0 && cajaAbierta) void prepararCobro();
+        if (!loading && carrito.length > 0 && cajaAbierta) void prepararCobro();
         return;
       }
 
       if (key === 'F12') {
         event.preventDefault();
-        if (carrito.length > 0 && cajaAbierta) void prepararCobro();
+        if (!loading && carrito.length > 0 && cajaAbierta) void prepararCobro();
         return;
       }
 
@@ -618,6 +718,7 @@ export function NuevaVenta() {
 
       if (key === 'F10') {
         event.preventDefault();
+        if (loading) return;
         if (openCobrar) {
           confirmarCobro();
           return;
@@ -634,7 +735,7 @@ export function NuevaVenta() {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [carrito, selectedRowIndex, busqueda, clienteId, efectivoRecibido, openCobrar, openEspera, openVentaRapida, metodoPago, cambio, total, loading, cajaAbierta, canUseVentaRapida, ventaRapidaDescripcion, ventaRapidaCantidad, ventaRapidaPrecio]);
+  }, [carrito, selectedRowIndex, busqueda, clienteId, efectivoRecibido, openCobrar, openEspera, openVentaRapida, metodoPago, cambio, total, loading, cajaAbierta, canUseVentaRapida, ventaRapidaDescripcion, ventaRapidaCantidad, ventaRapidaPrecio, carritoInvalido, efectivoFormatoInvalido, creditoInsuficiente]);
 
   return (
     <Box sx={{ maxWidth: 1280, mx: 'auto', mt: 2, height: 'calc(100vh - 112px)', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
@@ -789,7 +890,9 @@ export function NuevaVenta() {
                       type="number"
                       value={row.cantidad}
                       onChange={(e) => updateRow(row.productoId, 'cantidad', e.target.value)}
-                      slotProps={{ htmlInput: { min: 1, step: '0.01' } }}
+                      error={Boolean(row.cantidad) && !isValidQuantity(row.cantidad)}
+                      helperText={Boolean(row.cantidad) && !isValidQuantity(row.cantidad) ? 'Cantidad inválida' : ' '}
+                      slotProps={{ htmlInput: { min: 0.001, step: '0.001', inputMode: 'decimal' } }}
                     />
                   </TableCell>
                   <TableCell sx={{ width: 180 }}>
@@ -929,7 +1032,7 @@ export function NuevaVenta() {
               size="large"
               startIcon={<PaymentsIcon />}
               onClick={() => void prepararCobro()}
-              disabled={carrito.length === 0 || !cajaAbierta}
+              disabled={loading || carrito.length === 0 || !cajaAbierta || carritoInvalido}
             >
               <ButtonContentWithShortcut shortcut="F4">Cobrar</ButtonContentWithShortcut>
             </Button>
@@ -1038,12 +1141,24 @@ export function NuevaVenta() {
               label="Cliente"
               value={clienteId}
               onChange={(e) => setClienteId(e.target.value)}
+              error={creditoInsuficiente}
+              helperText={
+                selectedCliente
+                  ? creditoInsuficiente
+                    ? `Crédito disponible insuficiente: ${formatMoney(Math.max(creditoDisponible, 0))}.`
+                    : `Disponible: ${formatMoney(Math.max(creditoDisponible, 0))}.`
+                  : 'Selecciona un cliente con crédito autorizado.'
+              }
             >
-              {clientes.map((cliente) => (
-                <MenuItem key={cliente.id} value={cliente.id}>
-                  {cliente.nombre} - Saldo: ${cliente.saldoDeudor.toFixed(2)} / Límite: ${cliente.limiteCredito.toFixed(2)}
+              {clientes.map((cliente) => {
+                const disponible = fromCents(toCents(cliente.limiteCredito) - toCents(cliente.saldoDeudor));
+                const sinCredito = cliente.limiteCredito <= 0 || disponible <= 0;
+                return (
+                <MenuItem key={cliente.id} value={cliente.id} disabled={sinCredito}>
+                  {cliente.nombre} - Disponible: {formatMoney(Math.max(disponible, 0))}
                 </MenuItem>
-              ))}
+                );
+              })}
             </TextField>
           )}
           {ahorroTotal > 0 && (
@@ -1081,7 +1196,15 @@ export function NuevaVenta() {
             onChange={(e) => setEfectivoRecibido(e.target.value)}
             disabled={metodoPago !== 'EFECTIVO'}
             inputRef={efectivoInputRef}
-            slotProps={{ htmlInput: { min: 0, step: '0.01' } }}
+            error={efectivoFormatoInvalido || (metodoPago === 'EFECTIVO' && cambio < 0)}
+            helperText={
+              efectivoFormatoInvalido
+                ? 'Usa máximo 2 decimales.'
+                : metodoPago === 'EFECTIVO' && cambio < 0
+                  ? 'Efectivo insuficiente.'
+                  : ' '
+            }
+            slotProps={{ htmlInput: { min: 0, step: '0.01', inputMode: 'decimal' } }}
           />
           <TextField label="Cambio" value={formatMoney(Math.max(cambio, 0))} disabled />
         </DialogContent>
@@ -1090,7 +1213,7 @@ export function NuevaVenta() {
           <Button
             variant="contained"
             onClick={confirmarCobro}
-            disabled={loading}
+            disabled={cobroBloqueado}
             startIcon={loading ? <CircularProgress size={18} color="inherit" /> : undefined}
           >
             {loading ? 'Cobrando...' : <ButtonContentWithShortcut shortcut="F10">Confirmar cobro</ButtonContentWithShortcut>}

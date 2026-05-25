@@ -8,7 +8,10 @@ use serde_json::{Map as JsonMap, Value as JsonValue};
 use std::collections::HashMap;
 use std::fmt;
 use std::fs;
+use std::fs::File;
+use std::io::Write;
 use std::path::PathBuf;
+use std::process::Command;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -43,6 +46,8 @@ const BACKUP_TABLES: &[&str] = &[
     "promocion_sucursales",
 ];
 
+const LOCAL_ONLY_BACKUP_TABLES: &[&str] = &["notificaciones"];
+
 const SYNC_TABLES: &[&str] = &[
     "sucursales",
     "empresa_config_fiscal",
@@ -71,6 +76,34 @@ const SYNC_TABLES: &[&str] = &[
     "promocion_sucursales",
 ];
 
+const PULL_TABLES: &[&str] = &[
+    "sucursales",
+    "empresa_config_fiscal",
+    "usuarios",
+    "proveedores",
+    "marcas",
+    "categorias",
+    "unidades",
+    "productos",
+    "inventario_sucursal",
+    "clientes",
+    "clientes_datos_fiscales",
+    "promociones",
+    "promocion_sucursales",
+    "compras",
+    "detalle_compras",
+    "ventas",
+    "detalle_ventas",
+    "creditos_abonos",
+    "cajas_sesiones",
+    "caja_movimientos",
+    "traspasos",
+    "detalle_traspasos",
+    "mermas_ajustes",
+    "movimientos_inventario",
+    "facturas_emitidas",
+];
+
 const UUID_SYNC_TABLES: &[&str] = &[
     "compras",
     "detalle_compras",
@@ -93,6 +126,7 @@ const SOFT_DELETE_TABLES: &[&str] = &[
     "categorias",
     "unidades",
     "productos",
+    "inventario_sucursal",
     "clientes",
     "promociones",
 ];
@@ -374,6 +408,8 @@ pub struct RegistrarVentaInput {
     fecha: String,
     metodo_pago: String,
     cliente_id: Option<String>,
+    efectivo_recibido: Option<f64>,
+    cambio_entregado: Option<f64>,
     detalles: Vec<VentaDetalleInput>,
 }
 
@@ -395,6 +431,8 @@ pub struct HistorialVenta {
     fecha: String,
     total: f64,
     metodo_pago: String,
+    efectivo_recibido: Option<f64>,
+    cambio_entregado: Option<f64>,
     estado: String,
     sucursal_id: String,
     sucursal_nombre: String,
@@ -569,6 +607,32 @@ pub struct CerrarCajaInput {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct TicketProductoInput {
+    descripcion: String,
+    cantidad: f64,
+    precio_unitario: f64,
+    importe: f64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TicketPayloadInput {
+    folio: String,
+    fecha: String,
+    cajero: String,
+    sucursal: String,
+    metodo_pago: String,
+    productos: Vec<TicketProductoInput>,
+    subtotal: f64,
+    descuento: f64,
+    total: f64,
+    recibido: Option<f64>,
+    cambio: Option<f64>,
+    mensaje: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DashboardFiltroInput {
     sucursal_id: Option<String>,
     fecha_inicio: Option<String>,
@@ -581,6 +645,8 @@ pub struct DashboardStats {
     total_vendido: f64,
     utilidad_neta: f64,
     transacciones: i64,
+    ticket_promedio: f64,
+    margen_porcentaje: f64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -886,9 +952,9 @@ fn insertar_movimiento_inventario(
         "
         INSERT INTO movimientos_inventario (
             uuid, producto_id, sucursal_id, tipo, referencia_tipo, referencia_id,
-            cantidad, costo_unitario, usuario_id, fecha
+            cantidad, costo_unitario, usuario_id, fecha, sincronizado, updated_at
         )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 0, datetime('now'))
         ",
         params![
             generate_uuid_like(),
@@ -1144,6 +1210,17 @@ fn validate_codigo_postal_sat(codigo_postal: &str) -> Result<(), AppError> {
     )
 }
 
+fn validate_uuid_sat_like(uuid: &str) -> Result<(), AppError> {
+    let uuid = uuid.trim();
+    if uuid.len() < 10 || uuid.len() > 64 {
+        return Err(AppError::Validation("El UUID de la factura no tiene una longitud válida.".to_string()));
+    }
+    if !uuid.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-') {
+        return Err(AppError::Validation("El UUID de la factura contiene caracteres inválidos.".to_string()));
+    }
+    Ok(())
+}
+
 fn validate_producto_sat_claves(producto: &Producto) -> Result<(), AppError> {
     validate_digits_exact(
         producto.sat_clave_prod_serv.trim(),
@@ -1181,6 +1258,23 @@ fn validate_producto(producto: &Producto) -> Result<(), AppError> {
         return Err(AppError::Validation(
             "Error: Debes seleccionar un proveedor válido de la lista para poder registrar el producto.".to_string(),
         ));
+    }
+
+    if producto.marca.trim().is_empty() {
+        return Err(AppError::Validation("Selecciona una marca válida de la lista.".to_string()));
+    }
+    if producto.categoria.trim().is_empty() {
+        return Err(AppError::Validation("Selecciona una categoría válida de la lista.".to_string()));
+    }
+    if producto.unidad.trim().is_empty() {
+        return Err(AppError::Validation("Selecciona una unidad válida de la lista.".to_string()));
+    }
+
+    if !producto.precio_costo.is_finite()
+        || !producto.costo_promedio.is_finite()
+        || !producto.precio_venta.is_finite()
+    {
+        return Err(AppError::Validation("Los precios deben ser números válidos.".to_string()));
     }
 
     if producto.precio_costo < 0.0 || producto.precio_venta < 0.0 {
@@ -1232,11 +1326,11 @@ fn validate_registrar_compra_input(compra: &RegistrarCompraInput) -> Result<(), 
         if detalle.producto_id.trim().is_empty() {
             return Err(AppError::Validation("Un detalle de compra no tiene producto.".to_string()));
         }
-        if detalle.cantidad <= 0.0 {
+        if !detalle.cantidad.is_finite() || detalle.cantidad <= 0.0 {
             return Err(AppError::Validation("La cantidad debe ser mayor que cero.".to_string()));
         }
-        if detalle.precio_costo_pactado < 0.0 {
-            return Err(AppError::Validation("El precio costo pactado no puede ser negativo.".to_string()));
+        if !detalle.precio_costo_pactado.is_finite() || detalle.precio_costo_pactado <= 0.0 {
+            return Err(AppError::Validation("El precio costo pactado debe ser mayor que cero.".to_string()));
         }
     }
 
@@ -1324,6 +1418,37 @@ fn consolidar_detalles_venta(detalles: &[VentaDetalleInput]) -> Result<Vec<Venta
     Ok(consolidados)
 }
 
+fn consolidar_detalles_compra(detalles: &[CompraDetalleInput]) -> Vec<CompraDetalleInput> {
+    let mut index_by_producto: HashMap<String, usize> = HashMap::new();
+    let mut consolidados: Vec<CompraDetalleInput> = Vec::new();
+
+    for detalle in detalles {
+        let producto_id = detalle.producto_id.trim().to_string();
+        if let Some(index) = index_by_producto.get(&producto_id).copied() {
+            let existente = &mut consolidados[index];
+            let total_cantidad = existente.cantidad + detalle.cantidad;
+            let total_costo = (existente.cantidad * existente.precio_costo_pactado)
+                + (detalle.cantidad * detalle.precio_costo_pactado);
+            existente.cantidad = total_cantidad;
+            existente.precio_costo_pactado = if total_cantidad > 0.0 {
+                round_money(total_costo / total_cantidad)
+            } else {
+                detalle.precio_costo_pactado
+            };
+        } else {
+            index_by_producto.insert(producto_id.clone(), consolidados.len());
+            consolidados.push(CompraDetalleInput {
+                id: detalle.id.trim().to_string(),
+                producto_id,
+                cantidad: detalle.cantidad,
+                precio_costo_pactado: detalle.precio_costo_pactado,
+            });
+        }
+    }
+
+    consolidados
+}
+
 fn consolidar_detalles_traspaso(detalles: &[TraspasoDetalleInput]) -> Vec<TraspasoDetalleInput> {
     let mut index_by_producto: HashMap<String, usize> = HashMap::new();
     let mut consolidados: Vec<TraspasoDetalleInput> = Vec::new();
@@ -1351,6 +1476,9 @@ fn validate_cliente(cliente: &Cliente) -> Result<(), AppError> {
     }
     if cliente.nombre.trim().is_empty() {
         return Err(AppError::Validation("El cliente necesita nombre.".to_string()));
+    }
+    if !cliente.limite_credito.is_finite() || !cliente.saldo_deudor.is_finite() {
+        return Err(AppError::Validation("Límite de crédito y saldo deben ser números válidos.".to_string()));
     }
     if cliente.limite_credito < 0.0 || cliente.saldo_deudor < 0.0 {
         return Err(AppError::Validation("Límite de crédito y saldo no pueden ser negativos.".to_string()));
@@ -1383,7 +1511,7 @@ fn validate_abono_credito(input: &AbonoCreditoInput) -> Result<(), AppError> {
     {
         return Err(AppError::Validation("Datos incompletos para registrar abono.".to_string()));
     }
-    if input.monto <= 0.0 {
+    if !input.monto.is_finite() || input.monto <= 0.0 {
         return Err(AppError::Validation("El abono debe ser mayor que cero.".to_string()));
     }
     Ok(())
@@ -1408,7 +1536,7 @@ fn validate_registrar_traspaso_input(input: &RegistrarTraspasoInput) -> Result<(
         if detalle.id.trim().is_empty() || detalle.producto_id.trim().is_empty() {
             return Err(AppError::Validation("Un detalle de traspaso está incompleto.".to_string()));
         }
-        if detalle.cantidad <= 0.0 {
+        if !detalle.cantidad.is_finite() || detalle.cantidad <= 0.0 {
             return Err(AppError::Validation("La cantidad de traspaso debe ser mayor que cero.".to_string()));
         }
     }
@@ -1433,7 +1561,7 @@ fn validate_registrar_merma_ajuste_input(input: &RegistrarMermaAjusteInput) -> R
             "Tipo de movimiento inválido. Usa MERMA, AJUSTE_ENTRADA o AJUSTE_SALIDA.".to_string(),
         ));
     }
-    if input.cantidad <= 0.0 {
+    if !input.cantidad.is_finite() || input.cantidad <= 0.0 {
         return Err(AppError::Validation("La cantidad debe ser mayor que cero.".to_string()));
     }
     Ok(())
@@ -1447,7 +1575,7 @@ fn validate_abrir_caja_input(input: &AbrirCajaInput) -> Result<(), AppError> {
     {
         return Err(AppError::Validation("Datos incompletos para abrir caja.".to_string()));
     }
-    if input.monto_inicial < 0.0 {
+    if !input.monto_inicial.is_finite() || input.monto_inicial < 0.0 {
         return Err(AppError::Validation("El fondo inicial no puede ser negativo.".to_string()));
     }
     Ok(())
@@ -1475,7 +1603,7 @@ fn validate_movimiento_caja_input(input: &MovimientoCajaInput) -> Result<(), App
     if input.tipo != "INGRESO" && input.tipo != "EGRESO" {
         return Err(AppError::Validation("El tipo de movimiento debe ser INGRESO o EGRESO.".to_string()));
     }
-    if input.monto <= 0.0 {
+    if !input.monto.is_finite() || input.monto <= 0.0 {
         return Err(AppError::Validation("El monto del movimiento debe ser mayor que cero.".to_string()));
     }
     if input.motivo.trim().is_empty() {
@@ -1488,7 +1616,7 @@ fn validate_cerrar_caja_input(input: &CerrarCajaInput) -> Result<(), AppError> {
     if input.sesion_id.trim().is_empty() || input.fecha_cierre.trim().is_empty() {
         return Err(AppError::Validation("Datos incompletos para cerrar caja.".to_string()));
     }
-    if input.monto_final_real < 0.0 {
+    if !input.monto_final_real.is_finite() || input.monto_final_real < 0.0 {
         return Err(AppError::Validation("El monto final real no puede ser negativo.".to_string()));
     }
     Ok(())
@@ -1516,6 +1644,138 @@ fn is_superadmin(user: &Usuario) -> bool {
 
 fn is_admin_or_superadmin_role(role: &str) -> bool {
     matches!(role.to_ascii_uppercase().as_str(), "ADMIN" | "SUPERADMIN")
+}
+
+fn ensure_admin_or_superadmin(user: &Usuario) -> AppResult<()> {
+    if is_admin_or_superadmin_role(&user.role) {
+        Ok(())
+    } else {
+        Err("No tienes permisos para realizar esta operación.".to_string())
+    }
+}
+
+fn ensure_unique_catalog_name(
+    conn: &Connection,
+    table: &str,
+    label: &str,
+    current_id: Option<&str>,
+    name: &str,
+) -> Result<(), AppError> {
+    let table = match table {
+        "proveedores" => "proveedores",
+        "marcas" => "marcas",
+        "categorias" => "categorias",
+        "unidades" => "unidades",
+        _ => return Err(AppError::Validation("Catálogo inválido.".to_string())),
+    };
+    let normalized = name.trim();
+    if normalized.is_empty() {
+        return Err(AppError::Validation(format!("El {label} necesita nombre.")));
+    }
+
+    let count: i64 = if let Some(id) = current_id {
+        conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM {table} WHERE eliminado = 0 AND nombre = ?1 COLLATE NOCASE AND id <> ?2"
+            ),
+            params![normalized, id],
+            |row| row.get(0),
+        )?
+    } else {
+        conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM {table} WHERE eliminado = 0 AND nombre = ?1 COLLATE NOCASE"
+            ),
+            [normalized],
+            |row| row.get(0),
+        )?
+    };
+
+    if count > 0 {
+        return Err(AppError::Validation(format!(
+            "Ya existe un {label} activo con ese nombre."
+        )));
+    }
+    Ok(())
+}
+
+fn ensure_catalog_value_exists(
+    conn: &Connection,
+    table: &str,
+    label: &str,
+    name: &str,
+) -> Result<String, AppError> {
+    let table = match table {
+        "marcas" => "marcas",
+        "categorias" => "categorias",
+        "unidades" => "unidades",
+        _ => return Err(AppError::Validation("Catálogo inválido.".to_string())),
+    };
+    let normalized = name.trim();
+    if normalized.is_empty() {
+        return Err(AppError::Validation(format!(
+            "Selecciona una {label} válida de la lista."
+        )));
+    }
+
+    let stored: Option<String> = conn
+        .query_row(
+            &format!("SELECT nombre FROM {table} WHERE eliminado = 0 AND nombre = ?1 COLLATE NOCASE LIMIT 1"),
+            [normalized],
+            |row| row.get(0),
+        )
+        .optional()?;
+
+    stored.ok_or_else(|| {
+        AppError::Validation(format!(
+            "Selecciona una {label} válida de la lista."
+        ))
+    })
+}
+
+fn ensure_superadmin(user: &Usuario) -> AppResult<()> {
+    if is_superadmin(user) {
+        Ok(())
+    } else {
+        Err("Esta operación requiere permisos de SUPERADMIN.".to_string())
+    }
+}
+
+fn require_admin_or_superadmin(state_sesion: &tauri::State<SesionActual>) -> AppResult<Usuario> {
+    let user = current_session_user(state_sesion)?;
+    ensure_admin_or_superadmin(&user)?;
+    Ok(user)
+}
+
+fn require_superadmin(state_sesion: &tauri::State<SesionActual>) -> AppResult<Usuario> {
+    let user = current_session_user(state_sesion)?;
+    ensure_superadmin(&user)?;
+    Ok(user)
+}
+
+fn require_superadmin_or_initial_setup(
+    conn: &Connection,
+    state_sesion: &tauri::State<SesionActual>,
+) -> AppResult<()> {
+    let sesion = state_sesion
+        .0
+        .lock()
+        .map_err(|_| "No se pudo leer la sesión actual.".to_string())?;
+
+    if let Some(user) = sesion.as_ref() {
+        return ensure_superadmin(user);
+    }
+
+    let user_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM usuarios WHERE eliminado = 0", [], |row| row.get(0))
+        .map_err(AppError::from)
+        .map_err(to_command_error)?;
+
+    if user_count == 0 {
+        Ok(())
+    } else {
+        Err("Esta operación requiere una sesión activa de SUPERADMIN.".to_string())
+    }
 }
 
 fn scoped_sucursal_for_read(user: &Usuario, requested_sucursal_id: Option<String>) -> Option<String> {
@@ -1788,6 +2048,8 @@ fn init_db(conn: &Connection) -> Result<(), AppError> {
             fecha TEXT NOT NULL,
             total REAL NOT NULL DEFAULT 0,
             metodo_pago TEXT NOT NULL,
+            efectivo_recibido REAL NULL,
+            cambio_entregado REAL NULL,
             cliente_id TEXT NULL,
             usuario_autorizo_cancelacion_id TEXT NULL,
             motivo_cancelacion TEXT NULL,
@@ -1974,6 +2236,7 @@ fn init_db(conn: &Connection) -> Result<(), AppError> {
     migrate_productos_add_proveedor(conn)?;
     migrate_productos_add_sat_claves(conn)?;
     migrate_ventas_add_estado_cliente(conn)?;
+    migrate_ventas_add_pago_efectivo(conn)?;
     migrate_ventas_add_cancelacion_auditoria(conn)?;
     migrate_facturacion_cfdi40(conn)?;
     migrate_supabase_config(conn)?;
@@ -2523,6 +2786,17 @@ fn migrate_ventas_add_estado_cliente(conn: &Connection) -> Result<(), AppError> 
     Ok(())
 }
 
+fn migrate_ventas_add_pago_efectivo(conn: &Connection) -> Result<(), AppError> {
+    if !table_has_column(conn, "ventas", "efectivo_recibido")? {
+        conn.execute("ALTER TABLE ventas ADD COLUMN efectivo_recibido REAL NULL", [])?;
+    }
+    if !table_has_column(conn, "ventas", "cambio_entregado")? {
+        conn.execute("ALTER TABLE ventas ADD COLUMN cambio_entregado REAL NULL", [])?;
+    }
+
+    Ok(())
+}
+
 fn migrate_ventas_add_cancelacion_auditoria(conn: &Connection) -> Result<(), AppError> {
     let mut stmt = conn.prepare("PRAGMA table_info(ventas)")?;
     let columns_iter = stmt.query_map([], |row| row.get::<_, String>(1))?;
@@ -3034,7 +3308,11 @@ fn get_sucursales(state_db: tauri::State<DbState>) -> AppResult<Vec<Sucursal>> {
 }
 
 #[tauri::command]
-fn get_proveedores(state_db: tauri::State<DbState>) -> AppResult<Vec<Proveedor>> {
+fn get_proveedores(
+    state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
+) -> AppResult<Vec<Proveedor>> {
+    require_admin_or_superadmin(&state_sesion)?;
     let conn = get_conn(&state_db).map_err(to_command_error)?;
     let mut stmt = conn
         .prepare("SELECT id, nombre, contacto_nombre, telefono, email, direccion FROM proveedores WHERE eliminado = 0 ORDER BY nombre")
@@ -3063,11 +3341,31 @@ fn get_proveedores(state_db: tauri::State<DbState>) -> AppResult<Vec<Proveedor>>
 }
 
 #[tauri::command]
-fn create_proveedor(state_db: tauri::State<DbState>, proveedor: Proveedor) -> AppResult<()> {
+fn create_proveedor(
+    state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
+    proveedor: Proveedor,
+) -> AppResult<()> {
+    require_admin_or_superadmin(&state_sesion)?;
+    let proveedor = Proveedor {
+        id: proveedor.id.trim().to_string(),
+        nombre: proveedor.nombre.trim().to_string(),
+        contacto_nombre: proveedor.contacto_nombre.trim().to_string(),
+        telefono: proveedor.telefono.trim().to_string(),
+        email: proveedor.email.trim().to_string(),
+        direccion: proveedor.direccion.trim().to_string(),
+    };
     validate_proveedor(&proveedor).map_err(to_command_error)?;
     let conn = get_conn(&state_db).map_err(to_command_error)?;
+    ensure_unique_catalog_name(&conn, "proveedores", "proveedor", None, &proveedor.nombre)
+        .map_err(to_command_error)?;
     conn.execute(
-        "INSERT INTO proveedores (id, nombre, contacto_nombre, telefono, email, direccion) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        "
+        INSERT INTO proveedores (
+            id, nombre, contacto_nombre, telefono, email, direccion,
+            sincronizado, updated_at, eliminado
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, datetime('now'), 0)
+        ",
         params![
             proveedor.id,
             proveedor.nombre,
@@ -3083,12 +3381,38 @@ fn create_proveedor(state_db: tauri::State<DbState>, proveedor: Proveedor) -> Ap
 }
 
 #[tauri::command]
-fn update_proveedor(state_db: tauri::State<DbState>, id: String, proveedor: Proveedor) -> AppResult<()> {
+fn update_proveedor(
+    state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
+    id: String,
+    proveedor: Proveedor,
+) -> AppResult<()> {
+    require_admin_or_superadmin(&state_sesion)?;
+    let proveedor = Proveedor {
+        id: id.trim().to_string(),
+        nombre: proveedor.nombre.trim().to_string(),
+        contacto_nombre: proveedor.contacto_nombre.trim().to_string(),
+        telefono: proveedor.telefono.trim().to_string(),
+        email: proveedor.email.trim().to_string(),
+        direccion: proveedor.direccion.trim().to_string(),
+    };
     validate_proveedor(&proveedor).map_err(to_command_error)?;
     let conn = get_conn(&state_db).map_err(to_command_error)?;
+    ensure_unique_catalog_name(&conn, "proveedores", "proveedor", Some(&id), &proveedor.nombre)
+        .map_err(to_command_error)?;
     let affected = conn
         .execute(
-            "UPDATE proveedores SET nombre = ?1, contacto_nombre = ?2, telefono = ?3, email = ?4, direccion = ?5 WHERE id = ?6 AND eliminado = 0",
+            "
+            UPDATE proveedores
+            SET nombre = ?1,
+                contacto_nombre = ?2,
+                telefono = ?3,
+                email = ?4,
+                direccion = ?5,
+                sincronizado = 0,
+                updated_at = datetime('now')
+            WHERE id = ?6 AND eliminado = 0
+            ",
             params![
                 proveedor.nombre,
                 proveedor.contacto_nombre,
@@ -3108,7 +3432,12 @@ fn update_proveedor(state_db: tauri::State<DbState>, id: String, proveedor: Prov
 }
 
 #[tauri::command]
-fn delete_provider(state_db: tauri::State<DbState>, id: String) -> AppResult<()> {
+fn delete_provider(
+    state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
+    id: String,
+) -> AppResult<()> {
+    require_admin_or_superadmin(&state_sesion)?;
     let conn = get_conn(&state_db).map_err(to_command_error)?;
     let active_products: i64 = conn
         .query_row(
@@ -3137,7 +3466,11 @@ fn delete_provider(state_db: tauri::State<DbState>, id: String) -> AppResult<()>
 }
 
 #[tauri::command]
-fn get_marcas(state_db: tauri::State<DbState>) -> AppResult<Vec<Marca>> {
+fn get_marcas(
+    state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
+) -> AppResult<Vec<Marca>> {
+    require_admin_or_superadmin(&state_sesion)?;
     let conn = get_conn(&state_db).map_err(to_command_error)?;
     let mut stmt = conn
         .prepare("SELECT id, nombre FROM marcas WHERE eliminado = 0 ORDER BY nombre")
@@ -3155,12 +3488,20 @@ fn get_marcas(state_db: tauri::State<DbState>) -> AppResult<Vec<Marca>> {
 }
 
 #[tauri::command]
-fn create_marca(state_db: tauri::State<DbState>, marca: Marca) -> AppResult<()> {
+fn create_marca(
+    state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
+    marca: Marca,
+) -> AppResult<()> {
+    require_admin_or_superadmin(&state_sesion)?;
+    let marca = Marca { id: marca.id.trim().to_string(), nombre: marca.nombre.trim().to_string() };
     validate_marca(&marca).map_err(to_command_error)?;
     let conn = get_conn(&state_db).map_err(to_command_error)?;
+    ensure_unique_catalog_name(&conn, "marcas", "marca", None, &marca.nombre)
+        .map_err(to_command_error)?;
     conn.execute(
-        "INSERT INTO marcas (id, nombre) VALUES (?1, ?2)",
-        params![marca.id, marca.nombre.trim()],
+        "INSERT INTO marcas (id, nombre, sincronizado, updated_at, eliminado) VALUES (?1, ?2, 0, datetime('now'), 0)",
+        params![marca.id, marca.nombre],
     )
     .map_err(|error| map_write_error(error, "marca"))
     .map_err(to_command_error)?;
@@ -3168,13 +3509,22 @@ fn create_marca(state_db: tauri::State<DbState>, marca: Marca) -> AppResult<()> 
 }
 
 #[tauri::command]
-fn update_marca(state_db: tauri::State<DbState>, id: String, marca: Marca) -> AppResult<()> {
+fn update_marca(
+    state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
+    id: String,
+    marca: Marca,
+) -> AppResult<()> {
+    require_admin_or_superadmin(&state_sesion)?;
+    let marca = Marca { id: id.trim().to_string(), nombre: marca.nombre.trim().to_string() };
     validate_marca(&marca).map_err(to_command_error)?;
     let conn = get_conn(&state_db).map_err(to_command_error)?;
+    ensure_unique_catalog_name(&conn, "marcas", "marca", Some(&id), &marca.nombre)
+        .map_err(to_command_error)?;
     let affected = conn
         .execute(
-            "UPDATE marcas SET nombre = ?1 WHERE id = ?2 AND eliminado = 0",
-            params![marca.nombre.trim(), id],
+            "UPDATE marcas SET nombre = ?1, sincronizado = 0, updated_at = datetime('now') WHERE id = ?2 AND eliminado = 0",
+            params![marca.nombre, id],
         )
         .map_err(|error| map_write_error(error, "marca"))
         .map_err(to_command_error)?;
@@ -3185,7 +3535,12 @@ fn update_marca(state_db: tauri::State<DbState>, id: String, marca: Marca) -> Ap
 }
 
 #[tauri::command]
-fn delete_marca(state_db: tauri::State<DbState>, id: String) -> AppResult<()> {
+fn delete_marca(
+    state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
+    id: String,
+) -> AppResult<()> {
+    require_admin_or_superadmin(&state_sesion)?;
     let conn = get_conn(&state_db).map_err(to_command_error)?;
     let marca_nombre: String = conn
         .query_row("SELECT nombre FROM marcas WHERE id = ?1 AND eliminado = 0", [&id], |row| row.get(0))
@@ -3214,7 +3569,11 @@ fn delete_marca(state_db: tauri::State<DbState>, id: String) -> AppResult<()> {
 }
 
 #[tauri::command]
-fn get_categorias(state_db: tauri::State<DbState>) -> AppResult<Vec<Categoria>> {
+fn get_categorias(
+    state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
+) -> AppResult<Vec<Categoria>> {
+    require_admin_or_superadmin(&state_sesion)?;
     let conn = get_conn(&state_db).map_err(to_command_error)?;
     let mut stmt = conn
         .prepare("SELECT id, nombre FROM categorias WHERE eliminado = 0 ORDER BY nombre")
@@ -3232,12 +3591,20 @@ fn get_categorias(state_db: tauri::State<DbState>) -> AppResult<Vec<Categoria>> 
 }
 
 #[tauri::command]
-fn create_categoria(state_db: tauri::State<DbState>, categoria: Categoria) -> AppResult<()> {
+fn create_categoria(
+    state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
+    categoria: Categoria,
+) -> AppResult<()> {
+    require_admin_or_superadmin(&state_sesion)?;
+    let categoria = Categoria { id: categoria.id.trim().to_string(), nombre: categoria.nombre.trim().to_string() };
     validate_categoria(&categoria).map_err(to_command_error)?;
     let conn = get_conn(&state_db).map_err(to_command_error)?;
+    ensure_unique_catalog_name(&conn, "categorias", "categoría", None, &categoria.nombre)
+        .map_err(to_command_error)?;
     conn.execute(
-        "INSERT INTO categorias (id, nombre) VALUES (?1, ?2)",
-        params![categoria.id, categoria.nombre.trim()],
+        "INSERT INTO categorias (id, nombre, sincronizado, updated_at, eliminado) VALUES (?1, ?2, 0, datetime('now'), 0)",
+        params![categoria.id, categoria.nombre],
     )
     .map_err(|error| map_write_error(error, "categoría"))
     .map_err(to_command_error)?;
@@ -3245,13 +3612,22 @@ fn create_categoria(state_db: tauri::State<DbState>, categoria: Categoria) -> Ap
 }
 
 #[tauri::command]
-fn update_categoria(state_db: tauri::State<DbState>, id: String, categoria: Categoria) -> AppResult<()> {
+fn update_categoria(
+    state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
+    id: String,
+    categoria: Categoria,
+) -> AppResult<()> {
+    require_admin_or_superadmin(&state_sesion)?;
+    let categoria = Categoria { id: id.trim().to_string(), nombre: categoria.nombre.trim().to_string() };
     validate_categoria(&categoria).map_err(to_command_error)?;
     let conn = get_conn(&state_db).map_err(to_command_error)?;
+    ensure_unique_catalog_name(&conn, "categorias", "categoría", Some(&id), &categoria.nombre)
+        .map_err(to_command_error)?;
     let affected = conn
         .execute(
-            "UPDATE categorias SET nombre = ?1 WHERE id = ?2 AND eliminado = 0",
-            params![categoria.nombre.trim(), id],
+            "UPDATE categorias SET nombre = ?1, sincronizado = 0, updated_at = datetime('now') WHERE id = ?2 AND eliminado = 0",
+            params![categoria.nombre, id],
         )
         .map_err(|error| map_write_error(error, "categoría"))
         .map_err(to_command_error)?;
@@ -3262,7 +3638,12 @@ fn update_categoria(state_db: tauri::State<DbState>, id: String, categoria: Cate
 }
 
 #[tauri::command]
-fn delete_categoria(state_db: tauri::State<DbState>, id: String) -> AppResult<()> {
+fn delete_categoria(
+    state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
+    id: String,
+) -> AppResult<()> {
+    require_admin_or_superadmin(&state_sesion)?;
     let conn = get_conn(&state_db).map_err(to_command_error)?;
     let categoria_nombre: String = conn
         .query_row("SELECT nombre FROM categorias WHERE id = ?1 AND eliminado = 0", [&id], |row| row.get(0))
@@ -3291,7 +3672,11 @@ fn delete_categoria(state_db: tauri::State<DbState>, id: String) -> AppResult<()
 }
 
 #[tauri::command]
-fn get_unidades(state_db: tauri::State<DbState>) -> AppResult<Vec<UnidadMedida>> {
+fn get_unidades(
+    state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
+) -> AppResult<Vec<UnidadMedida>> {
+    require_admin_or_superadmin(&state_sesion)?;
     let conn = get_conn(&state_db).map_err(to_command_error)?;
     let mut stmt = conn
         .prepare("SELECT id, nombre, clave_sat FROM unidades WHERE eliminado = 0 ORDER BY nombre")
@@ -3315,12 +3700,24 @@ fn get_unidades(state_db: tauri::State<DbState>) -> AppResult<Vec<UnidadMedida>>
 }
 
 #[tauri::command]
-fn create_unidad(state_db: tauri::State<DbState>, unidad: UnidadMedida) -> AppResult<()> {
+fn create_unidad(
+    state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
+    unidad: UnidadMedida,
+) -> AppResult<()> {
+    require_admin_or_superadmin(&state_sesion)?;
+    let unidad = UnidadMedida {
+        id: unidad.id.trim().to_string(),
+        nombre: unidad.nombre.trim().to_string(),
+        clave_sat: normalize_upper_trim(&unidad.clave_sat),
+    };
     validate_unidad(&unidad).map_err(to_command_error)?;
     let conn = get_conn(&state_db).map_err(to_command_error)?;
+    ensure_unique_catalog_name(&conn, "unidades", "unidad", None, &unidad.nombre)
+        .map_err(to_command_error)?;
     conn.execute(
-        "INSERT INTO unidades (id, nombre, clave_sat) VALUES (?1, ?2, ?3)",
-        params![unidad.id, unidad.nombre.trim(), normalize_upper_trim(&unidad.clave_sat)],
+        "INSERT INTO unidades (id, nombre, clave_sat, sincronizado, updated_at, eliminado) VALUES (?1, ?2, ?3, 0, datetime('now'), 0)",
+        params![unidad.id, unidad.nombre, unidad.clave_sat],
     )
     .map_err(|error| map_write_error(error, "unidad"))
     .map_err(to_command_error)?;
@@ -3328,13 +3725,33 @@ fn create_unidad(state_db: tauri::State<DbState>, unidad: UnidadMedida) -> AppRe
 }
 
 #[tauri::command]
-fn update_unidad(state_db: tauri::State<DbState>, id: String, unidad: UnidadMedida) -> AppResult<()> {
+fn update_unidad(
+    state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
+    id: String,
+    unidad: UnidadMedida,
+) -> AppResult<()> {
+    require_admin_or_superadmin(&state_sesion)?;
+    let unidad = UnidadMedida {
+        id: id.trim().to_string(),
+        nombre: unidad.nombre.trim().to_string(),
+        clave_sat: normalize_upper_trim(&unidad.clave_sat),
+    };
     validate_unidad(&unidad).map_err(to_command_error)?;
     let conn = get_conn(&state_db).map_err(to_command_error)?;
+    ensure_unique_catalog_name(&conn, "unidades", "unidad", Some(&id), &unidad.nombre)
+        .map_err(to_command_error)?;
     let affected = conn
         .execute(
-            "UPDATE unidades SET nombre = ?1, clave_sat = ?2 WHERE id = ?3 AND eliminado = 0",
-            params![unidad.nombre.trim(), normalize_upper_trim(&unidad.clave_sat), id],
+            "
+            UPDATE unidades
+            SET nombre = ?1,
+                clave_sat = ?2,
+                sincronizado = 0,
+                updated_at = datetime('now')
+            WHERE id = ?3 AND eliminado = 0
+            ",
+            params![unidad.nombre, unidad.clave_sat, id],
         )
         .map_err(|error| map_write_error(error, "unidad"))
         .map_err(to_command_error)?;
@@ -3345,7 +3762,12 @@ fn update_unidad(state_db: tauri::State<DbState>, id: String, unidad: UnidadMedi
 }
 
 #[tauri::command]
-fn delete_unidad(state_db: tauri::State<DbState>, id: String) -> AppResult<()> {
+fn delete_unidad(
+    state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
+    id: String,
+) -> AppResult<()> {
+    require_admin_or_superadmin(&state_sesion)?;
     let conn = get_conn(&state_db).map_err(to_command_error)?;
     let unidad_nombre: String = conn
         .query_row("SELECT nombre FROM unidades WHERE id = ?1 AND eliminado = 0", [&id], |row| row.get(0))
@@ -3374,7 +3796,11 @@ fn delete_unidad(state_db: tauri::State<DbState>, id: String) -> AppResult<()> {
 }
 
 #[tauri::command]
-fn get_clientes(state_db: tauri::State<DbState>) -> AppResult<Vec<Cliente>> {
+fn get_clientes(
+    state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
+) -> AppResult<Vec<Cliente>> {
+    require_admin_or_superadmin(&state_sesion)?;
     let conn = get_conn(&state_db).map_err(to_command_error)?;
     let mut stmt = conn
         .prepare("SELECT id, nombre, telefono, direccion, limite_credito, saldo_deudor FROM clientes WHERE eliminado = 0 ORDER BY nombre")
@@ -3403,18 +3829,36 @@ fn get_clientes(state_db: tauri::State<DbState>) -> AppResult<Vec<Cliente>> {
 }
 
 #[tauri::command]
-fn create_cliente(state_db: tauri::State<DbState>, cliente: Cliente) -> AppResult<()> {
+fn create_cliente(
+    state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
+    cliente: Cliente,
+) -> AppResult<()> {
+    require_admin_or_superadmin(&state_sesion)?;
+    let cliente = Cliente {
+        id: cliente.id.trim().to_string(),
+        nombre: cliente.nombre.trim().to_string(),
+        telefono: cliente.telefono.trim().to_string(),
+        direccion: cliente.direccion.trim().to_string(),
+        limite_credito: normalize_money(cliente.limite_credito, "El límite de crédito", true)
+            .map_err(to_command_error)?,
+        saldo_deudor: 0.0,
+    };
     validate_cliente(&cliente).map_err(to_command_error)?;
     let conn = get_conn(&state_db).map_err(to_command_error)?;
     conn.execute(
-        "INSERT INTO clientes (id, nombre, telefono, direccion, limite_credito, saldo_deudor) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        "
+        INSERT INTO clientes (
+            id, nombre, telefono, direccion, limite_credito, saldo_deudor,
+            sincronizado, updated_at, eliminado
+        ) VALUES (?1, ?2, ?3, ?4, ?5, 0, 0, datetime('now'), 0)
+        ",
         params![
             cliente.id,
             cliente.nombre,
             cliente.telefono,
             cliente.direccion,
-            cliente.limite_credito,
-            cliente.saldo_deudor
+            cliente.limite_credito
         ],
     )
     .map_err(|error| map_write_error(error, "cliente"))
@@ -3423,18 +3867,61 @@ fn create_cliente(state_db: tauri::State<DbState>, cliente: Cliente) -> AppResul
 }
 
 #[tauri::command]
-fn update_cliente(state_db: tauri::State<DbState>, id: String, cliente: Cliente) -> AppResult<()> {
+fn update_cliente(
+    state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
+    id: String,
+    cliente: Cliente,
+) -> AppResult<()> {
+    require_admin_or_superadmin(&state_sesion)?;
+    let cliente = Cliente {
+        id: id.trim().to_string(),
+        nombre: cliente.nombre.trim().to_string(),
+        telefono: cliente.telefono.trim().to_string(),
+        direccion: cliente.direccion.trim().to_string(),
+        limite_credito: normalize_money(cliente.limite_credito, "El límite de crédito", true)
+            .map_err(to_command_error)?,
+        saldo_deudor: cliente.saldo_deudor,
+    };
     validate_cliente(&cliente).map_err(to_command_error)?;
     let conn = get_conn(&state_db).map_err(to_command_error)?;
+    let saldo_actual: f64 = conn
+        .query_row(
+            "SELECT COALESCE(saldo_deudor, 0) FROM clientes WHERE id = ?1 AND eliminado = 0",
+            [&cliente.id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(AppError::from)
+        .map_err(to_command_error)?
+        .ok_or_else(|| "No se encontró el cliente que intentas actualizar.".to_string())?;
+    if cliente.limite_credito > 0.0 && round_money(cliente.limite_credito) < round_money(saldo_actual) {
+        return Err(format!(
+            "El límite de crédito no puede ser menor al saldo deudor actual (${:.2}).",
+            saldo_actual
+        ));
+    }
+
     let affected = conn
         .execute(
-            "UPDATE clientes SET nombre = ?1, telefono = ?2, direccion = ?3, limite_credito = ?4 WHERE id = ?5 AND eliminado = 0",
+            "
+            UPDATE clientes
+            SET nombre = ?1,
+                telefono = ?2,
+                direccion = ?3,
+                limite_credito = ?4,
+                sincronizado = 0,
+                updated_at = datetime('now')
+            WHERE id = ?5
+              AND eliminado = 0
+              AND (?4 = 0 OR ROUND(?4, 2) >= ROUND(COALESCE(saldo_deudor, 0), 2))
+            ",
             params![
                 cliente.nombre,
                 cliente.telefono,
                 cliente.direccion,
                 cliente.limite_credito,
-                id
+                cliente.id
             ],
         )
         .map_err(|error| map_write_error(error, "cliente"))
@@ -3447,7 +3934,12 @@ fn update_cliente(state_db: tauri::State<DbState>, id: String, cliente: Cliente)
 }
 
 #[tauri::command]
-fn delete_cliente(state_db: tauri::State<DbState>, id: String) -> AppResult<()> {
+fn delete_cliente(
+    state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
+    id: String,
+) -> AppResult<()> {
+    require_admin_or_superadmin(&state_sesion)?;
     let conn = get_conn(&state_db).map_err(to_command_error)?;
     let saldo: f64 = conn
         .query_row(
@@ -3477,8 +3969,10 @@ fn delete_cliente(state_db: tauri::State<DbState>, id: String) -> AppResult<()> 
 #[tauri::command]
 fn get_cliente_datos_fiscales(
     state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
     cliente_id: String,
 ) -> AppResult<Option<ClienteDatosFiscales>> {
+    require_admin_or_superadmin(&state_sesion)?;
     if cliente_id.trim().is_empty() {
         return Err("Falta el cliente para consultar datos fiscales.".to_string());
     }
@@ -3509,8 +4003,10 @@ fn get_cliente_datos_fiscales(
 #[tauri::command]
 fn guardar_cliente_datos_fiscales(
     state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
     datos: ClienteDatosFiscales,
 ) -> AppResult<ClienteDatosFiscales> {
+    require_admin_or_superadmin(&state_sesion)?;
     let datos = ClienteDatosFiscales {
         cliente_id: datos.cliente_id.trim().to_string(),
         rfc: normalize_upper_trim(&datos.rfc),
@@ -3536,13 +4032,16 @@ fn guardar_cliente_datos_fiscales(
     conn.execute(
         "
         INSERT INTO clientes_datos_fiscales (
-            cliente_id, rfc, razon_social, regimen_fiscal, codigo_postal
-        ) VALUES (?1, ?2, ?3, ?4, ?5)
+            cliente_id, rfc, razon_social, regimen_fiscal, codigo_postal,
+            sincronizado, updated_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, 0, datetime('now'))
         ON CONFLICT(cliente_id) DO UPDATE SET
             rfc = excluded.rfc,
             razon_social = excluded.razon_social,
             regimen_fiscal = excluded.regimen_fiscal,
-            codigo_postal = excluded.codigo_postal
+            codigo_postal = excluded.codigo_postal,
+            sincronizado = 0,
+            updated_at = datetime('now')
         ",
         params![
             datos.cliente_id,
@@ -3559,10 +4058,40 @@ fn guardar_cliente_datos_fiscales(
 }
 
 #[tauri::command]
-fn registrar_abono(state_db: tauri::State<DbState>, abono: AbonoCreditoInput) -> AppResult<()> {
+fn registrar_abono(
+    state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
+    abono: AbonoCreditoInput,
+) -> AppResult<()> {
+    let actor = current_session_user(&state_sesion)?;
+    require_admin_or_superadmin(&state_sesion)?;
+    if actor.id != abono.usuario_id {
+        return Err("No puedes registrar abonos a nombre de otro usuario.".to_string());
+    }
+
     validate_abono_credito(&abono).map_err(to_command_error)?;
+    let monto = normalize_money(abono.monto, "El abono", false).map_err(to_command_error)?;
     let mut conn = get_conn(&state_db).map_err(to_command_error)?;
     let tx = conn.transaction().map_err(AppError::from).map_err(to_command_error)?;
+
+    let caja_id: String = tx
+        .query_row(
+            "
+            SELECT id
+            FROM cajas_sesiones
+            WHERE usuario_id = ?1
+              AND sucursal_id = ?2
+              AND estado = 'ABIERTA'
+            ORDER BY fecha_apertura DESC
+            LIMIT 1
+            ",
+            params![&actor.id, &actor.sucursal_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(AppError::from)
+        .map_err(to_command_error)?
+        .ok_or_else(|| "No puedes registrar abonos sin una caja ABIERTA.".to_string())?;
 
     let saldo_actual: f64 = tx
         .query_row(
@@ -3573,22 +4102,61 @@ fn registrar_abono(state_db: tauri::State<DbState>, abono: AbonoCreditoInput) ->
         .map_err(AppError::from)
         .map_err(to_command_error)?;
 
-    if abono.monto > saldo_actual {
+    if monto > round_money(saldo_actual) {
         return Err("El abono no puede ser mayor al saldo deudor actual.".to_string());
     }
 
     tx.execute(
-        "INSERT INTO creditos_abonos (id, cliente_id, monto, fecha, usuario_id) VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![abono.id, abono.cliente_id, abono.monto, abono.fecha, abono.usuario_id],
+        "
+        INSERT INTO creditos_abonos (
+            id, cliente_id, monto, fecha, usuario_id,
+            sync_uuid, sincronizado, updated_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, datetime('now'))
+        ",
+        params![
+            abono.id,
+            abono.cliente_id,
+            monto,
+            abono.fecha,
+            abono.usuario_id,
+            generate_uuid_like()
+        ],
     )
     .map_err(|error| map_write_error(error, "abono"))
     .map_err(to_command_error)?;
 
-    tx.execute(
-        "UPDATE clientes SET saldo_deudor = saldo_deudor - ?1 WHERE id = ?2",
-        params![abono.monto, abono.cliente_id],
+    let affected = tx.execute(
+        "
+        UPDATE clientes
+        SET saldo_deudor = ROUND(saldo_deudor - ?1, 2),
+            sincronizado = 0,
+            updated_at = datetime('now')
+        WHERE id = ?2
+          AND eliminado = 0
+          AND saldo_deudor + 0.0001 >= ?1
+        ",
+        params![monto, abono.cliente_id],
     )
     .map_err(|error| map_write_error(error, "cliente"))
+    .map_err(to_command_error)?;
+    if affected != 1 {
+        return Err("No se pudo aplicar el abono porque el saldo del cliente cambió. Actualiza e intenta de nuevo.".to_string());
+    }
+
+    tx.execute(
+        "
+        INSERT INTO caja_movimientos (id, sesion_id, tipo, monto, motivo, sync_uuid, sincronizado, updated_at)
+        VALUES (?1, ?2, 'INGRESO', ?3, ?4, ?5, 0, datetime('now'))
+        ",
+        params![
+            format!("ABONO-{}", abono.id),
+            caja_id,
+            monto,
+            format!("ABONO A CRÉDITO CLIENTE #{}", abono.cliente_id),
+            generate_uuid_like()
+        ],
+    )
+    .map_err(|error| map_write_error(error, "movimiento de caja"))
     .map_err(to_command_error)?;
 
     tx.commit().map_err(AppError::from).map_err(to_command_error)?;
@@ -3619,6 +4187,7 @@ fn find_active_promotion(
     marca: &str,
     sucursal_id: &str,
     precio_venta: f64,
+    costo_unitario: f64,
 ) -> Result<Option<ActivePromotion>, AppError> {
     let mut stmt = conn.prepare(
         "
@@ -3661,6 +4230,9 @@ fn find_active_promotion(
     for item in rows {
         let promo = item?;
         let price = discounted_price(precio_venta, &promo.tipo_descuento, promo.valor);
+        if price + 0.0001 < costo_unitario {
+            continue;
+        }
         if price < best_price {
             best_price = price;
             best = Some(promo);
@@ -3670,13 +4242,21 @@ fn find_active_promotion(
 }
 
 fn apply_active_promotion(conn: &Connection, product: &mut ProductoConStock) -> Result<(), AppError> {
-    let Some(promo) = find_active_promotion(conn, &product.id, &product.categoria, &product.marca, &product.sucursal_id, product.precio_venta)? else {
+    let Some(promo) = find_active_promotion(
+        conn,
+        &product.id,
+        &product.categoria,
+        &product.marca,
+        &product.sucursal_id,
+        product.precio_venta,
+        product.costo_promedio,
+    )? else {
         return Ok(());
     };
 
     let original = round_money(product.precio_venta);
     let discounted = discounted_price(original, &promo.tipo_descuento, promo.valor);
-    if discounted < original {
+    if discounted < original && discounted + 0.0001 >= product.costo_promedio {
         product.precio_original = Some(original);
         product.precio_descontado = Some(discounted);
         product.nombre_promo = Some(promo.nombre);
@@ -3689,8 +4269,12 @@ fn apply_active_promotion(conn: &Connection, product: &mut ProductoConStock) -> 
 #[tauri::command]
 fn get_productos_por_sucursal(
     state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
     sucursal_id: String,
 ) -> AppResult<Vec<ProductoConStock>> {
+    let actor = current_session_user(&state_sesion)?;
+    ensure_can_read_sucursal(&actor, &sucursal_id)?;
+
     let conn = get_conn(&state_db).map_err(to_command_error)?;
     let mut stmt = conn
         .prepare(
@@ -3717,6 +4301,7 @@ fn get_productos_por_sucursal(
             INNER JOIN inventario_sucursal i ON i.producto_id = p.id
             WHERE i.sucursal_id = ?1
               AND p.eliminado = 0
+              AND i.eliminado = 0
             ORDER BY p.descripcion
             ",
         )
@@ -3763,11 +4348,124 @@ fn get_productos_por_sucursal(
 }
 
 #[tauri::command]
-fn buscar_productos_por_sucursal(
+fn buscar_productos_para_compra(
     state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
     sucursal_id: String,
     query: String,
 ) -> AppResult<Vec<ProductoConStock>> {
+    let actor = require_admin_or_superadmin(&state_sesion)?;
+    ensure_can_read_sucursal(&actor, &sucursal_id)?;
+
+    let conn = get_conn(&state_db).map_err(to_command_error)?;
+    let exact_query = query.trim().to_string();
+    if exact_query.is_empty() {
+        return Ok(Vec::new());
+    }
+    let prefix_pattern = format!("{}%", exact_query);
+    let contains_pattern = format!("%{}%", exact_query);
+
+    let mut stmt = conn
+        .prepare(
+            "
+            SELECT
+                p.id,
+                p.codigo_barras,
+                p.codigo_proveedor,
+                p.proveedor_id,
+                p.clave_producto,
+                p.descripcion,
+                p.marca,
+                p.categoria,
+                p.unidad,
+                COALESCE(NULLIF(i.costo_promedio, 0), NULLIF(p.costo_promedio, 0), p.precio_costo) AS precio_costo_local,
+                COALESCE(NULLIF(i.costo_promedio, 0), NULLIF(p.costo_promedio, 0), p.precio_costo) AS costo_promedio,
+                COALESCE(NULLIF(i.precio_venta, 0), p.precio_venta) AS precio_venta_local,
+                p.sat_clave_prod_serv,
+                p.sat_clave_unidad,
+                COALESCE(i.sucursal_id, ?1) AS sucursal_id,
+                COALESCE(i.stock, 0) AS stock,
+                COALESCE(i.stock_minimo, 0) AS stock_minimo
+            FROM productos p
+            LEFT JOIN inventario_sucursal i ON i.producto_id = p.id AND i.sucursal_id = ?1 AND i.eliminado = 0
+            WHERE p.eliminado = 0
+              AND (
+                p.codigo_barras = ?2
+                OR p.codigo_proveedor = ?2
+                OR p.clave_producto = ?2
+                OR p.codigo_barras LIKE ?3 COLLATE NOCASE
+                OR p.codigo_proveedor LIKE ?3 COLLATE NOCASE
+                OR p.clave_producto LIKE ?3 COLLATE NOCASE
+                OR p.descripcion LIKE ?3 COLLATE NOCASE
+                OR p.marca LIKE ?3 COLLATE NOCASE
+                OR p.descripcion LIKE ?4 COLLATE NOCASE
+              )
+            ORDER BY
+                CASE
+                    WHEN p.codigo_barras = ?2 THEN 0
+                    WHEN p.codigo_proveedor = ?2 THEN 1
+                    WHEN p.clave_producto = ?2 THEN 2
+                    WHEN p.codigo_barras LIKE ?3 COLLATE NOCASE THEN 3
+                    WHEN p.codigo_proveedor LIKE ?3 COLLATE NOCASE THEN 4
+                    WHEN p.clave_producto LIKE ?3 COLLATE NOCASE THEN 5
+                    WHEN p.descripcion LIKE ?3 COLLATE NOCASE THEN 6
+                    WHEN p.marca LIKE ?3 COLLATE NOCASE THEN 7
+                    ELSE 8
+                END,
+                p.descripcion COLLATE NOCASE
+            LIMIT 10
+            ",
+        )
+        .map_err(AppError::from)
+        .map_err(to_command_error)?;
+
+    let iter = stmt
+        .query_map(params![sucursal_id, exact_query, prefix_pattern, contains_pattern], |row| {
+            Ok(ProductoConStock {
+                id: row.get(0)?,
+                codigo_barras: row.get(1)?,
+                codigo_proveedor: row.get(2)?,
+                proveedor_id: row.get(3)?,
+                clave_producto: row.get(4)?,
+                descripcion: row.get(5)?,
+                marca: row.get(6)?,
+                categoria: row.get(7)?,
+                unidad: row.get(8)?,
+                precio_costo: row.get(9)?,
+                costo_promedio: row.get(10)?,
+                precio_venta: row.get(11)?,
+                sat_clave_prod_serv: row.get(12)?,
+                sat_clave_unidad: row.get(13)?,
+                sucursal_id: row.get(14)?,
+                stock: row.get(15)?,
+                stock_minimo: row.get(16)?,
+                precio_original: None,
+                precio_descontado: None,
+                nombre_promo: None,
+                promocion_id: None,
+            })
+        })
+        .map_err(AppError::from)
+        .map_err(to_command_error)?;
+
+    let mut productos = Vec::new();
+    for item in iter {
+        productos.push(item.map_err(AppError::from).map_err(to_command_error)?);
+    }
+
+    Ok(productos)
+}
+
+#[tauri::command]
+fn buscar_productos_por_sucursal(
+    state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
+    sucursal_id: String,
+    query: String,
+) -> AppResult<Vec<ProductoConStock>> {
+    let actor = current_session_user(&state_sesion)?;
+    ensure_can_read_sucursal(&actor, &sucursal_id)?;
+
     let conn = get_conn(&state_db).map_err(to_command_error)?;
     let exact_query = query.trim().to_string();
     if exact_query.is_empty() {
@@ -3801,6 +4499,7 @@ fn buscar_productos_por_sucursal(
             INNER JOIN inventario_sucursal i ON i.producto_id = p.id
             WHERE i.sucursal_id = ?1
               AND p.eliminado = 0
+              AND i.eliminado = 0
               AND (
                 p.codigo_barras = ?2
                 OR p.codigo_proveedor = ?2
@@ -3876,10 +4575,7 @@ fn asegurar_producto_venta_diversa(
     state_sesion: tauri::State<SesionActual>,
     sucursal_id: String,
 ) -> AppResult<ProductoConStock> {
-    let user = current_session_user(&state_sesion)?;
-    if !is_admin_or_superadmin_role(&user.role) {
-        return Err("Solo ADMIN o SUPERADMIN pueden usar venta rápida de artículo diverso.".to_string());
-    }
+    let user = require_admin_or_superadmin(&state_sesion)?;
     if !is_superadmin(&user) && user.sucursal_id != sucursal_id {
         return Err("No puedes crear venta rápida para otra sucursal.".to_string());
     }
@@ -4006,7 +4702,7 @@ fn validate_promocion_input(input: &PromocionInput) -> AppResult<()> {
     if !matches!(input.tipo_descuento.as_str(), "PORCENTAJE" | "MONTO_FIJO") {
         return Err("El tipo de descuento debe ser PORCENTAJE o MONTO_FIJO.".to_string());
     }
-    if input.valor <= 0.0 {
+    if !input.valor.is_finite() || input.valor <= 0.0 {
         return Err("El valor del descuento debe ser mayor que cero.".to_string());
     }
     if input.tipo_descuento == "PORCENTAJE" && input.valor > 100.0 {
@@ -4014,6 +4710,12 @@ fn validate_promocion_input(input: &PromocionInput) -> AppResult<()> {
     }
     if input.fecha_inicio.is_empty() || input.fecha_fin.is_empty() {
         return Err("La promoción necesita fecha de inicio y fecha fin.".to_string());
+    }
+    if !input.fecha_inicio.contains('T') || !input.fecha_fin.contains('T') {
+        return Err("Las fechas de la promoción deben incluir fecha y hora.".to_string());
+    }
+    if input.fecha_fin <= input.fecha_inicio {
+        return Err("La fecha fin de la promoción debe ser posterior a la fecha de inicio.".to_string());
     }
     
     let has_producto = input.producto_id.is_some();
@@ -4082,6 +4784,7 @@ fn validate_promocion_no_loss(
         INNER JOIN inventario_sucursal i ON i.producto_id = p.id
         INNER JOIN sucursales s ON s.id = i.sucursal_id
         WHERE p.eliminado = 0
+          AND i.eliminado = 0
           AND i.sucursal_id IN ({placeholders})
           AND {target_filter}
         "
@@ -4145,7 +4848,7 @@ fn get_promociones(
     state_sesion: tauri::State<SesionActual>,
 ) -> AppResult<Vec<Promocion>> {
     let conn = get_conn(&state_db).map_err(to_command_error)?;
-    let actor = current_session_user(&state_sesion)?;
+    let actor = require_admin_or_superadmin(&state_sesion)?;
     let mut sql = String::from(
         "
         SELECT DISTINCT pr.id, pr.nombre, pr.tipo_descuento, pr.valor, pr.fecha_inicio, pr.fecha_fin,
@@ -4203,7 +4906,7 @@ fn get_productos_para_promociones(
     sucursal_ids: Vec<String>,
 ) -> AppResult<Vec<ProductoPromocionPrecio>> {
     let conn = get_conn(&state_db).map_err(to_command_error)?;
-    let actor = current_session_user(&state_sesion)?;
+    let actor = require_admin_or_superadmin(&state_sesion)?;
     let scoped_ids = if is_superadmin(&actor) {
         if sucursal_ids.is_empty() {
             let mut stmt = conn
@@ -4251,6 +4954,7 @@ fn get_productos_para_promociones(
         FROM productos p
         INNER JOIN inventario_sucursal i ON i.producto_id = p.id
         WHERE p.eliminado = 0
+          AND i.eliminado = 0
           AND i.sucursal_id IN ({placeholders})
         GROUP BY p.id, p.codigo_barras, p.codigo_proveedor, p.clave_producto,
                  p.descripcion, p.marca, p.categoria, p.unidad
@@ -4301,7 +5005,7 @@ fn guardar_promocion(
 ) -> AppResult<()> {
     let promocion = normalize_promocion_input(promocion);
     validate_promocion_input(&promocion)?;
-    let actor = current_session_user(&state_sesion)?;
+    let actor = require_admin_or_superadmin(&state_sesion)?;
     let sucursal_ids = scoped_promocion_sucursales(&actor, &promocion.sucursal_ids);
     let mut conn = get_conn(&state_db).map_err(to_command_error)?;
     ensure_sucursales_exist(&conn, &sucursal_ids)?;
@@ -4389,24 +5093,39 @@ fn eliminar_promocion(
     state_sesion: tauri::State<SesionActual>,
     id: String,
 ) -> AppResult<()> {
-    let conn = get_conn(&state_db).map_err(to_command_error)?;
-    let actor = current_session_user(&state_sesion)?;
+    let mut conn = get_conn(&state_db).map_err(to_command_error)?;
+    let actor = require_admin_or_superadmin(&state_sesion)?;
     if !is_superadmin(&actor) {
         let current_ids = get_promocion_sucursal_ids(&conn, &id)?;
         if current_ids.is_empty() || !current_ids.iter().all(|sucursal_id| sucursal_id == &actor.sucursal_id) {
             return Err("Operación inválida: un administrador solo puede eliminar promociones de su sucursal.".to_string());
         }
     }
-    let affected = conn
+    let tx = conn.transaction().map_err(AppError::from).map_err(to_command_error)?;
+    let affected = tx
         .execute(
             "UPDATE promociones SET eliminado = 1, activo = 0, sincronizado = 0, updated_at = datetime('now') WHERE id = ?1 AND eliminado = 0",
-            [id],
+            [&id],
         )
         .map_err(|error| map_write_error(error, "promoción"))
         .map_err(to_command_error)?;
     if affected == 0 {
         return Err("No se encontró la promoción indicada.".to_string());
     }
+    tx.execute(
+        "
+        UPDATE promocion_sucursales
+        SET eliminado = 1,
+            sincronizado = 0,
+            updated_at = datetime('now')
+        WHERE promocion_id = ?1
+          AND eliminado = 0
+        ",
+        [&id],
+    )
+    .map_err(|error| map_write_error(error, "sucursales de promoción"))
+    .map_err(to_command_error)?;
+    tx.commit().map_err(AppError::from).map_err(to_command_error)?;
     Ok(())
 }
 
@@ -4457,7 +5176,12 @@ fn get_productos_catalogo(state_db: tauri::State<DbState>) -> AppResult<Vec<Prod
 }
 
 #[tauri::command]
-fn create_producto_catalogo(state_db: tauri::State<DbState>, producto: Producto) -> AppResult<()> {
+fn create_producto_catalogo(
+    state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
+    producto: Producto,
+) -> AppResult<()> {
+    require_admin_or_superadmin(&state_sesion)?;
     let mut producto = sanitize_producto(producto);
     producto.precio_costo = 0.0;
     producto.costo_promedio = 0.0;
@@ -4466,12 +5190,19 @@ fn create_producto_catalogo(state_db: tauri::State<DbState>, producto: Producto)
 
     let conn = get_conn(&state_db).map_err(to_command_error)?;
     let proveedor_id = resolve_valid_producto_proveedor_id(&conn, &producto.proveedor_id).map_err(to_command_error)?;
+    let marca = ensure_catalog_value_exists(&conn, "marcas", "marca", &producto.marca)
+        .map_err(to_command_error)?;
+    let categoria = ensure_catalog_value_exists(&conn, "categorias", "categoría", &producto.categoria)
+        .map_err(to_command_error)?;
+    let unidad = ensure_catalog_value_exists(&conn, "unidades", "unidad", &producto.unidad)
+        .map_err(to_command_error)?;
     conn.execute(
         "
         INSERT INTO productos (
             id, codigo_barras, codigo_proveedor, proveedor_id, clave_producto, descripcion,
-            marca, categoria, unidad, precio_costo, costo_promedio, precio_venta, sat_clave_prod_serv, sat_clave_unidad
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, 0, 0, ?10, ?11)
+            marca, categoria, unidad, precio_costo, costo_promedio, precio_venta,
+            sat_clave_prod_serv, sat_clave_unidad, sincronizado, updated_at, eliminado
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, 0, 0, ?10, ?11, 0, datetime('now'), 0)
         ",
         params![
             producto.id,
@@ -4484,9 +5215,9 @@ fn create_producto_catalogo(state_db: tauri::State<DbState>, producto: Producto)
             proveedor_id,
             producto.clave_producto,
             producto.descripcion,
-            producto.marca,
-            producto.categoria,
-            producto.unidad,
+            marca,
+            categoria,
+            unidad,
             producto.sat_clave_prod_serv,
             producto.sat_clave_unidad
         ],
@@ -4497,7 +5228,13 @@ fn create_producto_catalogo(state_db: tauri::State<DbState>, producto: Producto)
 }
 
 #[tauri::command]
-fn update_producto_catalogo(state_db: tauri::State<DbState>, producto_id: String, producto: Producto) -> AppResult<()> {
+fn update_producto_catalogo(
+    state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
+    producto_id: String,
+    producto: Producto,
+) -> AppResult<()> {
+    require_admin_or_superadmin(&state_sesion)?;
     let mut producto = sanitize_producto(producto);
     producto.precio_costo = 0.0;
     producto.costo_promedio = 0.0;
@@ -4509,6 +5246,12 @@ fn update_producto_catalogo(state_db: tauri::State<DbState>, producto_id: String
 
     let conn = get_conn(&state_db).map_err(to_command_error)?;
     let proveedor_id = resolve_valid_producto_proveedor_id(&conn, &producto.proveedor_id).map_err(to_command_error)?;
+    let marca = ensure_catalog_value_exists(&conn, "marcas", "marca", &producto.marca)
+        .map_err(to_command_error)?;
+    let categoria = ensure_catalog_value_exists(&conn, "categorias", "categoría", &producto.categoria)
+        .map_err(to_command_error)?;
+    let unidad = ensure_catalog_value_exists(&conn, "unidades", "unidad", &producto.unidad)
+        .map_err(to_command_error)?;
     let affected = conn
         .execute(
             "
@@ -4522,7 +5265,9 @@ fn update_producto_catalogo(state_db: tauri::State<DbState>, producto_id: String
                 categoria = ?7,
                 unidad = ?8,
                 sat_clave_prod_serv = ?9,
-                sat_clave_unidad = ?10
+                sat_clave_unidad = ?10,
+                sincronizado = 0,
+                updated_at = datetime('now')
             WHERE id = ?11 AND eliminado = 0
             ",
             params![
@@ -4535,9 +5280,9 @@ fn update_producto_catalogo(state_db: tauri::State<DbState>, producto_id: String
                 proveedor_id,
                 producto.clave_producto,
                 producto.descripcion,
-                producto.marca,
-                producto.categoria,
-                producto.unidad,
+                marca,
+                categoria,
+                unidad,
                 producto.sat_clave_prod_serv,
                 producto.sat_clave_unidad,
                 producto_id
@@ -4554,16 +5299,20 @@ fn update_producto_catalogo(state_db: tauri::State<DbState>, producto_id: String
 #[tauri::command]
 fn guardar_inventario_sucursal(
     state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
     producto_id: String,
     inventario: InventarioSucursalInput,
 ) -> AppResult<()> {
+    let actor = require_admin_or_superadmin(&state_sesion)?;
+    ensure_can_read_sucursal(&actor, &inventario.sucursal_id)?;
     if producto_id.trim().is_empty() {
         return Err("Selecciona un producto válido.".to_string());
     }
     validate_inventario_input(&inventario).map_err(to_command_error)?;
 
-    let conn = get_conn(&state_db).map_err(to_command_error)?;
-    let producto_exists: i64 = conn
+    let mut conn = get_conn(&state_db).map_err(to_command_error)?;
+    let tx = conn.transaction().map_err(AppError::from).map_err(to_command_error)?;
+    let producto_exists: i64 = tx
         .query_row(
             "SELECT COUNT(*) FROM productos WHERE id = ?1 AND eliminado = 0",
             [&producto_id],
@@ -4575,7 +5324,7 @@ fn guardar_inventario_sucursal(
         return Err("El producto seleccionado no existe.".to_string());
     }
 
-    let sucursal_exists: i64 = conn
+    let sucursal_exists: i64 = tx
         .query_row(
             "SELECT COUNT(*) FROM sucursales WHERE id = ?1 AND eliminado = 0",
             [&inventario.sucursal_id],
@@ -4587,19 +5336,36 @@ fn guardar_inventario_sucursal(
         return Err("La sucursal seleccionada no existe.".to_string());
     }
 
-    conn.execute(
+    let stock_anterior: f64 = tx
+        .query_row(
+            "SELECT stock FROM inventario_sucursal WHERE producto_id = ?1 AND sucursal_id = ?2",
+            params![&producto_id, &inventario.sucursal_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(AppError::from)
+        .map_err(to_command_error)?
+        .unwrap_or(0.0);
+
+    tx.execute(
         "
-        INSERT INTO inventario_sucursal (producto_id, sucursal_id, stock, stock_minimo, costo_promedio, precio_venta)
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+        INSERT INTO inventario_sucursal (
+            producto_id, sucursal_id, stock, stock_minimo, costo_promedio, precio_venta,
+            sincronizado, updated_at
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, datetime('now'))
         ON CONFLICT(producto_id, sucursal_id) DO UPDATE SET
           stock = excluded.stock,
           stock_minimo = excluded.stock_minimo,
           costo_promedio = excluded.costo_promedio,
-          precio_venta = excluded.precio_venta
+          precio_venta = excluded.precio_venta,
+          eliminado = 0,
+          sincronizado = 0,
+          updated_at = datetime('now')
         ",
         params![
-            producto_id,
-            inventario.sucursal_id,
+            &producto_id,
+            &inventario.sucursal_id,
             inventario.stock,
             inventario.stock_minimo,
             inventario.costo_promedio,
@@ -4608,29 +5374,104 @@ fn guardar_inventario_sucursal(
     )
     .map_err(|error| map_write_error(error, "inventario"))
     .map_err(to_command_error)?;
+
+    let diferencia = ((inventario.stock - stock_anterior) * 1000.0).round() / 1000.0;
+    if diferencia.abs() > f64::EPSILON {
+        let tipo = if diferencia > 0.0 {
+            "AJUSTE_ENTRADA"
+        } else {
+            "AJUSTE_SALIDA"
+        };
+        let fecha_movimiento: String = tx
+            .query_row("SELECT datetime('now')", [], |row| row.get(0))
+            .map_err(AppError::from)
+            .map_err(to_command_error)?;
+        insertar_movimiento_inventario(
+            &tx,
+            &producto_id,
+            &inventario.sucursal_id,
+            tipo,
+            "INVENTARIO",
+            &format!("AJUSTE-STOCK-{}", current_timestamp_string()),
+            diferencia,
+            Some(inventario.costo_promedio),
+            Some(&actor.id),
+            &fecha_movimiento,
+        )
+        .map_err(to_command_error)?;
+    }
+
+    tx.commit().map_err(AppError::from).map_err(to_command_error)?;
+    Ok(())
+}
+
+#[tauri::command]
+fn eliminar_inventario_sucursal(
+    state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
+    producto_id: String,
+    sucursal_id: String,
+) -> AppResult<()> {
+    let actor = require_admin_or_superadmin(&state_sesion)?;
+    ensure_can_read_sucursal(&actor, &sucursal_id)?;
+    if producto_id.trim().is_empty() || sucursal_id.trim().is_empty() {
+        return Err("Falta el producto o la sucursal a eliminar del inventario.".to_string());
+    }
+
+    let conn = get_conn(&state_db).map_err(to_command_error)?;
+    let affected = conn
+        .execute(
+            "
+            UPDATE inventario_sucursal
+            SET eliminado = 1,
+                sincronizado = 0,
+                updated_at = datetime('now')
+            WHERE producto_id = ?1
+              AND sucursal_id = ?2
+              AND eliminado = 0
+            ",
+            params![producto_id, sucursal_id],
+        )
+        .map_err(|error| map_write_error(error, "inventario"))
+        .map_err(to_command_error)?;
+
+    if affected == 0 {
+        return Err("No se encontró el producto en el inventario de esta sucursal.".to_string());
+    }
+
     Ok(())
 }
 
 #[tauri::command]
 fn create_producto(
     state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
     producto: Producto,
     inventario: InventarioSucursalInput,
 ) -> AppResult<()> {
+    let actor = require_admin_or_superadmin(&state_sesion)?;
+    ensure_can_read_sucursal(&actor, &inventario.sucursal_id)?;
     let producto = sanitize_producto(producto);
     validate_producto(&producto).map_err(to_command_error)?;
     validate_inventario_input(&inventario).map_err(to_command_error)?;
 
     let mut conn = get_conn(&state_db).map_err(to_command_error)?;
     let proveedor_id = resolve_valid_producto_proveedor_id(&conn, &producto.proveedor_id).map_err(to_command_error)?;
+    let marca = ensure_catalog_value_exists(&conn, "marcas", "marca", &producto.marca)
+        .map_err(to_command_error)?;
+    let categoria = ensure_catalog_value_exists(&conn, "categorias", "categoría", &producto.categoria)
+        .map_err(to_command_error)?;
+    let unidad = ensure_catalog_value_exists(&conn, "unidades", "unidad", &producto.unidad)
+        .map_err(to_command_error)?;
     let tx = conn.transaction().map_err(AppError::from).map_err(to_command_error)?;
 
     tx.execute(
         "
         INSERT INTO productos (
             id, codigo_barras, codigo_proveedor, proveedor_id, clave_producto, descripcion,
-            marca, categoria, unidad, precio_costo, costo_promedio, precio_venta, sat_clave_prod_serv, sat_clave_unidad
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+            marca, categoria, unidad, precio_costo, costo_promedio, precio_venta,
+            sat_clave_prod_serv, sat_clave_unidad, sincronizado, updated_at, eliminado
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, 0, datetime('now'), 0)
         ",
         params![
             producto.id,
@@ -4643,9 +5484,9 @@ fn create_producto(
             proveedor_id,
             producto.clave_producto,
             producto.descripcion,
-            producto.marca,
-            producto.categoria,
-            producto.unidad,
+            marca,
+            categoria,
+            unidad,
             producto.precio_costo,
             if producto.costo_promedio > 0.0 { producto.costo_promedio } else { producto.precio_costo },
             producto.precio_venta,
@@ -4658,8 +5499,11 @@ fn create_producto(
 
     tx.execute(
         "
-        INSERT INTO inventario_sucursal (producto_id, sucursal_id, stock, stock_minimo, costo_promedio, precio_venta)
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+        INSERT INTO inventario_sucursal (
+            producto_id, sucursal_id, stock, stock_minimo, costo_promedio, precio_venta,
+            sincronizado, updated_at
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, datetime('now'))
         ",
         params![
             producto.id,
@@ -4686,10 +5530,13 @@ fn create_producto(
 #[tauri::command]
 fn update_producto(
     state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
     producto_id: String,
     producto: Producto,
     inventario: InventarioSucursalInput,
 ) -> AppResult<()> {
+    let actor = require_admin_or_superadmin(&state_sesion)?;
+    ensure_can_read_sucursal(&actor, &inventario.sucursal_id)?;
     let producto = sanitize_producto(producto);
     validate_producto(&producto).map_err(to_command_error)?;
     validate_inventario_input(&inventario).map_err(to_command_error)?;
@@ -4700,6 +5547,12 @@ fn update_producto(
 
     let conn = get_conn(&state_db).map_err(to_command_error)?;
     let proveedor_id = resolve_valid_producto_proveedor_id(&conn, &producto.proveedor_id).map_err(to_command_error)?;
+    let marca = ensure_catalog_value_exists(&conn, "marcas", "marca", &producto.marca)
+        .map_err(to_command_error)?;
+    let categoria = ensure_catalog_value_exists(&conn, "categorias", "categoría", &producto.categoria)
+        .map_err(to_command_error)?;
+    let unidad = ensure_catalog_value_exists(&conn, "unidades", "unidad", &producto.unidad)
+        .map_err(to_command_error)?;
     conn.execute(
         "
         UPDATE productos
@@ -4715,7 +5568,9 @@ fn update_producto(
             costo_promedio = CASE WHEN ?10 > 0 THEN ?10 ELSE costo_promedio END,
             precio_venta = ?11,
             sat_clave_prod_serv = ?12,
-            sat_clave_unidad = ?13
+            sat_clave_unidad = ?13,
+            sincronizado = 0,
+            updated_at = datetime('now')
         WHERE id = ?14 AND eliminado = 0
         ",
         params![
@@ -4728,9 +5583,9 @@ fn update_producto(
             proveedor_id,
             producto.clave_producto,
             producto.descripcion,
-            producto.marca,
-            producto.categoria,
-            producto.unidad,
+            marca,
+            categoria,
+            unidad,
             producto.precio_costo,
             producto.costo_promedio,
             producto.precio_venta,
@@ -4744,13 +5599,18 @@ fn update_producto(
 
     conn.execute(
         "
-        INSERT INTO inventario_sucursal (producto_id, sucursal_id, stock, stock_minimo, costo_promedio, precio_venta)
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+        INSERT INTO inventario_sucursal (
+            producto_id, sucursal_id, stock, stock_minimo, costo_promedio, precio_venta,
+            sincronizado, updated_at
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, datetime('now'))
         ON CONFLICT(producto_id, sucursal_id) DO UPDATE SET
           stock = excluded.stock,
           stock_minimo = excluded.stock_minimo,
           costo_promedio = CASE WHEN excluded.costo_promedio > 0 THEN excluded.costo_promedio ELSE inventario_sucursal.costo_promedio END,
-          precio_venta = CASE WHEN excluded.precio_venta > 0 THEN excluded.precio_venta ELSE inventario_sucursal.precio_venta END
+          precio_venta = CASE WHEN excluded.precio_venta > 0 THEN excluded.precio_venta ELSE inventario_sucursal.precio_venta END,
+          sincronizado = 0,
+          updated_at = datetime('now')
         ",
         params![
             producto_id,
@@ -4768,7 +5628,12 @@ fn update_producto(
 }
 
 #[tauri::command]
-fn delete_producto(state_db: tauri::State<DbState>, id: String) -> AppResult<()> {
+fn delete_producto(
+    state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
+    id: String,
+) -> AppResult<()> {
+    require_admin_or_superadmin(&state_sesion)?;
     if id.trim().is_empty() {
         return Err("Falta el identificador del producto.".to_string());
     }
@@ -4798,12 +5663,16 @@ fn delete_producto(state_db: tauri::State<DbState>, id: String) -> AppResult<()>
 #[tauri::command]
 fn registrar_compra(
     state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
     compra: RegistrarCompraInput,
 ) -> AppResult<()> {
+    let actor = require_admin_or_superadmin(&state_sesion)?;
+    ensure_can_read_sucursal(&actor, &compra.sucursal_id)?;
     validate_registrar_compra_input(&compra).map_err(to_command_error)?;
 
     let mut conn = get_conn(&state_db).map_err(to_command_error)?;
     let tx = conn.transaction().map_err(AppError::from).map_err(to_command_error)?;
+    let detalles = consolidar_detalles_compra(&compra.detalles);
 
     let proveedor_exists: i64 = tx
         .query_row(
@@ -4830,18 +5699,32 @@ fn registrar_compra(
     }
 
     let mut total = 0.0_f64;
-    for detalle in &compra.detalles {
-        total += detalle.cantidad * detalle.precio_costo_pactado;
+    for detalle in &detalles {
+        total += detalle.cantidad * round_money(detalle.precio_costo_pactado);
     }
+    total = round_money(total);
 
     tx.execute(
-        "INSERT INTO compras (id, proveedor_id, sucursal_id, fecha, total) VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![compra.id, compra.proveedor_id, compra.sucursal_id, compra.fecha, total],
+        "
+        INSERT INTO compras (
+            id, proveedor_id, sucursal_id, fecha, total,
+            sync_uuid, sincronizado, updated_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, datetime('now'))
+        ",
+        params![
+            compra.id,
+            compra.proveedor_id.trim(),
+            compra.sucursal_id.trim(),
+            compra.fecha.trim(),
+            total,
+            generate_uuid_like()
+        ],
     )
     .map_err(|error| map_write_error(error, "compra"))
     .map_err(to_command_error)?;
 
-    for detalle in &compra.detalles {
+    for detalle in &detalles {
+        let precio_costo_pactado = round_money(detalle.precio_costo_pactado);
         let producto_exists: i64 = tx
             .query_row(
                 "SELECT COUNT(*) FROM productos WHERE id = ?1 AND eliminado = 0",
@@ -4858,21 +5741,27 @@ fn registrar_compra(
             inventario_costo_promedio(&tx, &detalle.producto_id, &compra.sucursal_id)
                 .map_err(to_command_error)?;
         let nuevo_stock = stock_actual + detalle.cantidad;
-        let nuevo_costo_promedio = if nuevo_stock > 0.0 {
-            ((stock_actual * costo_actual) + (detalle.cantidad * detalle.precio_costo_pactado)) / nuevo_stock
+        let nuevo_costo_promedio = round_money(if nuevo_stock > 0.0 {
+            ((stock_actual * costo_actual) + (detalle.cantidad * precio_costo_pactado)) / nuevo_stock
         } else {
-            detalle.precio_costo_pactado
-        };
+            precio_costo_pactado
+        });
 
         tx.execute(
-            "INSERT INTO detalle_compras (id, compra_id, producto_id, cantidad, precio_costo_pactado, costo_promedio_resultante) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "
+            INSERT INTO detalle_compras (
+                id, compra_id, producto_id, cantidad, precio_costo_pactado,
+                costo_promedio_resultante, sync_uuid, sincronizado, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, datetime('now'))
+            ",
             params![
                 detalle.id,
                 compra.id,
                 detalle.producto_id,
                 detalle.cantidad,
-                detalle.precio_costo_pactado,
-                nuevo_costo_promedio
+                precio_costo_pactado,
+                nuevo_costo_promedio,
+                generate_uuid_like()
             ],
         )
         .map_err(|error| map_write_error(error, "detalle de compra"))
@@ -4880,11 +5769,16 @@ fn registrar_compra(
 
         tx.execute(
             "
-            INSERT INTO inventario_sucursal (producto_id, sucursal_id, stock, stock_minimo, costo_promedio, precio_venta)
-            VALUES (?1, ?2, ?3, 0, ?4, COALESCE((SELECT precio_venta FROM productos WHERE id = ?1), 0))
+            INSERT INTO inventario_sucursal (
+                producto_id, sucursal_id, stock, stock_minimo, costo_promedio, precio_venta,
+                sincronizado, updated_at
+            )
+            VALUES (?1, ?2, ?3, 0, ?4, COALESCE((SELECT precio_venta FROM productos WHERE id = ?1), 0), 0, datetime('now'))
             ON CONFLICT(producto_id, sucursal_id) DO UPDATE SET
               stock = inventario_sucursal.stock + excluded.stock,
-              costo_promedio = excluded.costo_promedio
+              costo_promedio = excluded.costo_promedio,
+              sincronizado = 0,
+              updated_at = datetime('now')
             ",
             params![detalle.producto_id, compra.sucursal_id, detalle.cantidad, nuevo_costo_promedio],
         )
@@ -4895,10 +5789,12 @@ fn registrar_compra(
             "
             UPDATE productos
             SET precio_costo = ?1,
-                costo_promedio = ?2
+                costo_promedio = ?2,
+                sincronizado = 0,
+                updated_at = datetime('now')
             WHERE id = ?3
             ",
-            params![detalle.precio_costo_pactado, nuevo_costo_promedio, detalle.producto_id],
+            params![precio_costo_pactado, nuevo_costo_promedio, detalle.producto_id],
         )
         .map_err(|error| map_write_error(error, "producto"))
         .map_err(to_command_error)?;
@@ -4911,7 +5807,7 @@ fn registrar_compra(
             "COMPRA",
             &compra.id,
             detalle.cantidad,
-            Some(detalle.precio_costo_pactado),
+            Some(precio_costo_pactado),
             None,
             &compra.fecha,
         )
@@ -4975,9 +5871,15 @@ fn calcular_resumen_caja(conn: &Connection, sesion: &CajaSesion) -> Result<CajaE
 #[tauri::command]
 fn get_caja_actual(
     state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
     usuario_id: String,
     sucursal_id: String,
 ) -> AppResult<Option<CajaEstado>> {
+    let actor = current_session_user(&state_sesion)?;
+    if actor.id != usuario_id || actor.sucursal_id != sucursal_id {
+        return Err("No puedes consultar la caja de otro usuario o sucursal.".to_string());
+    }
+
     let conn = get_conn(&state_db).map_err(to_command_error)?;
 
     let mut stmt = conn
@@ -5021,8 +5923,14 @@ fn get_caja_actual(
 #[tauri::command]
 fn abrir_caja(
     state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
     apertura: AbrirCajaInput,
 ) -> AppResult<CajaEstado> {
+    let actor = current_session_user(&state_sesion)?;
+    if actor.id != apertura.usuario_id || actor.sucursal_id != apertura.sucursal_id {
+        return Err("No puedes abrir caja para otro usuario o sucursal.".to_string());
+    }
+
     validate_abrir_caja_input(&apertura).map_err(to_command_error)?;
     let monto_inicial = normalize_money(apertura.monto_inicial, "El fondo inicial", true)
         .map_err(to_command_error)?;
@@ -5085,8 +5993,10 @@ fn abrir_caja(
 #[tauri::command]
 fn registrar_movimiento_caja(
     state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
     movimiento: MovimientoCajaInput,
 ) -> AppResult<CajaEstado> {
+    let actor = current_session_user(&state_sesion)?;
     validate_movimiento_caja_input(&movimiento).map_err(to_command_error)?;
     let monto = normalize_money(movimiento.monto, "El monto del movimiento", false)
         .map_err(to_command_error)?;
@@ -5120,6 +6030,19 @@ fn registrar_movimiento_caja(
 
     if sesion.estado != "ABIERTA" {
         return Err("Solo se pueden registrar movimientos en una caja ABIERTA.".to_string());
+    }
+    if sesion.usuario_id != actor.id || sesion.sucursal_id != actor.sucursal_id {
+        return Err("No puedes registrar movimientos en una caja que no pertenece a tu sesión.".to_string());
+    }
+
+    let resumen_antes = calcular_resumen_caja(&tx, &sesion).map_err(to_command_error)?;
+    if movimiento.tipo == "EGRESO"
+        && (monto * 100.0).round() > (resumen_antes.monto_esperado_actual * 100.0).round()
+    {
+        return Err(format!(
+            "No puedes registrar un egreso de ${monto:.2} porque el efectivo esperado en caja es ${:.2}.",
+            resumen_antes.monto_esperado_actual
+        ));
     }
 
     tx.execute(
@@ -5158,8 +6081,10 @@ fn registrar_movimiento_caja(
 #[tauri::command]
 fn cerrar_caja(
     state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
     cierre: CerrarCajaInput,
 ) -> AppResult<CajaEstado> {
+    let actor = current_session_user(&state_sesion)?;
     validate_cerrar_caja_input(&cierre).map_err(to_command_error)?;
     let monto_final_real = normalize_money(cierre.monto_final_real, "El monto final real", true)
         .map_err(to_command_error)?;
@@ -5193,6 +6118,9 @@ fn cerrar_caja(
 
     if sesion.estado != "ABIERTA" {
         return Err("La caja seleccionada ya está cerrada.".to_string());
+    }
+    if sesion.usuario_id != actor.id || sesion.sucursal_id != actor.sucursal_id {
+        return Err("No puedes cerrar una caja que no pertenece a tu sesión.".to_string());
     }
 
     let resumen = calcular_resumen_caja(&tx, &sesion).map_err(to_command_error)?;
@@ -5238,6 +6166,160 @@ fn cerrar_caja(
     })
 }
 
+fn escpos_text_line(buffer: &mut Vec<u8>, text: &str) {
+    buffer.extend_from_slice(text.as_bytes());
+    buffer.push(b'\n');
+}
+
+fn money_text(value: f64) -> String {
+    format!("${:.2}", round_money(value))
+}
+
+fn fit_text(value: &str, width: usize) -> String {
+    let mut text = value.trim().replace('\n', " ");
+    if text.chars().count() > width {
+        text = text.chars().take(width.saturating_sub(3)).collect::<String>();
+        text.push_str("...");
+    }
+    text
+}
+
+fn ticket_two_columns(left: &str, right: &str, width: usize) -> String {
+    let right_len = right.chars().count();
+    let max_left = width.saturating_sub(right_len + 1);
+    let left = fit_text(left, max_left);
+    let left_len = left.chars().count();
+    let spaces = width.saturating_sub(left_len + right_len);
+    format!("{left}{}{right}", " ".repeat(spaces))
+}
+
+fn build_ticket_escpos(ticket: &TicketPayloadInput, paper_width: usize, abrir_cajon: bool) -> Result<Vec<u8>, String> {
+    let width = match paper_width {
+        32 | 42 | 48 => paper_width,
+        _ => return Err("El ancho de papel debe ser 32, 42 o 48 caracteres.".to_string()),
+    };
+    if ticket.productos.is_empty() {
+        return Err("El ticket no contiene productos.".to_string());
+    }
+
+    let separator = "-".repeat(width);
+    let mut buffer = Vec::new();
+
+    if abrir_cajon {
+        // Open the cash drawer connected to the printer: ESC p m t1 t2.
+        buffer.extend_from_slice(&[0x1B, 0x70, 0x00, 0x19, 0xFA]);
+    }
+    // Initialize printer.
+    buffer.extend_from_slice(&[0x1B, 0x40]);
+    // Centered header.
+    buffer.extend_from_slice(&[0x1B, 0x61, 0x01]);
+    escpos_text_line(&mut buffer, "FERRE-POS");
+    escpos_text_line(&mut buffer, &fit_text(&ticket.sucursal, width));
+    escpos_text_line(&mut buffer, &fit_text(&format!("Ticket {}", ticket.folio), width));
+    escpos_text_line(&mut buffer, &separator);
+
+    // Left-aligned body.
+    buffer.extend_from_slice(&[0x1B, 0x61, 0x00]);
+    escpos_text_line(&mut buffer, &ticket_two_columns("Fecha", &ticket.fecha, width));
+    escpos_text_line(&mut buffer, &ticket_two_columns("Cajero", &ticket.cajero, width));
+    escpos_text_line(&mut buffer, &ticket_two_columns("Pago", &ticket.metodo_pago, width));
+    escpos_text_line(&mut buffer, &separator);
+
+    for producto in &ticket.productos {
+        escpos_text_line(&mut buffer, &fit_text(&producto.descripcion, width));
+        let cantidad_precio = format!("{:.3} x {}", producto.cantidad, money_text(producto.precio_unitario));
+        escpos_text_line(
+            &mut buffer,
+            &ticket_two_columns(&cantidad_precio, &money_text(producto.importe), width),
+        );
+    }
+
+    escpos_text_line(&mut buffer, &separator);
+    escpos_text_line(&mut buffer, &ticket_two_columns("Subtotal", &money_text(ticket.subtotal), width));
+    if ticket.descuento > 0.0 {
+        escpos_text_line(&mut buffer, &ticket_two_columns("Descuento", &format!("-{}", money_text(ticket.descuento)), width));
+    }
+    escpos_text_line(&mut buffer, &ticket_two_columns("TOTAL", &money_text(ticket.total), width));
+    if let Some(recibido) = ticket.recibido {
+        escpos_text_line(&mut buffer, &ticket_two_columns("Recibido", &money_text(recibido), width));
+    }
+    if let Some(cambio) = ticket.cambio {
+        escpos_text_line(&mut buffer, &ticket_two_columns("Cambio", &money_text(cambio), width));
+    }
+
+    if let Some(mensaje) = ticket.mensaje.as_ref().map(|value| value.trim()).filter(|value| !value.is_empty()) {
+        escpos_text_line(&mut buffer, &separator);
+        buffer.extend_from_slice(&[0x1B, 0x61, 0x01]);
+        escpos_text_line(&mut buffer, &fit_text(mensaje, width));
+        buffer.extend_from_slice(&[0x1B, 0x61, 0x00]);
+    }
+
+    buffer.extend_from_slice(b"\n\n\n");
+    // Corte parcial: GS V B 0.
+    buffer.extend_from_slice(&[0x1D, 0x56, 0x42, 0x00]);
+
+    Ok(buffer)
+}
+
+fn send_raw_to_printer(printer_name: &str, data: &[u8]) -> Result<(), String> {
+    let printer_name = printer_name.trim();
+    if printer_name.is_empty() {
+        return Err("Debes indicar el nombre o ruta de la impresora.".to_string());
+    }
+
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_else(|_| Duration::from_secs(0))
+        .as_millis();
+    let mut path = std::env::temp_dir();
+    path.push(format!("ferre_pos_ticket_{millis}.bin"));
+    {
+        let mut file = File::create(&path).map_err(|error| format!("No se pudo crear el archivo temporal del ticket: {error}"))?;
+        file.write_all(data)
+            .map_err(|error| format!("No se pudo escribir el ticket temporal: {error}"))?;
+    }
+
+    #[cfg(target_os = "windows")]
+    let output = Command::new("cmd")
+        .args(["/C", "copy", "/B"])
+        .arg(&path)
+        .arg(printer_name)
+        .output();
+
+    #[cfg(not(target_os = "windows"))]
+    let output = Command::new("lp")
+        .args(["-d", printer_name, "-o", "raw"])
+        .arg(&path)
+        .output();
+
+    let _ = fs::remove_file(&path);
+
+    let output = output.map_err(|error| format!("No se pudo invocar el spooler de impresión: {error}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        Err(format!(
+            "La impresora rechazó el ticket. {}{}",
+            stdout,
+            if stderr.is_empty() { String::new() } else { format!(" {stderr}") }
+        ))
+    }
+}
+
+#[tauri::command]
+fn imprimir_ticket_y_abrir_caja(
+    printer_name: String,
+    paper_width: Option<usize>,
+    abrir_cajon: Option<bool>,
+    ticket: TicketPayloadInput,
+) -> AppResult<()> {
+    let width = paper_width.unwrap_or(42);
+    let bytes = build_ticket_escpos(&ticket, width, abrir_cajon.unwrap_or(true))?;
+    send_raw_to_printer(&printer_name, &bytes)
+}
+
 #[tauri::command]
 fn get_dashboard_stats(
     state_db: tauri::State<DbState>,
@@ -5245,7 +6327,7 @@ fn get_dashboard_stats(
     filtro: Option<DashboardFiltroInput>,
 ) -> AppResult<DashboardStats> {
     let conn = get_conn(&state_db).map_err(to_command_error)?;
-    let user = current_session_user(&state_sesion)?;
+    let user = require_admin_or_superadmin(&state_sesion)?;
     let filtro_ref = filtro.as_ref();
     let sucursal_id = scoped_sucursal_for_read(
         &user,
@@ -5396,10 +6478,23 @@ fn get_dashboard_stats(
         }
     };
 
+    let ticket_promedio = if transacciones > 0 {
+        round_money(total_vendido / transacciones as f64)
+    } else {
+        0.0
+    };
+    let margen_porcentaje = if total_vendido > 0.0 {
+        round_money((utilidad_neta / total_vendido) * 100.0)
+    } else {
+        0.0
+    };
+
     Ok(DashboardStats {
-        total_vendido,
-        utilidad_neta,
+        total_vendido: round_money(total_vendido),
+        utilidad_neta: round_money(utilidad_neta),
         transacciones,
+        ticket_promedio,
+        margen_porcentaje,
     })
 }
 
@@ -5410,7 +6505,7 @@ fn get_productos_bajo_stock(
     sucursal_id: Option<String>,
 ) -> AppResult<Vec<ProductoBajoStock>> {
     let conn = get_conn(&state_db).map_err(to_command_error)?;
-    let user = current_session_user(&state_sesion)?;
+    let user = require_admin_or_superadmin(&state_sesion)?;
     let sid = scoped_sucursal_for_read(&user, normalize_filter(&sucursal_id));
 
     let mut resultados = Vec::new();
@@ -5422,7 +6517,12 @@ fn get_productos_bajo_stock(
                 FROM inventario_sucursal i
                 INNER JOIN productos p ON p.id = i.producto_id
                 INNER JOIN sucursales s ON s.id = i.sucursal_id
-                WHERE i.stock <= i.stock_minimo AND i.sucursal_id = ?1
+                WHERE i.stock_minimo > 0
+                  AND i.stock <= i.stock_minimo
+                  AND i.sucursal_id = ?1
+                  AND p.eliminado = 0
+                  AND i.eliminado = 0
+                  AND s.eliminado = 0
                 ORDER BY (i.stock - i.stock_minimo) ASC, p.descripcion
                 ",
             )
@@ -5453,7 +6553,11 @@ fn get_productos_bajo_stock(
                 FROM inventario_sucursal i
                 INNER JOIN productos p ON p.id = i.producto_id
                 INNER JOIN sucursales s ON s.id = i.sucursal_id
-                WHERE i.stock <= i.stock_minimo
+                WHERE i.stock_minimo > 0
+                  AND i.stock <= i.stock_minimo
+                  AND p.eliminado = 0
+                  AND i.eliminado = 0
+                  AND s.eliminado = 0
                 ORDER BY (i.stock - i.stock_minimo) ASC, p.descripcion
                 ",
             )
@@ -5488,7 +6592,7 @@ fn get_productos_mas_vendidos(
     filtro: Option<DashboardFiltroInput>,
 ) -> AppResult<Vec<ProductoMasVendido>> {
     let conn = get_conn(&state_db).map_err(to_command_error)?;
-    let user = current_session_user(&state_sesion)?;
+    let user = require_admin_or_superadmin(&state_sesion)?;
     let filtro_ref = filtro.as_ref();
     let sucursal_id = scoped_sucursal_for_read(
         &user,
@@ -5589,7 +6693,7 @@ fn get_historial_ventas(
     let mut sql = String::from(
         "
         SELECT
-          v.id, v.fecha, v.total, v.metodo_pago, v.estado,
+          v.id, v.fecha, v.total, v.metodo_pago, v.efectivo_recibido, v.cambio_entregado, v.estado,
           s.id, s.nombre, u.id, u.nombre, c.id, c.nombre
         FROM ventas v
         INNER JOIN sucursales s ON s.id = v.sucursal_id
@@ -5629,13 +6733,15 @@ fn get_historial_ventas(
             fecha: row.get(1).map_err(AppError::from).map_err(to_command_error)?,
             total: row.get(2).map_err(AppError::from).map_err(to_command_error)?,
             metodo_pago: row.get(3).map_err(AppError::from).map_err(to_command_error)?,
-            estado: row.get(4).map_err(AppError::from).map_err(to_command_error)?,
-            sucursal_id: row.get(5).map_err(AppError::from).map_err(to_command_error)?,
-            sucursal_nombre: row.get(6).map_err(AppError::from).map_err(to_command_error)?,
-            usuario_id: row.get(7).map_err(AppError::from).map_err(to_command_error)?,
-            usuario_nombre: row.get(8).map_err(AppError::from).map_err(to_command_error)?,
-            cliente_id: row.get(9).ok(),
-            cliente_nombre: row.get(10).ok(),
+            efectivo_recibido: row.get(4).map_err(AppError::from).map_err(to_command_error)?,
+            cambio_entregado: row.get(5).map_err(AppError::from).map_err(to_command_error)?,
+            estado: row.get(6).map_err(AppError::from).map_err(to_command_error)?,
+            sucursal_id: row.get(7).map_err(AppError::from).map_err(to_command_error)?,
+            sucursal_nombre: row.get(8).map_err(AppError::from).map_err(to_command_error)?,
+            usuario_id: row.get(9).map_err(AppError::from).map_err(to_command_error)?,
+            usuario_nombre: row.get(10).map_err(AppError::from).map_err(to_command_error)?,
+            cliente_id: row.get(11).ok(),
+            cliente_nombre: row.get(12).ok(),
         });
     }
 
@@ -5761,7 +6867,11 @@ fn validate_empresa_config_fiscal(input: &EmpresaConfigFiscal) -> Result<(), App
 }
 
 #[tauri::command]
-fn get_empresa_config(state_db: tauri::State<DbState>) -> AppResult<Option<EmpresaConfigFiscal>> {
+fn get_empresa_config(
+    state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
+) -> AppResult<Option<EmpresaConfigFiscal>> {
+    require_superadmin(&state_sesion)?;
     let conn = get_conn(&state_db).map_err(to_command_error)?;
     conn.query_row(
         "
@@ -5788,8 +6898,10 @@ fn get_empresa_config(state_db: tauri::State<DbState>) -> AppResult<Option<Empre
 #[tauri::command]
 fn guardar_empresa_config(
     state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
     config: EmpresaConfigFiscal,
 ) -> AppResult<EmpresaConfigFiscal> {
+    require_superadmin(&state_sesion)?;
     let config = EmpresaConfigFiscal {
         rfc: normalize_upper_trim(&config.rfc),
         razon_social: config.razon_social.trim().to_string(),
@@ -5848,7 +6960,7 @@ fn get_payload_factura(
     }
 
     let mut conn = get_conn(&state_db).map_err(to_command_error)?;
-    let user = current_session_user(&state_sesion)?;
+    let user = require_admin_or_superadmin(&state_sesion)?;
     let tx = conn.transaction().map_err(AppError::from).map_err(to_command_error)?;
 
     let (venta_fecha, metodo_pago, estado, cliente_id, sucursal_id): (
@@ -5873,6 +6985,20 @@ fn get_payload_factura(
 
     if estado != "COMPLETADA" {
         return Err("Solo se pueden facturar ventas COMPLETADAS.".to_string());
+    }
+
+    let factura_estado_existente: Option<String> = tx
+        .query_row(
+            "SELECT estado FROM facturas_emitidas WHERE venta_id = ?1 ORDER BY fecha_emision DESC LIMIT 1",
+            [&venta_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(AppError::from)
+        .map_err(to_command_error)?;
+
+    if matches!(factura_estado_existente.as_deref(), Some("TIMBRADA")) {
+        return Err("Esta venta ya tiene una factura TIMBRADA.".to_string());
     }
 
     let empresa_config = tx
@@ -6083,26 +7209,44 @@ fn actualizar_estado_factura(
     state_sesion: tauri::State<SesionActual>,
     input: ActualizarEstadoFacturaInput,
 ) -> AppResult<()> {
-    if input.factura_id.trim().is_empty() || input.uuid.trim().is_empty() {
+    let factura_id = input.factura_id.trim().to_string();
+    let uuid = normalize_upper_trim(&input.uuid);
+    if factura_id.is_empty() || uuid.is_empty() {
         return Err("La factura y el UUID oficial son obligatorios.".to_string());
     }
+    validate_uuid_sat_like(&uuid).map_err(to_command_error)?;
 
     let conn = get_conn(&state_db).map_err(to_command_error)?;
-    let user = current_session_user(&state_sesion)?;
-    let sucursal_id: String = conn
+    let user = require_admin_or_superadmin(&state_sesion)?;
+    let (sucursal_id, venta_estado): (String, String) = conn
         .query_row(
             "
-            SELECT v.sucursal_id
+            SELECT v.sucursal_id, v.estado
             FROM facturas_emitidas fe
             INNER JOIN ventas v ON v.id = fe.venta_id
             WHERE fe.id = ?1
             ",
-            [&input.factura_id],
-            |row| row.get(0),
+            [&factura_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .map_err(AppError::from)
         .map_err(to_command_error)?;
     ensure_can_read_sucursal(&user, &sucursal_id)?;
+    if venta_estado != "COMPLETADA" {
+        return Err("No se puede timbrar una factura cuya venta ya fue cancelada.".to_string());
+    }
+
+    let uuid_exists: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM facturas_emitidas WHERE uuid = ?1 AND id <> ?2",
+            params![uuid, factura_id],
+            |row| row.get(0),
+        )
+        .map_err(AppError::from)
+        .map_err(to_command_error)?;
+    if uuid_exists > 0 {
+        return Err("El UUID indicado ya está asignado a otra factura.".to_string());
+    }
 
     let affected = conn
         .execute(
@@ -6111,16 +7255,19 @@ fn actualizar_estado_factura(
             SET estado = 'TIMBRADA',
                 uuid = ?2,
                 pdf_path = ?3,
-                xml_path = ?4
+                xml_path = ?4,
+                sincronizado = 0,
+                updated_at = datetime('now')
             WHERE id = ?1
+              AND estado = 'PENDIENTE'
             ",
-            params![input.factura_id, input.uuid, input.pdf_path, input.xml_path],
+            params![factura_id, uuid, input.pdf_path, input.xml_path],
         )
         .map_err(|error| map_write_error(error, "factura"))
         .map_err(to_command_error)?;
 
     if affected == 0 {
-        return Err("No se encontró la factura a actualizar.".to_string());
+        return Err("No se encontró una factura PENDIENTE para timbrar.".to_string());
     }
 
     Ok(())
@@ -6132,7 +7279,7 @@ fn get_facturas_emitidas(
     state_sesion: tauri::State<SesionActual>,
 ) -> AppResult<Vec<FacturaEmitida>> {
     let conn = get_conn(&state_db).map_err(to_command_error)?;
-    let user = current_session_user(&state_sesion)?;
+    let user = require_admin_or_superadmin(&state_sesion)?;
     let sucursal_id = scoped_sucursal_for_read(&user, None);
     let mut sql = String::from(
         "
@@ -6178,7 +7325,11 @@ fn get_facturas_emitidas(
 }
 
 #[tauri::command]
-fn get_sync_migration_status(state_db: tauri::State<DbState>) -> AppResult<SyncMigrationStatus> {
+fn get_sync_migration_status(
+    state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
+) -> AppResult<SyncMigrationStatus> {
+    require_superadmin(&state_sesion)?;
     let conn = get_conn(&state_db).map_err(to_command_error)?;
     let mut tablas = Vec::new();
     let mut tablas_con_uuid = Vec::new();
@@ -6204,7 +7355,11 @@ fn get_sync_migration_status(state_db: tauri::State<DbState>) -> AppResult<SyncM
 }
 
 #[tauri::command]
-fn get_sync_status(state_db: tauri::State<DbState>) -> AppResult<SyncStatus> {
+fn get_sync_status(
+    state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
+) -> AppResult<SyncStatus> {
+    current_session_user(&state_sesion)?;
     let conn = get_conn(&state_db).map_err(to_command_error)?;
     let pendientes = count_sync_pending(&conn).map_err(to_command_error)?;
     let ventas_pendientes = count_table_sync_pending(&conn, "ventas").map_err(to_command_error)?;
@@ -6215,31 +7370,64 @@ fn get_sync_status(state_db: tauri::State<DbState>) -> AppResult<SyncStatus> {
 }
 
 #[tauri::command]
-fn get_notificaciones(state_db: tauri::State<DbState>, solo_no_leidas: Option<bool>) -> AppResult<Vec<Notificacion>> {
+fn get_notificaciones(
+    state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
+    solo_no_leidas: Option<bool>,
+) -> AppResult<Vec<Notificacion>> {
     let conn = get_conn(&state_db).map_err(to_command_error)?;
+    let user = current_session_user(&state_sesion)?;
     evaluar_notificaciones_negocio(&conn).map_err(to_command_error)?;
 
     let only_unread = solo_no_leidas.unwrap_or(false);
-    let sql = if only_unread {
+    let mut sql = String::from(
         "
         SELECT id, categoria, severidad, titulo, mensaje, entidad_tipo, entidad_id, event_key, leida, creada_at
         FROM notificaciones
-        WHERE leida = 0
-        ORDER BY leida ASC, creada_at DESC
-        LIMIT 50
-        "
-    } else {
-        "
-        SELECT id, categoria, severidad, titulo, mensaje, entidad_tipo, entidad_id, event_key, leida, creada_at
-        FROM notificaciones
-        ORDER BY leida ASC, creada_at DESC
-        LIMIT 50
-        "
-    };
+        WHERE 1 = 1
+        ",
+    );
+    let mut params_vec: Vec<String> = Vec::new();
 
-    let mut stmt = conn.prepare(sql).map_err(AppError::from).map_err(to_command_error)?;
+    if only_unread {
+        sql.push_str(" AND leida = 0");
+    }
+
+    if !is_superadmin(&user) {
+        sql.push_str(
+            "
+            AND (
+                (entidad_tipo = 'sucursal' AND entidad_id = ?1)
+                OR event_key LIKE ?2
+                OR (
+                    entidad_tipo = 'caja_sesion'
+                    AND entidad_id IN (
+                        SELECT id FROM cajas_sesiones WHERE sucursal_id = ?3
+                    )
+                )
+                OR (
+                    entidad_tipo = 'factura'
+                    AND entidad_id IN (
+                        SELECT fe.id
+                        FROM facturas_emitidas fe
+                        INNER JOIN ventas v ON v.id = fe.venta_id
+                        WHERE v.sucursal_id = ?4
+                    )
+                )
+            )
+            ",
+        );
+        params_vec.push(user.sucursal_id.clone());
+        params_vec.push(format!("%:{}", user.sucursal_id));
+        params_vec.push(user.sucursal_id.clone());
+        params_vec.push(user.sucursal_id.clone());
+    }
+
+    sql.push_str(" ORDER BY leida ASC, creada_at DESC LIMIT 50");
+
+    let mut stmt = conn.prepare(&sql).map_err(AppError::from).map_err(to_command_error)?;
     let rows = stmt
-        .query_map([], |row| {
+        .query_map(params_from_iter(params_vec.iter()), |row| {
             Ok(Notificacion {
                 id: row.get(0)?,
                 categoria: row.get(1)?,
@@ -6264,20 +7452,95 @@ fn get_notificaciones(state_db: tauri::State<DbState>, solo_no_leidas: Option<bo
 }
 
 #[tauri::command]
-fn marcar_notificacion_leida(state_db: tauri::State<DbState>, id: String) -> AppResult<()> {
+fn marcar_notificacion_leida(
+    state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
+    id: String,
+) -> AppResult<()> {
     let conn = get_conn(&state_db).map_err(to_command_error)?;
-    conn.execute("UPDATE notificaciones SET leida = 1 WHERE id = ?1", [id])
+    let user = current_session_user(&state_sesion)?;
+
+    if is_superadmin(&user) {
+        conn.execute("UPDATE notificaciones SET leida = 1 WHERE id = ?1", [id])
+            .map_err(AppError::from)
+            .map_err(to_command_error)?;
+    } else {
+        conn.execute(
+            "
+            UPDATE notificaciones
+            SET leida = 1
+            WHERE id = ?1
+              AND (
+                (entidad_tipo = 'sucursal' AND entidad_id = ?2)
+                OR event_key LIKE ?3
+                OR (
+                    entidad_tipo = 'caja_sesion'
+                    AND entidad_id IN (
+                        SELECT id FROM cajas_sesiones WHERE sucursal_id = ?4
+                    )
+                )
+                OR (
+                    entidad_tipo = 'factura'
+                    AND entidad_id IN (
+                        SELECT fe.id
+                        FROM facturas_emitidas fe
+                        INNER JOIN ventas v ON v.id = fe.venta_id
+                        WHERE v.sucursal_id = ?5
+                    )
+                )
+              )
+            ",
+            params![id, user.sucursal_id, format!("%:{}", user.sucursal_id), user.sucursal_id, user.sucursal_id],
+        )
         .map_err(AppError::from)
         .map_err(to_command_error)?;
+    }
     Ok(())
 }
 
 #[tauri::command]
-fn marcar_todas_notificaciones_leidas(state_db: tauri::State<DbState>) -> AppResult<()> {
+fn marcar_todas_notificaciones_leidas(
+    state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
+) -> AppResult<()> {
     let conn = get_conn(&state_db).map_err(to_command_error)?;
-    conn.execute("UPDATE notificaciones SET leida = 1 WHERE leida = 0", [])
+    let user = current_session_user(&state_sesion)?;
+
+    if is_superadmin(&user) {
+        conn.execute("UPDATE notificaciones SET leida = 1 WHERE leida = 0", [])
+            .map_err(AppError::from)
+            .map_err(to_command_error)?;
+    } else {
+        conn.execute(
+            "
+            UPDATE notificaciones
+            SET leida = 1
+            WHERE leida = 0
+              AND (
+                (entidad_tipo = 'sucursal' AND entidad_id = ?1)
+                OR event_key LIKE ?2
+                OR (
+                    entidad_tipo = 'caja_sesion'
+                    AND entidad_id IN (
+                        SELECT id FROM cajas_sesiones WHERE sucursal_id = ?3
+                    )
+                )
+                OR (
+                    entidad_tipo = 'factura'
+                    AND entidad_id IN (
+                        SELECT fe.id
+                        FROM facturas_emitidas fe
+                        INNER JOIN ventas v ON v.id = fe.venta_id
+                        WHERE v.sucursal_id = ?4
+                    )
+                )
+              )
+            ",
+            params![user.sucursal_id, format!("%:{}", user.sucursal_id), user.sucursal_id, user.sucursal_id],
+        )
         .map_err(AppError::from)
         .map_err(to_command_error)?;
+    }
     Ok(())
 }
 
@@ -6293,9 +7556,16 @@ fn insertar_notificacion(
 ) -> Result<(), AppError> {
     conn.execute(
         "
-        INSERT OR IGNORE INTO notificaciones (
+        INSERT INTO notificaciones (
             id, categoria, severidad, titulo, mensaje, entidad_tipo, entidad_id, event_key, leida, creada_at
         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, datetime('now'))
+        ON CONFLICT(event_key) DO UPDATE SET
+            categoria = excluded.categoria,
+            severidad = excluded.severidad,
+            titulo = excluded.titulo,
+            mensaje = excluded.mensaje,
+            entidad_tipo = excluded.entidad_tipo,
+            entidad_id = excluded.entidad_id
         ",
         params![
             generate_uuid_like(),
@@ -6334,6 +7604,9 @@ fn evaluar_alertas_inventario(conn: &Connection) -> Result<(), AppError> {
         INNER JOIN productos p ON p.id = i.producto_id
         INNER JOIN sucursales s ON s.id = i.sucursal_id
         WHERE p.eliminado = 0
+          AND i.eliminado = 0
+          AND s.eliminado = 0
+          AND i.stock_minimo > 0
           AND i.stock <= i.stock_minimo
         ",
     )?;
@@ -6399,6 +7672,7 @@ fn evaluar_alertas_caja(conn: &Connection) -> Result<(), AppError> {
         FROM cajas_sesiones cs
         INNER JOIN sucursales s ON s.id = cs.sucursal_id
         WHERE cs.estado = 'ABIERTA'
+          AND s.eliminado = 0
         ",
     )?;
     let rows = stmt.query_map([], |row| {
@@ -6502,10 +7776,14 @@ fn evaluar_alertas_credito(conn: &Connection) -> Result<(), AppError> {
 fn evaluar_alertas_facturacion(conn: &Connection) -> Result<(), AppError> {
     let mut stmt = conn.prepare(
         "
-        SELECT id, venta_id, rfc_receptor, monto_total, fecha_emision
-        FROM facturas_emitidas
-        WHERE estado = 'PENDIENTE'
-          AND datetime(fecha_emision) <= datetime('now', '-1 day')
+        SELECT fe.id, fe.venta_id, fe.rfc_receptor, fe.monto_total, fe.fecha_emision
+        FROM facturas_emitidas fe
+        INNER JOIN ventas v ON v.id = fe.venta_id
+        INNER JOIN sucursales s ON s.id = v.sucursal_id
+        WHERE fe.estado = 'PENDIENTE'
+          AND v.estado = 'COMPLETADA'
+          AND s.eliminado = 0
+          AND datetime(fe.fecha_emision) <= datetime('now', '-1 day')
         ",
     )?;
     let rows = stmt.query_map([], |row| {
@@ -6623,12 +7901,38 @@ fn build_backup(conn: &Connection) -> Result<BackupLocal, AppError> {
     for table in BACKUP_TABLES {
         tablas.insert((*table).to_string(), export_table(conn, table)?);
     }
+    for table in LOCAL_ONLY_BACKUP_TABLES {
+        tablas.insert((*table).to_string(), export_table(conn, table)?);
+    }
 
     Ok(BackupLocal {
         version: "1".to_string(),
         generado_at: current_timestamp_string(),
         tablas,
     })
+}
+
+fn validate_backup_payload(backup: &BackupLocal) -> Result<(), AppError> {
+    if !matches!(backup.version.as_str(), "1" | "supabase-rest-v1") {
+        return Err(AppError::Validation(format!(
+            "Versión de respaldo no compatible: {}.",
+            backup.version
+        )));
+    }
+
+    let missing_tables: Vec<&str> = BACKUP_TABLES
+        .iter()
+        .copied()
+        .filter(|table| !backup.tablas.contains_key(*table))
+        .collect();
+    if !missing_tables.is_empty() {
+        return Err(AppError::Validation(format!(
+            "El respaldo está incompleto. Faltan tablas críticas: {}.",
+            missing_tables.join(", ")
+        )));
+    }
+
+    Ok(())
 }
 
 fn map_backup_column_to_local(table: &str, column: &str, is_remote_backup: bool) -> Option<String> {
@@ -6645,95 +7949,104 @@ fn map_backup_column_to_local(table: &str, column: &str, is_remote_backup: bool)
 }
 
 fn apply_backup_to_conn(conn: &mut Connection, backup: BackupLocal) -> Result<(), AppError> {
+    validate_backup_payload(&backup)?;
+
     let is_remote_backup = backup.version == "supabase-rest-v1";
     let mut columns_by_table: HashMap<String, Vec<String>> = HashMap::new();
     for table in BACKUP_TABLES {
         columns_by_table.insert((*table).to_string(), table_columns(conn, table)?);
     }
-
-    let tx = conn.transaction()?;
-    tx.execute("PRAGMA foreign_keys = OFF", [])?;
-
-    for table in BACKUP_TABLES.iter().rev() {
-        tx.execute(&format!("DELETE FROM {table}"), [])?;
-    }
-
-    for table in BACKUP_TABLES {
-        let Some(rows) = backup.tablas.get(*table) else {
-            continue;
-        };
-
-        for row in rows {
-            let JsonValue::Object(object) = row else {
-                return Err(AppError::Validation(format!(
-                    "La tabla {table} contiene un renglón inválido en el respaldo."
-                )));
-            };
-
-            let local_columns = columns_by_table
-                .get(*table)
-                .ok_or_else(|| AppError::Db(format!("No se pudieron leer columnas de {table}.")))?;
-            let mut columns = Vec::new();
-            let mut values = Vec::new();
-            for (column, value) in object {
-                let Some(local_column) = map_backup_column_to_local(table, column, is_remote_backup) else {
-                    continue;
-                };
-                if !is_safe_identifier(&local_column) {
-                    return Err(AppError::Validation(format!(
-                        "El respaldo contiene una columna inválida: {local_column}."
-                    )));
-                }
-                if !local_columns.contains(&local_column) {
-                    continue;
-                }
-                columns.push(local_column);
-                values.push(json_to_sql_value(value)?);
-            }
-
-            if columns.is_empty() {
-                continue;
-            }
-
-            let placeholders = vec!["?"; columns.len()].join(", ");
-            let sql = format!(
-                "INSERT OR REPLACE INTO {table} ({}) VALUES ({})",
-                columns.join(", "),
-                placeholders
-            );
-            tx.execute(&sql, params_from_iter(values.iter()))?;
+    if !is_remote_backup {
+        for table in LOCAL_ONLY_BACKUP_TABLES {
+            columns_by_table.insert((*table).to_string(), table_columns(conn, table)?);
         }
     }
 
-    tx.execute("PRAGMA foreign_keys = ON", [])?;
-    tx.commit()?;
-    Ok(())
-}
+    conn.execute_batch("PRAGMA foreign_keys = OFF")?;
+    let apply_result = (|| -> Result<(), AppError> {
+        let tx = conn.transaction()?;
 
-fn query_json_rows(conn: &Connection, sql: &str) -> Result<Vec<JsonValue>, AppError> {
-    let mut stmt = conn.prepare(sql)?;
-    let column_names: Vec<String> = stmt.column_names().iter().map(|value| value.to_string()).collect();
-    let rows = stmt.query_map([], |row| {
-        let mut object = JsonMap::new();
-        for (index, name) in column_names.iter().enumerate() {
-            let value = if name == "sincronizado" || name == "eliminado" {
-                match row.get_ref(index)? {
-                    ValueRef::Integer(value) => JsonValue::Bool(value != 0),
-                    other => value_ref_to_json(other),
-                }
+        if !is_remote_backup {
+            for table in LOCAL_ONLY_BACKUP_TABLES.iter().rev() {
+                tx.execute(&format!("DELETE FROM {table}"), [])?;
+            }
+        }
+        for table in BACKUP_TABLES.iter().rev() {
+            tx.execute(&format!("DELETE FROM {table}"), [])?;
+        }
+
+        for table in BACKUP_TABLES.iter().chain(
+            if is_remote_backup {
+                [].iter()
             } else {
-                value_ref_to_json(row.get_ref(index)?)
+                LOCAL_ONLY_BACKUP_TABLES.iter()
+            },
+        ) {
+            let Some(rows) = backup.tablas.get(*table) else {
+                continue;
             };
-            object.insert(name.clone(), value);
-        }
-        Ok(JsonValue::Object(object))
-    })?;
 
-    let mut result = Vec::new();
-    for row in rows {
-        result.push(row?);
-    }
-    Ok(result)
+            for row in rows {
+                let JsonValue::Object(object) = row else {
+                    return Err(AppError::Validation(format!(
+                        "La tabla {table} contiene un renglón inválido en el respaldo."
+                    )));
+                };
+
+                let local_columns = columns_by_table
+                    .get(*table)
+                    .ok_or_else(|| AppError::Db(format!("No se pudieron leer columnas de {table}.")))?;
+                let mut columns = Vec::new();
+                let mut values = Vec::new();
+                for (column, value) in object {
+                    let Some(local_column) = map_backup_column_to_local(table, column, is_remote_backup) else {
+                        continue;
+                    };
+                    if !is_safe_identifier(&local_column) {
+                        return Err(AppError::Validation(format!(
+                            "El respaldo contiene una columna inválida: {local_column}."
+                        )));
+                    }
+                    if !local_columns.contains(&local_column) {
+                        continue;
+                    }
+                    columns.push(local_column);
+                    values.push(json_to_sql_value(value)?);
+                }
+
+                if columns.is_empty() {
+                    continue;
+                }
+
+                let placeholders = vec!["?"; columns.len()].join(", ");
+                let sql = format!(
+                    "INSERT OR REPLACE INTO {table} ({}) VALUES ({})",
+                    columns.join(", "),
+                    placeholders
+                );
+                tx.execute(&sql, params_from_iter(values.iter()))?;
+            }
+        }
+
+        let fk_violations: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM pragma_foreign_key_check",
+            [],
+            |row| row.get(0),
+        )?;
+        if fk_violations > 0 {
+            return Err(AppError::Validation(format!(
+                "El respaldo no se aplicó porque contiene {fk_violations} referencias inválidas."
+            )));
+        }
+
+        tx.commit()?;
+        Ok(())
+    })();
+
+    let enable_result = conn.execute_batch("PRAGMA foreign_keys = ON").map_err(AppError::from);
+    apply_result?;
+    enable_result?;
+    Ok(())
 }
 
 fn query_json_rows_with_local_ids(conn: &Connection, sql: &str) -> Result<Vec<(String, JsonValue)>, AppError> {
@@ -6848,14 +8161,6 @@ fn mark_table_ids_synced(conn: &Connection, table: &str, ids: &[String], synced_
     Ok(())
 }
 
-fn mark_table_synced(conn: &Connection, table: &str, synced_at: &str) -> Result<(), AppError> {
-    conn.execute(
-        &format!("UPDATE {table} SET sincronizado = 1, updated_at = ?1 WHERE sincronizado = 0"),
-        [synced_at],
-    )?;
-    Ok(())
-}
-
 fn url_encode_component(value: &str) -> String {
     let mut encoded = String::new();
     for byte in value.bytes() {
@@ -6919,6 +8224,82 @@ fn push_remote_row_value(
     Ok(())
 }
 
+fn json_updated_at(value: Option<&JsonValue>) -> String {
+    value
+        .and_then(JsonValue::as_str)
+        .unwrap_or("1970-01-01")
+        .to_string()
+}
+
+fn sync_key_from_values(conflict_columns: &[&str], columns: &[String], values: &[Value]) -> String {
+    conflict_columns
+        .iter()
+        .filter_map(|key| {
+            let position = columns.iter().position(|column| column == key)?;
+            let value = match &values[position] {
+                Value::Null => "NULL".to_string(),
+                Value::Integer(value) => value.to_string(),
+                Value::Real(value) => value.to_string(),
+                Value::Text(value) => value.clone(),
+                Value::Blob(value) => format!("{value:?}"),
+            };
+            Some(format!("{key}={value}"))
+        })
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
+fn should_apply_remote_row(
+    tx: &Transaction<'_>,
+    table: &str,
+    conflict_columns: &[&str],
+    columns: &[String],
+    values: &[Value],
+    remote_updated_at: &str,
+) -> Result<bool, AppError> {
+    let mut where_parts = Vec::new();
+    let mut key_values = Vec::new();
+    for key in conflict_columns {
+        let Some(position) = columns.iter().position(|column| column == key) else {
+            return Ok(false);
+        };
+        where_parts.push(format!("{key} = ?"));
+        key_values.push(values[position].clone());
+    }
+
+    if where_parts.is_empty() {
+        return Ok(false);
+    }
+
+    let sql = format!(
+        "SELECT sincronizado, updated_at FROM {table} WHERE {}",
+        where_parts.join(" AND ")
+    );
+    let local_state = tx
+        .query_row(&sql, params_from_iter(key_values.iter()), |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })
+        .optional()?;
+
+    let Some((sincronizado, local_updated_at)) = local_state else {
+        return Ok(true);
+    };
+
+    let local_is_newer: i64 = tx
+        .query_row(
+            "SELECT CASE WHEN datetime(?1) > datetime(?2) THEN 1 ELSE 0 END",
+            params![local_updated_at, remote_updated_at],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+
+    if sincronizado == 0 && local_is_newer == 1 {
+        return Ok(false);
+    }
+
+    Ok(true)
+}
+
 fn apply_remote_delta_rows(conn: &mut Connection, table: &str, rows: Vec<JsonValue>) -> Result<usize, AppError> {
     if rows.is_empty() {
         return Ok(0);
@@ -6947,6 +8328,27 @@ fn apply_remote_delta_rows(conn: &mut Connection, table: &str, rows: Vec<JsonVal
         }
 
         if columns.is_empty() || conflict_columns.iter().any(|key| !columns.iter().any(|column| column == key)) {
+            continue;
+        }
+
+        let remote_updated_at = json_updated_at(object.get("updated_at"));
+        if local_columns.contains(&"sincronizado".to_string())
+            && local_columns.contains(&"updated_at".to_string())
+            && !should_apply_remote_row(&tx, table, conflict_columns, &columns, &values, &remote_updated_at)?
+        {
+            let sync_key = sync_key_from_values(conflict_columns, &columns, &values);
+            insertar_notificacion(
+                &tx,
+                "SINCRONIZACION",
+                "WARNING",
+                "Conflicto de sincronización resuelto",
+                &format!(
+                    "Se conservó el cambio local pendiente en {table} ({sync_key}) porque es más reciente que la versión recibida de Supabase."
+                ),
+                Some(table),
+                Some(&sync_key),
+                &format!("sync:conflict:{table}:{sync_key}:{remote_updated_at}"),
+            )?;
             continue;
         }
 
@@ -6986,11 +8388,6 @@ fn apply_remote_delta_rows(conn: &mut Connection, table: &str, rows: Vec<JsonVal
         if !where_parts.is_empty() && local_columns.contains(&"sincronizado".to_string()) {
             let mut sync_values = vec![Value::Integer(1)];
             if local_columns.contains(&"updated_at".to_string()) {
-                let remote_updated_at = object
-                    .get("updated_at")
-                    .and_then(JsonValue::as_str)
-                    .unwrap_or("1970-01-01")
-                    .to_string();
                 sync_values.push(Value::Text(remote_updated_at));
                 sync_values.extend(key_values);
                 tx.execute(
@@ -7033,9 +8430,36 @@ fn build_delta_pull_endpoint(
         url_encode_component(&format!("gt.{since}")),
     );
 
-    if matches!(table, "inventario_sucursal" | "usuarios") && !sucursal_ids.is_empty() {
-        endpoint.push_str("&sucursal_id=");
-        endpoint.push_str(&url_encode_component(&format!("in.({})", sucursal_ids.join(","))));
+    if !sucursal_ids.is_empty() {
+        let ids_filter = format!("in.({})", sucursal_ids.join(","));
+        match table {
+            "inventario_sucursal"
+            | "usuarios"
+            | "compras"
+            | "detalle_compras"
+            | "ventas"
+            | "detalle_ventas"
+            | "creditos_abonos"
+            | "cajas_sesiones"
+            | "caja_movimientos"
+            | "mermas_ajustes"
+            | "movimientos_inventario"
+            | "facturas_emitidas" => {
+                endpoint.push_str("&sucursal_id=");
+                endpoint.push_str(&url_encode_component(&ids_filter));
+            }
+            "traspasos" => {
+                endpoint.push_str("&or=");
+                endpoint.push_str(&url_encode_component(&format!(
+                    "(sucursal_origen_id.{ids_filter},sucursal_destino_id.{ids_filter})"
+                )));
+            }
+            "detalle_traspasos" => {
+                endpoint.push_str("&sucursal_origen_id=");
+                endpoint.push_str(&url_encode_component(&ids_filter));
+            }
+            _ => {}
+        }
     }
 
     endpoint
@@ -7069,11 +8493,488 @@ fn pull_delta_table(
     apply_remote_delta_rows(conn, table, rows).map_err(to_command_error)
 }
 
+fn download_full_table_rows(
+    client: &reqwest::blocking::Client,
+    config: &SupabaseConfig,
+    table: &str,
+) -> AppResult<Vec<JsonValue>> {
+    const PAGE_SIZE: usize = 1000;
+    let mut offset = 0;
+    let mut all_rows = Vec::new();
+
+    loop {
+        let endpoint = format!(
+            "{}/rest/v1/{}?select=*&order=updated_at.asc&limit={PAGE_SIZE}&offset={offset}",
+            config.url.trim_end_matches('/'),
+            table
+        );
+        let response = supabase_request_builder(client, &endpoint, &config.anon_key)
+            .send()
+            .map_err(|error| format!("No se pudo descargar la tabla {table}: {error}"))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().unwrap_or_default();
+            return Err(format!(
+                "Supabase rechazó la descarga de {table}. Código HTTP: {status}. {body}"
+            ));
+        }
+
+        let rows: Vec<JsonValue> = response
+            .json()
+            .map_err(|error| format!("La respuesta de Supabase para {table} no es JSON válido: {error}"))?;
+        let row_count = rows.len();
+        all_rows.extend(rows);
+
+        if row_count < PAGE_SIZE {
+            break;
+        }
+        offset += PAGE_SIZE;
+    }
+
+    Ok(all_rows)
+}
+
+fn remote_row_local_id(table: &str, row: &JsonValue) -> Option<String> {
+    let object = row.as_object()?;
+    match table {
+        "inventario_sucursal" => Some(format!(
+            "{}|{}",
+            object.get("producto_id")?.as_str()?,
+            object.get("sucursal_id")?.as_str()?
+        )),
+        "promocion_sucursales" => Some(format!(
+            "{}|{}",
+            object.get("promocion_id")?.as_str()?,
+            object.get("sucursal_id")?.as_str()?
+        )),
+        "clientes_datos_fiscales" => object.get("cliente_id")?.as_str().map(str::to_string),
+        "empresa_config_fiscal" => object.get("id").map(|value| {
+            value
+                .as_i64()
+                .map(|number| number.to_string())
+                .or_else(|| value.as_str().map(str::to_string))
+                .unwrap_or_default()
+        }),
+        "movimientos_inventario" => object.get("uuid")?.as_str().map(str::to_string),
+        _ => object.get("id")?.as_str().map(str::to_string),
+    }
+}
+
+fn remote_row_updated_at(row: &JsonValue) -> Option<String> {
+    row.as_object()?
+        .get("updated_at")?
+        .as_str()
+        .map(str::to_string)
+}
+
+fn mark_uploaded_rows_synced(
+    conn: &Connection,
+    table: &str,
+    ids: &[String],
+    remote_rows: &[JsonValue],
+) -> Result<(), AppError> {
+    let fallback_synced_at = current_sqlite_timestamp(conn)?;
+    let remote_timestamps: HashMap<String, String> = remote_rows
+        .iter()
+        .filter_map(|row| Some((remote_row_local_id(table, row)?, remote_row_updated_at(row)?)))
+        .collect();
+
+    for id in ids {
+        let synced_at = remote_timestamps
+            .get(id)
+            .map(String::as_str)
+            .unwrap_or(&fallback_synced_at);
+        mark_table_ids_synced(conn, table, std::slice::from_ref(id), synced_at)?;
+    }
+    Ok(())
+}
+
+fn sync_upload_plans(limit: Option<usize>, only_pending: bool) -> Vec<(&'static str, &'static str, String)> {
+    let limit_clause = limit
+        .map(|value| format!("LIMIT {value}"))
+        .unwrap_or_default();
+    let pending = if only_pending { "WHERE sincronizado = 0" } else { "" };
+    let dc_pending = if only_pending { "WHERE dc.sincronizado = 0" } else { "" };
+    let dv_pending = if only_pending { "WHERE dv.sincronizado = 0" } else { "" };
+    let ca_pending = if only_pending { "WHERE ca.sincronizado = 0" } else { "" };
+    let cm_pending = if only_pending { "WHERE cm.sincronizado = 0" } else { "" };
+    let dt_pending = if only_pending { "WHERE dt.sincronizado = 0" } else { "" };
+    let fe_pending = if only_pending { "WHERE fe.sincronizado = 0" } else { "" };
+    vec![
+        (
+            "sucursales",
+            "id",
+            format!(
+                "
+                SELECT id AS __local_id, id, nombre, direccion, telefono, codigo_postal,
+                       eliminado, 1 AS sincronizado, updated_at
+                FROM sucursales
+                {pending}
+                ORDER BY updated_at
+                {limit_clause}
+                "
+            ),
+        ),
+        (
+            "empresa_config_fiscal",
+            "id",
+            format!(
+                "
+                SELECT id AS __local_id, id, rfc, razon_social, regimen_fiscal, registro_patronal,
+                       actualizado_at, 1 AS sincronizado, updated_at
+                FROM empresa_config_fiscal
+                {pending}
+                ORDER BY updated_at
+                {limit_clause}
+                "
+            ),
+        ),
+        (
+            "proveedores",
+            "id",
+            format!(
+                "
+                SELECT id AS __local_id, id, nombre, contacto_nombre, telefono, email, direccion,
+                       eliminado, 1 AS sincronizado, updated_at
+                FROM proveedores
+                {pending}
+                ORDER BY updated_at
+                {limit_clause}
+                "
+            ),
+        ),
+        (
+            "marcas",
+            "id",
+            format!(
+                "
+                SELECT id AS __local_id, id, nombre, eliminado, 1 AS sincronizado, updated_at
+                FROM marcas
+                {pending}
+                ORDER BY updated_at
+                {limit_clause}
+                "
+            ),
+        ),
+        (
+            "categorias",
+            "id",
+            format!(
+                "
+                SELECT id AS __local_id, id, nombre, eliminado, 1 AS sincronizado, updated_at
+                FROM categorias
+                {pending}
+                ORDER BY updated_at
+                {limit_clause}
+                "
+            ),
+        ),
+        (
+            "unidades",
+            "id",
+            format!(
+                "
+                SELECT id AS __local_id, id, nombre, clave_sat, eliminado, 1 AS sincronizado, updated_at
+                FROM unidades
+                {pending}
+                ORDER BY updated_at
+                {limit_clause}
+                "
+            ),
+        ),
+        (
+            "usuarios",
+            "id",
+            format!(
+                "
+                SELECT id AS __local_id, id, email, nombre, role, sucursal_id, password_hash,
+                       eliminado, 1 AS sincronizado, updated_at
+                FROM usuarios
+                {pending}
+                ORDER BY updated_at
+                {limit_clause}
+                "
+            ),
+        ),
+        (
+            "productos",
+            "id",
+            format!(
+                "
+                SELECT id AS __local_id, id, codigo_barras, codigo_proveedor, proveedor_id, clave_producto, descripcion,
+                       marca, categoria, unidad, precio_costo, costo_promedio, precio_venta, sat_clave_prod_serv,
+                       sat_clave_unidad, eliminado, 1 AS sincronizado, updated_at
+                FROM productos
+                {pending}
+                ORDER BY updated_at
+                {limit_clause}
+                "
+            ),
+        ),
+        (
+            "inventario_sucursal",
+            "producto_id,sucursal_id",
+            format!(
+                "
+                SELECT producto_id || '|' || sucursal_id AS __local_id, producto_id, sucursal_id,
+                       stock, stock_minimo, costo_promedio, precio_venta, 1 AS sincronizado, updated_at
+                FROM inventario_sucursal
+                {pending}
+                ORDER BY updated_at
+                {limit_clause}
+                "
+            ),
+        ),
+        (
+            "promociones",
+            "id",
+            format!(
+                "
+                SELECT id AS __local_id, id, nombre, tipo_descuento, valor, fecha_inicio, fecha_fin,
+                       activo, producto_id, categoria_id, marca, eliminado, 1 AS sincronizado, updated_at
+                FROM promociones
+                {pending}
+                ORDER BY updated_at
+                {limit_clause}
+                "
+            ),
+        ),
+        (
+            "promocion_sucursales",
+            "promocion_id,sucursal_id",
+            format!(
+                "
+                SELECT promocion_id || '|' || sucursal_id AS __local_id, promocion_id, sucursal_id,
+                       eliminado, 1 AS sincronizado, updated_at
+                FROM promocion_sucursales
+                {pending}
+                ORDER BY updated_at
+                {limit_clause}
+                "
+            ),
+        ),
+        (
+            "clientes",
+            "id",
+            format!(
+                "
+                SELECT id AS __local_id, id, nombre, telefono, direccion, limite_credito, saldo_deudor,
+                       eliminado, 1 AS sincronizado, updated_at
+                FROM clientes
+                {pending}
+                ORDER BY updated_at
+                {limit_clause}
+                "
+            ),
+        ),
+        (
+            "clientes_datos_fiscales",
+            "cliente_id",
+            format!(
+                "
+                SELECT cliente_id AS __local_id, cliente_id, rfc, razon_social, regimen_fiscal,
+                       codigo_postal, 1 AS sincronizado, updated_at
+                FROM clientes_datos_fiscales
+                {pending}
+                ORDER BY updated_at
+                {limit_clause}
+                "
+            ),
+        ),
+        (
+            "compras",
+            "uuid",
+            format!(
+                "
+                SELECT id AS __local_id, sync_uuid AS uuid, id, proveedor_id, sucursal_id, fecha,
+                       total, 1 AS sincronizado, updated_at
+                FROM compras
+                {pending}
+                ORDER BY updated_at
+                {limit_clause}
+                "
+            ),
+        ),
+        (
+            "detalle_compras",
+            "uuid",
+            format!(
+                "
+                SELECT dc.id AS __local_id, dc.sync_uuid AS uuid, dc.id, dc.compra_id,
+                       c.sucursal_id, dc.producto_id, dc.cantidad, dc.precio_costo_pactado,
+                       dc.costo_promedio_resultante,
+                       1 AS sincronizado, dc.updated_at
+                FROM detalle_compras dc
+                INNER JOIN compras c ON c.id = dc.compra_id
+                {dc_pending}
+                ORDER BY dc.updated_at
+                {limit_clause}
+                "
+            ),
+        ),
+        (
+            "ventas",
+            "uuid",
+            format!(
+                "
+                SELECT id AS __local_id, sync_uuid AS uuid, id, usuario_id, sucursal_id, fecha, total,
+                       metodo_pago, efectivo_recibido, cambio_entregado, cliente_id,
+                       usuario_autorizo_cancelacion_id, motivo_cancelacion, fecha_cancelacion,
+                       estado, 1 AS sincronizado, updated_at
+                FROM ventas
+                {pending}
+                ORDER BY updated_at
+                {limit_clause}
+                "
+            ),
+        ),
+        (
+            "detalle_ventas",
+            "uuid",
+            format!(
+                "
+                SELECT dv.id AS __local_id, dv.sync_uuid AS uuid, dv.id, dv.venta_id, v.sucursal_id,
+                       dv.producto_id, dv.cantidad, dv.precio_venta_pactado,
+                       dv.costo_unitario_pactado, 1 AS sincronizado, dv.updated_at
+                FROM detalle_ventas dv
+                INNER JOIN ventas v ON v.id = dv.venta_id
+                {dv_pending}
+                ORDER BY dv.updated_at
+                {limit_clause}
+                "
+            ),
+        ),
+        (
+            "creditos_abonos",
+            "uuid",
+            format!(
+                "
+                SELECT ca.id AS __local_id, ca.sync_uuid AS uuid, ca.id, ca.cliente_id, ca.monto,
+                       ca.fecha, ca.usuario_id, u.sucursal_id, 1 AS sincronizado, ca.updated_at
+                FROM creditos_abonos ca
+                INNER JOIN usuarios u ON u.id = ca.usuario_id
+                {ca_pending}
+                ORDER BY ca.updated_at
+                {limit_clause}
+                "
+            ),
+        ),
+        (
+            "cajas_sesiones",
+            "uuid",
+            format!(
+                "
+                SELECT id AS __local_id, sync_uuid AS uuid, id, usuario_id, sucursal_id,
+                       fecha_apertura, monto_inicial, fecha_cierre, monto_final_real,
+                       monto_esperado, estado, 1 AS sincronizado, updated_at
+                FROM cajas_sesiones
+                {pending}
+                ORDER BY updated_at
+                {limit_clause}
+                "
+            ),
+        ),
+        (
+            "caja_movimientos",
+            "uuid",
+            format!(
+                "
+                SELECT cm.id AS __local_id, cm.sync_uuid AS uuid, cm.id, cm.sesion_id, cs.sucursal_id,
+                       cm.tipo, cm.monto, cm.motivo, 1 AS sincronizado, cm.updated_at
+                FROM caja_movimientos cm
+                INNER JOIN cajas_sesiones cs ON cs.id = cm.sesion_id
+                {cm_pending}
+                ORDER BY cm.updated_at
+                {limit_clause}
+                "
+            ),
+        ),
+        (
+            "traspasos",
+            "uuid",
+            format!(
+                "
+                SELECT id AS __local_id, sync_uuid AS uuid, id, sucursal_origen_id,
+                       sucursal_destino_id, usuario_id, fecha, estado, usuario_recibio_id,
+                       fecha_recepcion, observaciones_recepcion, 1 AS sincronizado, updated_at
+                FROM traspasos
+                {pending}
+                ORDER BY updated_at
+                {limit_clause}
+                "
+            ),
+        ),
+        (
+            "detalle_traspasos",
+            "uuid",
+            format!(
+                "
+                SELECT dt.id AS __local_id, dt.sync_uuid AS uuid, dt.id, dt.traspaso_id,
+                       t.sucursal_origen_id, dt.producto_id, dt.cantidad, 1 AS sincronizado,
+                       dt.updated_at
+                FROM detalle_traspasos dt
+                INNER JOIN traspasos t ON t.id = dt.traspaso_id
+                {dt_pending}
+                ORDER BY dt.updated_at
+                {limit_clause}
+                "
+            ),
+        ),
+        (
+            "mermas_ajustes",
+            "uuid",
+            format!(
+                "
+                SELECT id AS __local_id, sync_uuid AS uuid, id, producto_id, sucursal_id,
+                       usuario_id, cantidad, tipo_movimiento, motivo, fecha, 1 AS sincronizado,
+                       updated_at
+                FROM mermas_ajustes
+                {pending}
+                ORDER BY updated_at
+                {limit_clause}
+                "
+            ),
+        ),
+        (
+            "facturas_emitidas",
+            "uuid",
+            format!(
+                "
+                SELECT fe.id AS __local_id, fe.sync_uuid AS uuid, fe.id, fe.venta_id, v.sucursal_id,
+                       fe.uuid AS uuid_sat, fe.rfc_receptor, fe.monto_total, fe.estado, fe.fecha_emision,
+                       fe.pdf_path, fe.xml_path, 1 AS sincronizado, fe.updated_at
+                FROM facturas_emitidas fe
+                INNER JOIN ventas v ON v.id = fe.venta_id
+                {fe_pending}
+                ORDER BY fe.updated_at
+                {limit_clause}
+                "
+            ),
+        ),
+        (
+            "movimientos_inventario",
+            "uuid",
+            format!(
+                "
+                SELECT uuid AS __local_id, uuid, producto_id, sucursal_id, tipo, referencia_tipo,
+                       referencia_id, cantidad, costo_unitario, usuario_id, fecha, 1 AS sincronizado,
+                       updated_at
+                FROM movimientos_inventario
+                {pending}
+                ORDER BY updated_at
+                {limit_clause}
+                "
+            ),
+        ),
+    ]
+}
+
 fn run_auto_pull_once(pool: &DbPool) -> AppResult<usize> {
     let mut conn = pool.get().map_err(AppError::from).map_err(to_command_error)?;
-    let config = get_supabase_config_from_conn(&conn)
-        .map_err(to_command_error)?
-        .ok_or_else(|| "Supabase no está configurado.".to_string())?;
+    let Some(config) = get_supabase_config_from_conn(&conn).map_err(to_command_error)? else {
+        return Ok(0);
+    };
 
     if !config.is_connected || config.url.trim().is_empty() || config.anon_key.trim().is_empty() {
         return Ok(0);
@@ -7086,48 +8987,11 @@ fn run_auto_pull_once(pool: &DbPool) -> AppResult<usize> {
     let sucursal_ids = get_local_sucursal_ids(&conn).map_err(to_command_error)?;
     let mut total = 0;
 
-    for table in BACKUP_TABLES {
+    for table in PULL_TABLES {
         total += pull_delta_table(&mut conn, &client, &config, table, &sucursal_ids)?;
     }
 
     Ok(total)
-}
-
-fn upload_pending_table(
-    conn: &Connection,
-    client: &reqwest::blocking::Client,
-    config: &SupabaseConfig,
-    table: &str,
-    conflict_target: &str,
-    sql: &str,
-) -> AppResult<usize> {
-    let rows = query_json_rows(conn, sql).map_err(to_command_error)?;
-    if rows.is_empty() {
-        return Ok(0);
-    }
-
-    let endpoint = format!(
-        "{}/rest/v1/{}?on_conflict={}",
-        config.url.trim_end_matches('/'),
-        table,
-        conflict_target
-    );
-    let response = supabase_upsert_builder(client, &endpoint, &config.anon_key)
-        .json(&rows)
-        .send()
-        .map_err(|error| format!("No se pudo subir la tabla {table}: {error}"))?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().unwrap_or_default();
-        return Err(format!(
-            "Supabase rechazó la subida de {table}. Código HTTP: {status}. {body}"
-        ));
-    }
-
-    let synced_at = current_sqlite_timestamp(conn).map_err(to_command_error)?;
-    mark_table_synced(conn, table, &synced_at).map_err(to_command_error)?;
-    Ok(rows.len())
 }
 
 fn upload_pending_batch_table(
@@ -7164,8 +9028,10 @@ fn upload_pending_batch_table(
         ));
     }
 
-    let synced_at = current_sqlite_timestamp(conn).map_err(to_command_error)?;
-    mark_table_ids_synced(conn, table, &ids, &synced_at).map_err(to_command_error)?;
+    let remote_rows: Vec<JsonValue> = response
+        .json()
+        .map_err(|error| format!("Supabase confirmó {table}, pero no devolvió JSON válido: {error}"))?;
+    mark_uploaded_rows_synced(conn, table, &ids, &remote_rows).map_err(to_command_error)?;
     Ok(rows.len())
 }
 
@@ -7175,9 +9041,9 @@ fn run_auto_sync_once(pool: &DbPool) -> AppResult<usize> {
     evaluar_notificaciones_negocio(&conn).map_err(to_command_error)?;
     let pendientes_antes = count_sync_pending(&conn).map_err(to_command_error)?;
     let ventas_pendientes_antes = count_table_sync_pending(&conn, "ventas").map_err(to_command_error)?;
-    let config = get_supabase_config_from_conn(&conn)
-        .map_err(to_command_error)?
-        .ok_or_else(|| "Supabase no está configurado.".to_string())?;
+    let Some(config) = get_supabase_config_from_conn(&conn).map_err(to_command_error)? else {
+        return Ok(0);
+    };
 
     if !config.is_connected || config.url.trim().is_empty() || config.anon_key.trim().is_empty() {
         return Ok(0);
@@ -7187,374 +9053,7 @@ fn run_auto_sync_once(pool: &DbPool) -> AppResult<usize> {
         .timeout(Duration::from_secs(20))
         .build()
         .map_err(|error| format!("No se pudo preparar la conexión HTTP: {error}"))?;
-    let limit = AUTO_SYNC_BATCH_SIZE;
-    let plans = [
-        (
-            "sucursales",
-            "id",
-            format!(
-                "
-                SELECT id AS __local_id, id, nombre, direccion, telefono, codigo_postal,
-                       eliminado, 1 AS sincronizado, updated_at
-                FROM sucursales
-                WHERE sincronizado = 0
-                ORDER BY updated_at
-                LIMIT {limit}
-                "
-            ),
-        ),
-        (
-            "empresa_config_fiscal",
-            "id",
-            format!(
-                "
-                SELECT id AS __local_id, id, rfc, razon_social, regimen_fiscal, registro_patronal,
-                       actualizado_at, 1 AS sincronizado, updated_at
-                FROM empresa_config_fiscal
-                WHERE sincronizado = 0
-                ORDER BY updated_at
-                LIMIT {limit}
-                "
-            ),
-        ),
-        (
-            "proveedores",
-            "id",
-            format!(
-                "
-                SELECT id AS __local_id, id, nombre, contacto_nombre, telefono, email, direccion,
-                       eliminado, 1 AS sincronizado, updated_at
-                FROM proveedores
-                WHERE sincronizado = 0
-                ORDER BY updated_at
-                LIMIT {limit}
-                "
-            ),
-        ),
-        (
-            "marcas",
-            "id",
-            format!(
-                "
-                SELECT id AS __local_id, id, nombre, eliminado, 1 AS sincronizado, updated_at
-                FROM marcas
-                WHERE sincronizado = 0
-                ORDER BY updated_at
-                LIMIT {limit}
-                "
-            ),
-        ),
-        (
-            "categorias",
-            "id",
-            format!(
-                "
-                SELECT id AS __local_id, id, nombre, eliminado, 1 AS sincronizado, updated_at
-                FROM categorias
-                WHERE sincronizado = 0
-                ORDER BY updated_at
-                LIMIT {limit}
-                "
-            ),
-        ),
-        (
-            "unidades",
-            "id",
-            format!(
-                "
-                SELECT id AS __local_id, id, nombre, clave_sat, eliminado, 1 AS sincronizado, updated_at
-                FROM unidades
-                WHERE sincronizado = 0
-                ORDER BY updated_at
-                LIMIT {limit}
-                "
-            ),
-        ),
-        (
-            "usuarios",
-            "id",
-            format!(
-                "
-                SELECT id AS __local_id, id, email, nombre, role, sucursal_id, password_hash,
-                       eliminado, 1 AS sincronizado, updated_at
-                FROM usuarios
-                WHERE sincronizado = 0
-                ORDER BY updated_at
-                LIMIT {limit}
-                "
-            ),
-        ),
-        (
-            "productos",
-            "id",
-            format!(
-                "
-                SELECT id AS __local_id, id, codigo_barras, codigo_proveedor, proveedor_id, clave_producto, descripcion,
-                       marca, categoria, unidad, precio_costo, costo_promedio, precio_venta, sat_clave_prod_serv,
-                       sat_clave_unidad, eliminado, 1 AS sincronizado, updated_at
-                FROM productos
-                WHERE sincronizado = 0
-                ORDER BY updated_at
-                LIMIT {limit}
-                "
-            ),
-        ),
-        (
-            "inventario_sucursal",
-            "producto_id,sucursal_id",
-            format!(
-                "
-                SELECT producto_id || '|' || sucursal_id AS __local_id, producto_id, sucursal_id,
-                       stock, stock_minimo, costo_promedio, precio_venta, 1 AS sincronizado, updated_at
-                FROM inventario_sucursal
-                WHERE sincronizado = 0
-                ORDER BY updated_at
-                LIMIT {limit}
-                "
-            ),
-        ),
-        (
-            "promociones",
-            "id",
-            format!(
-                "
-                SELECT id AS __local_id, id, nombre, tipo_descuento, valor, fecha_inicio, fecha_fin,
-                       activo, producto_id, categoria_id, marca, eliminado, 1 AS sincronizado, updated_at
-                FROM promociones
-                WHERE sincronizado = 0
-                ORDER BY updated_at
-                LIMIT {limit}
-                "
-            ),
-        ),
-        (
-            "promocion_sucursales",
-            "promocion_id,sucursal_id",
-            format!(
-                "
-                SELECT promocion_id || '|' || sucursal_id AS __local_id, promocion_id, sucursal_id,
-                       eliminado, 1 AS sincronizado, updated_at
-                FROM promocion_sucursales
-                WHERE sincronizado = 0
-                ORDER BY updated_at
-                LIMIT {limit}
-                "
-            ),
-        ),
-        (
-            "clientes",
-            "id",
-            format!(
-                "
-                SELECT id AS __local_id, id, nombre, telefono, direccion, limite_credito, saldo_deudor,
-                       eliminado, 1 AS sincronizado, updated_at
-                FROM clientes
-                WHERE sincronizado = 0
-                ORDER BY updated_at
-                LIMIT {limit}
-                "
-            ),
-        ),
-        (
-            "clientes_datos_fiscales",
-            "cliente_id",
-            format!(
-                "
-                SELECT cliente_id AS __local_id, cliente_id, rfc, razon_social, regimen_fiscal,
-                       codigo_postal, 1 AS sincronizado, updated_at
-                FROM clientes_datos_fiscales
-                WHERE sincronizado = 0
-                ORDER BY updated_at
-                LIMIT {limit}
-                "
-            ),
-        ),
-        (
-            "compras",
-            "uuid",
-            format!(
-                "
-                SELECT id AS __local_id, sync_uuid AS uuid, id, proveedor_id, sucursal_id, fecha,
-                       total, 1 AS sincronizado, updated_at
-                FROM compras
-                WHERE sincronizado = 0
-                ORDER BY updated_at
-                LIMIT {limit}
-                "
-            ),
-        ),
-        (
-            "detalle_compras",
-            "uuid",
-            format!(
-                "
-                SELECT dc.id AS __local_id, dc.sync_uuid AS uuid, dc.id, dc.compra_id,
-                       c.sucursal_id, dc.producto_id, dc.cantidad, dc.precio_costo_pactado,
-                       dc.costo_promedio_resultante,
-                       1 AS sincronizado, dc.updated_at
-                FROM detalle_compras dc
-                INNER JOIN compras c ON c.id = dc.compra_id
-                WHERE dc.sincronizado = 0
-                ORDER BY dc.updated_at
-                LIMIT {limit}
-                "
-            ),
-        ),
-        (
-            "ventas",
-            "uuid",
-            format!(
-                "
-                SELECT id AS __local_id, sync_uuid AS uuid, id, usuario_id, sucursal_id, fecha, total,
-                       metodo_pago, cliente_id, usuario_autorizo_cancelacion_id, motivo_cancelacion,
-                       fecha_cancelacion, estado, 1 AS sincronizado, updated_at
-                FROM ventas
-                WHERE sincronizado = 0
-                ORDER BY updated_at
-                LIMIT {limit}
-                "
-            ),
-        ),
-        (
-            "detalle_ventas",
-            "uuid",
-            format!(
-                "
-                SELECT dv.id AS __local_id, dv.sync_uuid AS uuid, dv.id, dv.venta_id, v.sucursal_id,
-                       dv.producto_id, dv.cantidad, dv.precio_venta_pactado,
-                       dv.costo_unitario_pactado, 1 AS sincronizado, dv.updated_at
-                FROM detalle_ventas dv
-                INNER JOIN ventas v ON v.id = dv.venta_id
-                WHERE dv.sincronizado = 0
-                ORDER BY dv.updated_at
-                LIMIT {limit}
-                "
-            ),
-        ),
-        (
-            "creditos_abonos",
-            "uuid",
-            format!(
-                "
-                SELECT ca.id AS __local_id, ca.sync_uuid AS uuid, ca.id, ca.cliente_id, ca.monto,
-                       ca.fecha, ca.usuario_id, u.sucursal_id, 1 AS sincronizado, ca.updated_at
-                FROM creditos_abonos ca
-                INNER JOIN usuarios u ON u.id = ca.usuario_id
-                WHERE ca.sincronizado = 0
-                ORDER BY ca.updated_at
-                LIMIT {limit}
-                "
-            ),
-        ),
-        (
-            "cajas_sesiones",
-            "uuid",
-            format!(
-                "
-                SELECT id AS __local_id, sync_uuid AS uuid, id, usuario_id, sucursal_id,
-                       fecha_apertura, monto_inicial, fecha_cierre, monto_final_real,
-                       monto_esperado, estado, 1 AS sincronizado, updated_at
-                FROM cajas_sesiones
-                WHERE sincronizado = 0
-                ORDER BY updated_at
-                LIMIT {limit}
-                "
-            ),
-        ),
-        (
-            "caja_movimientos",
-            "uuid",
-            format!(
-                "
-                SELECT cm.id AS __local_id, cm.sync_uuid AS uuid, cm.id, cm.sesion_id, cs.sucursal_id,
-                       cm.tipo, cm.monto, cm.motivo, 1 AS sincronizado, cm.updated_at
-                FROM caja_movimientos cm
-                INNER JOIN cajas_sesiones cs ON cs.id = cm.sesion_id
-                WHERE cm.sincronizado = 0
-                ORDER BY cm.updated_at
-                LIMIT {limit}
-                "
-            ),
-        ),
-        (
-            "traspasos",
-            "uuid",
-            format!(
-                "
-                SELECT id AS __local_id, sync_uuid AS uuid, id, sucursal_origen_id,
-                       sucursal_destino_id, usuario_id, fecha, estado, usuario_recibio_id,
-                       fecha_recepcion, observaciones_recepcion, 1 AS sincronizado, updated_at
-                FROM traspasos
-                WHERE sincronizado = 0
-                ORDER BY updated_at
-                LIMIT {limit}
-                "
-            ),
-        ),
-        (
-            "detalle_traspasos",
-            "uuid",
-            format!(
-                "
-                SELECT dt.id AS __local_id, dt.sync_uuid AS uuid, dt.id, dt.traspaso_id,
-                       t.sucursal_origen_id, dt.producto_id, dt.cantidad, 1 AS sincronizado,
-                       dt.updated_at
-                FROM detalle_traspasos dt
-                INNER JOIN traspasos t ON t.id = dt.traspaso_id
-                WHERE dt.sincronizado = 0
-                ORDER BY dt.updated_at
-                LIMIT {limit}
-                "
-            ),
-        ),
-        (
-            "mermas_ajustes",
-            "uuid",
-            format!(
-                "
-                SELECT id AS __local_id, sync_uuid AS uuid, id, producto_id, sucursal_id,
-                       usuario_id, cantidad, tipo_movimiento, motivo, fecha, 1 AS sincronizado,
-                       updated_at
-                FROM mermas_ajustes
-                WHERE sincronizado = 0
-                ORDER BY updated_at
-                LIMIT {limit}
-                "
-            ),
-        ),
-        (
-            "facturas_emitidas",
-            "uuid",
-            format!(
-                "
-                SELECT fe.id AS __local_id, fe.sync_uuid AS uuid, fe.id, fe.venta_id, v.sucursal_id,
-                       fe.uuid AS uuid_sat, fe.rfc_receptor, fe.monto_total, fe.estado, fe.fecha_emision,
-                       fe.pdf_path, fe.xml_path, 1 AS sincronizado, fe.updated_at
-                FROM facturas_emitidas fe
-                INNER JOIN ventas v ON v.id = fe.venta_id
-                WHERE fe.sincronizado = 0
-                ORDER BY fe.updated_at
-                LIMIT {limit}
-                "
-            ),
-        ),
-        (
-            "movimientos_inventario",
-            "uuid",
-            format!(
-                "
-                SELECT uuid AS __local_id, uuid, producto_id, sucursal_id, tipo, referencia_tipo,
-                       referencia_id, cantidad, costo_unitario, usuario_id, fecha, 1 AS sincronizado,
-                       updated_at
-                FROM movimientos_inventario
-                WHERE sincronizado = 0
-                ORDER BY updated_at
-                LIMIT {limit}
-                "
-            ),
-        ),
-    ];
-
+    let plans = sync_upload_plans(Some(AUTO_SYNC_BATCH_SIZE), true);
     let mut total = 0;
     for (table, conflict_target, sql) in plans {
         total += upload_pending_batch_table(&conn, &client, &config, table, conflict_target, &sql)?;
@@ -7585,12 +9084,29 @@ fn run_auto_sync_once(pool: &DbPool) -> AppResult<usize> {
 fn start_sync_worker(pool: DbPool) {
     tauri::async_runtime::spawn(async move {
         loop {
-            tokio::time::sleep(Duration::from_secs(30)).await;
             let pool = pool.clone();
             let result = tauri::async_runtime::spawn_blocking(move || {
-                let uploaded = run_auto_sync_once(&pool)?;
-                let downloaded = run_auto_pull_once(&pool)?;
-                Ok::<(usize, usize), String>((uploaded, downloaded))
+                let mut errors = Vec::new();
+                let uploaded = match run_auto_sync_once(&pool) {
+                    Ok(total) => total,
+                    Err(error) => {
+                        errors.push(format!("subida: {error}"));
+                        0
+                    }
+                };
+                let downloaded = match run_auto_pull_once(&pool) {
+                    Ok(total) => total,
+                    Err(error) => {
+                        errors.push(format!("bajada: {error}"));
+                        0
+                    }
+                };
+
+                if errors.is_empty() {
+                    Ok::<(usize, usize), String>((uploaded, downloaded))
+                } else {
+                    Err(errors.join(" | "))
+                }
             })
             .await;
             match result {
@@ -7607,6 +9123,7 @@ fn start_sync_worker(pool: DbPool) {
                     eprintln!("[sync-worker] tarea de sincronización falló: {error}");
                 }
             }
+            tokio::time::sleep(Duration::from_secs(30)).await;
         }
     });
 }
@@ -7661,7 +9178,7 @@ fn supabase_upsert_builder(
 ) -> reqwest::blocking::RequestBuilder {
     supabase_auth_builder(client.post(endpoint), key)
         .header("Content-Type", "application/json")
-        .header("Prefer", "resolution=merge-duplicates,return=minimal")
+        .header("Prefer", "resolution=merge-duplicates,return=representation")
 }
 
 fn get_supabase_config_from_conn(conn: &Connection) -> Result<Option<SupabaseConfig>, AppError> {
@@ -7685,6 +9202,23 @@ fn get_supabase_config_from_conn(conn: &Connection) -> Result<Option<SupabaseCon
     .map_err(AppError::from)
 }
 
+fn ensure_no_open_cash_sessions(conn: &Connection) -> AppResult<()> {
+    let open_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM cajas_sesiones WHERE estado = 'ABIERTA'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(AppError::from)
+        .map_err(to_command_error)?;
+
+    if open_count > 0 {
+        return Err("No se puede restaurar o sobrescribir datos mientras existan cajas abiertas. Cierra los turnos primero.".to_string());
+    }
+
+    Ok(())
+}
+
 #[tauri::command]
 fn get_supabase_config(state_db: tauri::State<DbState>) -> AppResult<SupabaseConfig> {
     let conn = get_conn(&state_db).map_err(to_command_error)?;
@@ -7701,9 +9235,13 @@ fn get_supabase_config(state_db: tauri::State<DbState>) -> AppResult<SupabaseCon
 #[tauri::command]
 fn test_and_save_supabase_connect(
     state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
     url: String,
     anon_key: String,
 ) -> AppResult<SupabaseConfig> {
+    let conn = get_conn(&state_db).map_err(to_command_error)?;
+    require_superadmin_or_initial_setup(&conn, &state_sesion)?;
+
     let (url, anon_key) = assert_supabase_config_values(&url, &anon_key).map_err(to_command_error)?;
     let health_url = format!("{url}/rest/v1/sucursales?select=id&limit=1");
     let client = reqwest::blocking::Client::builder()
@@ -7723,7 +9261,6 @@ fn test_and_save_supabase_connect(
         ));
     }
 
-    let conn = get_conn(&state_db).map_err(to_command_error)?;
     conn.execute(
         "
         INSERT INTO supabase_config (id, url, anon_key, is_connected)
@@ -7744,7 +9281,11 @@ fn test_and_save_supabase_connect(
 }
 
 #[tauri::command]
-fn disconnect_supabase(state_db: tauri::State<DbState>) -> AppResult<()> {
+fn disconnect_supabase(
+    state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
+) -> AppResult<()> {
+    require_superadmin(&state_sesion)?;
     let conn = get_conn(&state_db).map_err(to_command_error)?;
     conn.execute(
         "
@@ -7763,7 +9304,11 @@ fn disconnect_supabase(state_db: tauri::State<DbState>) -> AppResult<()> {
 }
 
 #[tauri::command]
-fn crear_respaldo_local(state_db: tauri::State<DbState>) -> AppResult<String> {
+fn crear_respaldo_local(
+    state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
+) -> AppResult<String> {
+    require_superadmin(&state_sesion)?;
     let conn = get_conn(&state_db).map_err(to_command_error)?;
     let backup = build_backup(&conn).map_err(to_command_error)?;
     let file_name = format!("ferre_pos_backup_{}.json", backup.generado_at);
@@ -7776,7 +9321,12 @@ fn crear_respaldo_local(state_db: tauri::State<DbState>) -> AppResult<String> {
 }
 
 #[tauri::command]
-fn aplicar_respaldo_local(state_db: tauri::State<DbState>, backup_json: String) -> AppResult<()> {
+fn aplicar_respaldo_local(
+    state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
+    backup_json: String,
+) -> AppResult<()> {
+    require_superadmin(&state_sesion)?;
     if backup_json.trim().is_empty() {
         return Err("El archivo de respaldo está vacío.".to_string());
     }
@@ -7784,11 +9334,16 @@ fn aplicar_respaldo_local(state_db: tauri::State<DbState>, backup_json: String) 
     let backup: BackupLocal = serde_json::from_str(&backup_json)
         .map_err(|error| format!("El archivo de respaldo no es válido: {error}"))?;
     let mut conn = get_conn(&state_db).map_err(to_command_error)?;
+    ensure_no_open_cash_sessions(&conn)?;
     apply_backup_to_conn(&mut conn, backup).map_err(to_command_error)
 }
 
 #[tauri::command]
-fn sincronizar_hacia_nube(state_db: tauri::State<DbState>) -> AppResult<SyncUploadResult> {
+fn sincronizar_hacia_nube(
+    state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
+) -> AppResult<SyncUploadResult> {
+    require_superadmin(&state_sesion)?;
     let conn = get_conn(&state_db).map_err(to_command_error)?;
     ensure_sync_uuids(&conn).map_err(to_command_error)?;
     let config = get_supabase_config_from_conn(&conn)
@@ -7804,266 +9359,13 @@ fn sincronizar_hacia_nube(state_db: tauri::State<DbState>) -> AppResult<SyncUplo
         .build()
         .map_err(|error| format!("No se pudo preparar la conexión HTTP: {error}"))?;
 
-    let upload_plan = [
-        (
-            "sucursales",
-            "id",
-            "
-            SELECT id, nombre, direccion, telefono, codigo_postal, eliminado, 1 AS sincronizado, updated_at
-            FROM sucursales
-            WHERE sincronizado = 0
-            ",
-        ),
-        (
-            "empresa_config_fiscal",
-            "id",
-            "
-            SELECT id, rfc, razon_social, regimen_fiscal, registro_patronal, actualizado_at,
-                   1 AS sincronizado, updated_at
-            FROM empresa_config_fiscal
-            WHERE sincronizado = 0
-            ",
-        ),
-        (
-            "proveedores",
-            "id",
-            "
-            SELECT id, nombre, contacto_nombre, telefono, email, direccion, eliminado, 1 AS sincronizado, updated_at
-            FROM proveedores
-            WHERE sincronizado = 0
-            ",
-        ),
-        (
-            "marcas",
-            "id",
-            "
-            SELECT id, nombre, eliminado, 1 AS sincronizado, updated_at
-            FROM marcas
-            WHERE sincronizado = 0
-            ",
-        ),
-        (
-            "categorias",
-            "id",
-            "
-            SELECT id, nombre, eliminado, 1 AS sincronizado, updated_at
-            FROM categorias
-            WHERE sincronizado = 0
-            ",
-        ),
-        (
-            "unidades",
-            "id",
-            "
-            SELECT id, nombre, clave_sat, eliminado, 1 AS sincronizado, updated_at
-            FROM unidades
-            WHERE sincronizado = 0
-            ",
-        ),
-        (
-            "usuarios",
-            "id",
-            "
-            SELECT id, email, nombre, role, sucursal_id, password_hash, eliminado, 1 AS sincronizado, updated_at
-            FROM usuarios
-            WHERE sincronizado = 0
-            ",
-        ),
-        (
-            "productos",
-            "id",
-            "
-            SELECT id, codigo_barras, codigo_proveedor, proveedor_id, clave_producto, descripcion,
-                   marca, categoria, unidad, precio_costo, costo_promedio, precio_venta, sat_clave_prod_serv,
-                   sat_clave_unidad, eliminado, 1 AS sincronizado, updated_at
-            FROM productos
-            WHERE sincronizado = 0
-            ",
-        ),
-        (
-            "inventario_sucursal",
-            "producto_id,sucursal_id",
-            "
-            SELECT producto_id, sucursal_id, stock, stock_minimo, costo_promedio, precio_venta, 1 AS sincronizado, updated_at
-            FROM inventario_sucursal
-            WHERE sincronizado = 0
-            ",
-        ),
-        (
-            "promociones",
-            "id",
-            "
-            SELECT id, nombre, tipo_descuento, valor, fecha_inicio, fecha_fin, activo,
-                   producto_id, categoria_id, marca, eliminado, 1 AS sincronizado, updated_at
-            FROM promociones
-            WHERE sincronizado = 0
-            ",
-        ),
-        (
-            "promocion_sucursales",
-            "promocion_id,sucursal_id",
-            "
-            SELECT promocion_id, sucursal_id, eliminado, 1 AS sincronizado, updated_at
-            FROM promocion_sucursales
-            WHERE sincronizado = 0
-            ",
-        ),
-        (
-            "clientes",
-            "id",
-            "
-            SELECT id, nombre, telefono, direccion, limite_credito, saldo_deudor, eliminado, 1 AS sincronizado, updated_at
-            FROM clientes
-            WHERE sincronizado = 0
-            ",
-        ),
-        (
-            "clientes_datos_fiscales",
-            "cliente_id",
-            "
-            SELECT cliente_id, rfc, razon_social, regimen_fiscal, codigo_postal, 1 AS sincronizado, updated_at
-            FROM clientes_datos_fiscales
-            WHERE sincronizado = 0
-            ",
-        ),
-        (
-            "compras",
-            "uuid",
-            "
-            SELECT sync_uuid AS uuid, id, proveedor_id, sucursal_id, fecha, total, 1 AS sincronizado, updated_at
-            FROM compras
-            WHERE sincronizado = 0
-            ",
-        ),
-        (
-            "detalle_compras",
-            "uuid",
-            "
-            SELECT dc.sync_uuid AS uuid, dc.id, dc.compra_id, c.sucursal_id, dc.producto_id,
-                   dc.cantidad, dc.precio_costo_pactado, dc.costo_promedio_resultante,
-                   1 AS sincronizado, dc.updated_at
-            FROM detalle_compras dc
-            INNER JOIN compras c ON c.id = dc.compra_id
-            WHERE dc.sincronizado = 0
-            ",
-        ),
-        (
-            "ventas",
-            "uuid",
-            "
-            SELECT sync_uuid AS uuid, id, usuario_id, sucursal_id, fecha, total, metodo_pago, cliente_id,
-                   usuario_autorizo_cancelacion_id, motivo_cancelacion, fecha_cancelacion, estado,
-                   1 AS sincronizado, updated_at
-            FROM ventas
-            WHERE sincronizado = 0
-            ",
-        ),
-        (
-            "detalle_ventas",
-            "uuid",
-            "
-            SELECT dv.sync_uuid AS uuid, dv.id, dv.venta_id, v.sucursal_id, dv.producto_id,
-                   dv.cantidad, dv.precio_venta_pactado, dv.costo_unitario_pactado,
-                   1 AS sincronizado, dv.updated_at
-            FROM detalle_ventas dv
-            INNER JOIN ventas v ON v.id = dv.venta_id
-            WHERE dv.sincronizado = 0
-            ",
-        ),
-        (
-            "creditos_abonos",
-            "uuid",
-            "
-            SELECT ca.sync_uuid AS uuid, ca.id, ca.cliente_id, ca.monto, ca.fecha, ca.usuario_id,
-                   u.sucursal_id, 1 AS sincronizado, ca.updated_at
-            FROM creditos_abonos ca
-            INNER JOIN usuarios u ON u.id = ca.usuario_id
-            WHERE ca.sincronizado = 0
-            ",
-        ),
-        (
-            "cajas_sesiones",
-            "uuid",
-            "
-            SELECT sync_uuid AS uuid, id, usuario_id, sucursal_id, fecha_apertura, monto_inicial,
-                   fecha_cierre, monto_final_real, monto_esperado, estado, 1 AS sincronizado, updated_at
-            FROM cajas_sesiones
-            WHERE sincronizado = 0
-            ",
-        ),
-        (
-            "caja_movimientos",
-            "uuid",
-            "
-            SELECT cm.sync_uuid AS uuid, cm.id, cm.sesion_id, cs.sucursal_id, cm.tipo, cm.monto,
-                   cm.motivo, 1 AS sincronizado, cm.updated_at
-            FROM caja_movimientos cm
-            INNER JOIN cajas_sesiones cs ON cs.id = cm.sesion_id
-            WHERE cm.sincronizado = 0
-            ",
-        ),
-        (
-            "traspasos",
-            "uuid",
-            "
-            SELECT sync_uuid AS uuid, id, sucursal_origen_id, sucursal_destino_id, usuario_id,
-                   fecha, estado, usuario_recibio_id, fecha_recepcion, observaciones_recepcion,
-                   1 AS sincronizado, updated_at
-            FROM traspasos
-            WHERE sincronizado = 0
-            ",
-        ),
-        (
-            "detalle_traspasos",
-            "uuid",
-            "
-            SELECT dt.sync_uuid AS uuid, dt.id, dt.traspaso_id, t.sucursal_origen_id, dt.producto_id,
-                   dt.cantidad, 1 AS sincronizado, dt.updated_at
-            FROM detalle_traspasos dt
-            INNER JOIN traspasos t ON t.id = dt.traspaso_id
-            WHERE dt.sincronizado = 0
-            ",
-        ),
-        (
-            "mermas_ajustes",
-            "uuid",
-            "
-            SELECT sync_uuid AS uuid, id, producto_id, sucursal_id, usuario_id, cantidad,
-                   tipo_movimiento, motivo, fecha, 1 AS sincronizado, updated_at
-            FROM mermas_ajustes
-            WHERE sincronizado = 0
-            ",
-        ),
-        (
-            "facturas_emitidas",
-            "uuid",
-            "
-            SELECT fe.sync_uuid AS uuid, fe.id, fe.venta_id, v.sucursal_id, fe.uuid AS uuid_sat,
-                   fe.rfc_receptor, fe.monto_total, fe.estado, fe.fecha_emision, fe.pdf_path,
-                   fe.xml_path, 1 AS sincronizado, fe.updated_at
-            FROM facturas_emitidas fe
-            INNER JOIN ventas v ON v.id = fe.venta_id
-            WHERE fe.sincronizado = 0
-            ",
-        ),
-        (
-            "movimientos_inventario",
-            "uuid",
-            "
-            SELECT uuid, producto_id, sucursal_id, tipo, referencia_tipo,
-                   referencia_id, cantidad, costo_unitario, usuario_id, fecha,
-                   1 AS sincronizado, updated_at
-            FROM movimientos_inventario
-            WHERE sincronizado = 0
-            ",
-        ),
-    ];
+    let upload_plan = sync_upload_plans(None, true);
 
     let mut por_tabla = HashMap::new();
     let mut total_registros = 0;
 
     for (table, conflict_target, sql) in upload_plan {
-        let uploaded = upload_pending_table(&conn, &client, &config, table, conflict_target, sql)?;
+        let uploaded = upload_pending_batch_table(&conn, &client, &config, table, conflict_target, &sql)?;
         if uploaded > 0 {
             por_tabla.insert(table.to_string(), uploaded);
             total_registros += uploaded;
@@ -8077,8 +9379,52 @@ fn sincronizar_hacia_nube(state_db: tauri::State<DbState>) -> AppResult<SyncUplo
 }
 
 #[tauri::command]
-fn sincronizar_desde_nube(state_db: tauri::State<DbState>) -> AppResult<()> {
+fn subir_base_local_completa_a_nube(
+    state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
+) -> AppResult<SyncUploadResult> {
+    require_superadmin(&state_sesion)?;
+    let conn = get_conn(&state_db).map_err(to_command_error)?;
+    ensure_sync_uuids(&conn).map_err(to_command_error)?;
+    let config = get_supabase_config_from_conn(&conn)
+        .map_err(to_command_error)?
+        .ok_or_else(|| "Configura Supabase antes de subir la base local completa.".to_string())?;
+
+    if !config.is_connected || config.url.trim().is_empty() || config.anon_key.trim().is_empty() {
+        return Err("Supabase no está conectado.".to_string());
+    }
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(120))
+        .build()
+        .map_err(|error| format!("No se pudo preparar la conexión HTTP: {error}"))?;
+
+    let upload_plan = sync_upload_plans(None, false);
+    let mut por_tabla = HashMap::new();
+    let mut total_registros = 0;
+
+    for (table, conflict_target, sql) in upload_plan {
+        let uploaded = upload_pending_batch_table(&conn, &client, &config, table, conflict_target, &sql)?;
+        if uploaded > 0 {
+            por_tabla.insert(table.to_string(), uploaded);
+            total_registros += uploaded;
+        }
+    }
+
+    Ok(SyncUploadResult {
+        total_registros,
+        por_tabla,
+    })
+}
+
+#[tauri::command]
+fn sincronizar_desde_nube(
+    state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
+) -> AppResult<()> {
     let mut conn = get_conn(&state_db).map_err(to_command_error)?;
+    require_superadmin_or_initial_setup(&conn, &state_sesion)?;
+    ensure_no_open_cash_sessions(&conn)?;
     let config = get_supabase_config_from_conn(&conn)
         .map_err(to_command_error)?
         .ok_or_else(|| "Configura Supabase antes de sincronizar desde la nube.".to_string())?;
@@ -8094,21 +9440,7 @@ fn sincronizar_desde_nube(state_db: tauri::State<DbState>) -> AppResult<()> {
     let mut tablas = HashMap::new();
 
     for table in BACKUP_TABLES {
-        let endpoint = format!("{}/rest/v1/{}?select=*", config.url.trim_end_matches('/'), table);
-        let response = supabase_request_builder(&client, &endpoint, &config.anon_key)
-            .send()
-            .map_err(|error| format!("No se pudo descargar la tabla {table}: {error}"))?;
-
-        if !response.status().is_success() {
-            return Err(format!(
-                "Supabase rechazó la descarga de {table}. Código HTTP: {}.",
-                response.status()
-            ));
-        }
-
-        let rows: Vec<JsonValue> = response
-            .json()
-            .map_err(|error| format!("La respuesta de Supabase para {table} no es JSON válido: {error}"))?;
+        let rows = download_full_table_rows(&client, &config, table)?;
         tablas.insert((*table).to_string(), rows);
     }
 
@@ -8123,6 +9455,7 @@ fn sincronizar_desde_nube(state_db: tauri::State<DbState>) -> AppResult<()> {
 #[tauri::command]
 fn cancelar_venta(
     state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
     venta_id: String,
     usuario_autorizo_id: String,
     usuario_autorizo_clave: String,
@@ -8140,6 +9473,7 @@ fn cancelar_venta(
         return Err("La cancelación requiere usuario autorizador, contraseña/PIN, motivo y fecha.".to_string());
     }
 
+    let actor = current_session_user(&state_sesion)?;
     let mut conn = get_conn(&state_db).map_err(to_command_error)?;
     let tx = conn.transaction().map_err(AppError::from).map_err(to_command_error)?;
 
@@ -8161,6 +9495,20 @@ fn cancelar_venta(
 
     if estado == "CANCELADA" {
         return Err("La venta ya fue cancelada previamente.".to_string());
+    }
+    ensure_can_read_sucursal(&actor, &sucursal_id)?;
+
+    let factura_estado: Option<String> = tx
+        .query_row(
+            "SELECT estado FROM facturas_emitidas WHERE venta_id = ?1 ORDER BY fecha_emision DESC LIMIT 1",
+            [&venta_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(AppError::from)
+        .map_err(to_command_error)?;
+    if matches!(factura_estado.as_deref(), Some("TIMBRADA")) {
+        return Err("No puedes cancelar una venta con factura TIMBRADA. Primero cancela el CFDI ante el SAT/PAC.".to_string());
     }
 
     let (usuario_autorizo_role, usuario_autorizo_sucursal_id, usuario_autorizo_password): (String, String, String) = tx
@@ -8194,26 +9542,31 @@ fn cancelar_venta(
             "
             SELECT id
             FROM cajas_sesiones
-            WHERE sucursal_id = ?1 AND estado = 'ABIERTA'
+            WHERE sucursal_id = ?1
+              AND usuario_id = ?2
+              AND estado = 'ABIERTA'
             ORDER BY fecha_apertura DESC
             LIMIT 1
             ",
-            [&sucursal_id],
+            params![&sucursal_id, &actor.id],
             |row| row.get(0),
         )
         .optional()
         .map_err(AppError::from)
         .map_err(to_command_error)?
-        .ok_or_else(|| "No se puede cancelar una venta sin caja ABIERTA en la sucursal.".to_string())?;
+        .ok_or_else(|| "No se puede cancelar una venta sin caja ABIERTA para el usuario en sesión.".to_string())?;
 
-    tx.execute(
+    let affected_venta = tx.execute(
         "
         UPDATE ventas
         SET estado = 'CANCELADA',
             usuario_autorizo_cancelacion_id = ?2,
             motivo_cancelacion = ?3,
-            fecha_cancelacion = ?4
+            fecha_cancelacion = ?4,
+            sincronizado = 0,
+            updated_at = datetime('now')
         WHERE id = ?1
+          AND estado = 'COMPLETADA'
         ",
         params![
             venta_id,
@@ -8224,6 +9577,23 @@ fn cancelar_venta(
     )
         .map_err(|error| map_write_error(error, "venta"))
         .map_err(to_command_error)?;
+    if affected_venta != 1 {
+        return Err("La venta cambió de estado antes de cancelar. Actualiza e intenta de nuevo.".to_string());
+    }
+
+    tx.execute(
+        "
+        UPDATE facturas_emitidas
+        SET estado = 'CANCELADA',
+            sincronizado = 0,
+            updated_at = datetime('now')
+        WHERE venta_id = ?1
+          AND estado = 'PENDIENTE'
+        ",
+        [&venta_id],
+    )
+    .map_err(|error| map_write_error(error, "factura"))
+    .map_err(to_command_error)?;
 
     let mut stmt = tx
         .prepare("SELECT producto_id, cantidad, costo_unitario_pactado FROM detalle_ventas WHERE venta_id = ?1")
@@ -8249,10 +9619,15 @@ fn cancelar_venta(
     for (producto_id, cantidad, costo_unitario) in items {
         tx.execute(
             "
-            INSERT INTO inventario_sucursal (producto_id, sucursal_id, stock, stock_minimo, costo_promedio)
-            VALUES (?1, ?2, ?3, 0, ?4)
+            INSERT INTO inventario_sucursal (
+                producto_id, sucursal_id, stock, stock_minimo, costo_promedio,
+                sincronizado, updated_at
+            )
+            VALUES (?1, ?2, ?3, 0, ?4, 0, datetime('now'))
             ON CONFLICT(producto_id, sucursal_id) DO UPDATE SET
-              stock = inventario_sucursal.stock + excluded.stock
+              stock = inventario_sucursal.stock + excluded.stock,
+              sincronizado = 0,
+              updated_at = datetime('now')
             ",
             params![producto_id, sucursal_id, cantidad, costo_unitario],
         )
@@ -8282,7 +9657,9 @@ fn cancelar_venta(
                 SET saldo_deudor = CASE
                     WHEN saldo_deudor - ?1 < 0 THEN 0
                     ELSE saldo_deudor - ?1
-                END
+                END,
+                sincronizado = 0,
+                updated_at = datetime('now')
                 WHERE id = ?2
                 ",
                 params![total, cid],
@@ -8316,6 +9693,7 @@ fn cancelar_venta(
 #[tauri::command]
 fn registrar_traspaso(
     state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
     traspaso: RegistrarTraspasoInput,
 ) -> AppResult<()> {
     let traspaso = RegistrarTraspasoInput {
@@ -8323,6 +9701,14 @@ fn registrar_traspaso(
         ..traspaso
     };
     validate_registrar_traspaso_input(&traspaso).map_err(to_command_error)?;
+
+    let actor = require_admin_or_superadmin(&state_sesion)?;
+    if actor.id != traspaso.usuario_id {
+        return Err("No puedes registrar traspasos a nombre de otro usuario.".to_string());
+    }
+    if !is_superadmin(&actor) && actor.sucursal_id != traspaso.sucursal_origen_id {
+        return Err("Operación inválida: solo puedes traspasar mercancía desde tu sucursal.".to_string());
+    }
 
     let mut conn = get_conn(&state_db).map_err(to_command_error)?;
     let tx = conn.transaction().map_err(AppError::from).map_err(to_command_error)?;
@@ -8360,13 +9746,19 @@ fn registrar_traspaso(
     }
 
     tx.execute(
-        "INSERT INTO traspasos (id, sucursal_origen_id, sucursal_destino_id, usuario_id, fecha, estado) VALUES (?1, ?2, ?3, ?4, ?5, 'EN_TRANSITO')",
+        "
+        INSERT INTO traspasos (
+            id, sucursal_origen_id, sucursal_destino_id, usuario_id, fecha, estado,
+            sync_uuid, sincronizado, updated_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, 'EN_TRANSITO', ?6, 0, datetime('now'))
+        ",
         params![
             traspaso.id,
             traspaso.sucursal_origen_id,
             traspaso.sucursal_destino_id,
             traspaso.usuario_id,
-            traspaso.fecha
+            traspaso.fecha,
+            generate_uuid_like()
         ],
     )
     .map_err(|error| map_write_error(error, "traspaso"))
@@ -8378,8 +9770,19 @@ fn registrar_traspaso(
                 .map_err(to_command_error)?;
 
         tx.execute(
-            "INSERT INTO detalle_traspasos (id, traspaso_id, producto_id, cantidad) VALUES (?1, ?2, ?3, ?4)",
-            params![detalle.id, traspaso.id, detalle.producto_id, detalle.cantidad],
+            "
+            INSERT INTO detalle_traspasos (
+                id, traspaso_id, producto_id, cantidad,
+                sync_uuid, sincronizado, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, 0, datetime('now'))
+            ",
+            params![
+                detalle.id,
+                traspaso.id,
+                detalle.producto_id,
+                detalle.cantidad,
+                generate_uuid_like()
+            ],
         )
         .map_err(|error| map_write_error(error, "detalle de traspaso"))
         .map_err(to_command_error)?;
@@ -8388,7 +9791,9 @@ fn registrar_traspaso(
             .execute(
             "
             UPDATE inventario_sucursal
-            SET stock = stock - ?1
+            SET stock = stock - ?1,
+                sincronizado = 0,
+                updated_at = datetime('now')
             WHERE producto_id = ?2 AND sucursal_id = ?3 AND stock >= ?1
             ",
             params![detalle.cantidad, detalle.producto_id, traspaso.sucursal_origen_id],
@@ -8512,8 +9917,11 @@ fn recibir_traspaso(
     for (producto_id, cantidad, costo_unitario) in detalles {
         tx.execute(
             "
-            INSERT INTO inventario_sucursal (producto_id, sucursal_id, stock, stock_minimo, costo_promedio)
-            VALUES (?1, ?2, ?3, 0, ?4)
+            INSERT INTO inventario_sucursal (
+                producto_id, sucursal_id, stock, stock_minimo, costo_promedio,
+                sincronizado, updated_at
+            )
+            VALUES (?1, ?2, ?3, 0, ?4, 0, datetime('now'))
             ON CONFLICT(producto_id, sucursal_id) DO UPDATE SET
               stock = inventario_sucursal.stock + excluded.stock,
               costo_promedio = CASE
@@ -8521,7 +9929,9 @@ fn recibir_traspaso(
                       ((inventario_sucursal.stock * inventario_sucursal.costo_promedio) + (excluded.stock * excluded.costo_promedio))
                       / (inventario_sucursal.stock + excluded.stock)
                   ELSE excluded.costo_promedio
-              END
+              END,
+              sincronizado = 0,
+              updated_at = datetime('now')
             ",
             params![producto_id, sucursal_destino_id, cantidad, costo_unitario],
         )
@@ -8543,13 +9953,15 @@ fn recibir_traspaso(
         .map_err(to_command_error)?;
     }
 
-    tx.execute(
+    let affected = tx.execute(
         "
         UPDATE traspasos
         SET estado = 'RECIBIDO',
             usuario_recibio_id = ?2,
             fecha_recepcion = ?3,
-            observaciones_recepcion = ?4
+            observaciones_recepcion = ?4,
+            sincronizado = 0,
+            updated_at = datetime('now')
         WHERE id = ?1 AND estado = 'EN_TRANSITO'
         ",
         params![
@@ -8561,6 +9973,9 @@ fn recibir_traspaso(
     )
     .map_err(|error| map_write_error(error, "traspaso"))
     .map_err(to_command_error)?;
+    if affected != 1 {
+        return Err("El traspaso cambió de estado antes de confirmar la recepción. Actualiza e intenta de nuevo.".to_string());
+    }
 
     tx.commit().map_err(AppError::from).map_err(to_command_error)?;
     Ok(())
@@ -8640,8 +10055,15 @@ fn get_historial_traspasos(
 #[tauri::command]
 fn registrar_merma_ajuste(
     state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
     movimiento: RegistrarMermaAjusteInput,
 ) -> AppResult<()> {
+    let actor = require_admin_or_superadmin(&state_sesion)?;
+    if actor.id != movimiento.usuario_id {
+        return Err("No puedes registrar ajustes a nombre de otro usuario.".to_string());
+    }
+    ensure_can_read_sucursal(&actor, &movimiento.sucursal_id)?;
+
     validate_registrar_merma_ajuste_input(&movimiento).map_err(to_command_error)?;
 
     let mut conn = get_conn(&state_db).map_err(to_command_error)?;
@@ -8687,9 +10109,14 @@ fn registrar_merma_ajuste(
         inventario_costo_promedio(&tx, &movimiento.producto_id, &movimiento.sucursal_id)
             .map_err(to_command_error)?;
 
-    let tipo_kardex = match movimiento.tipo_movimiento.as_str() {
+    let tipo_movimiento = match movimiento.tipo_movimiento.as_str() {
+        "AJUSTE" => "AJUSTE_SALIDA",
+        value => value,
+    };
+
+    let tipo_kardex = match tipo_movimiento {
         "AJUSTE_ENTRADA" => "AJUSTE_ENTRADA",
-        "AJUSTE_SALIDA" | "AJUSTE" => "AJUSTE_SALIDA",
+        "AJUSTE_SALIDA" => "AJUSTE_SALIDA",
         _ => "MERMA",
     };
     let cantidad_kardex = if tipo_kardex == "AJUSTE_ENTRADA" {
@@ -8701,10 +10128,15 @@ fn registrar_merma_ajuste(
     if tipo_kardex == "AJUSTE_ENTRADA" {
         tx.execute(
             "
-            INSERT INTO inventario_sucursal (producto_id, sucursal_id, stock, stock_minimo, costo_promedio)
-            VALUES (?1, ?2, ?3, 0, ?4)
+            INSERT INTO inventario_sucursal (
+                producto_id, sucursal_id, stock, stock_minimo, costo_promedio,
+                sincronizado, updated_at
+            )
+            VALUES (?1, ?2, ?3, 0, ?4, 0, datetime('now'))
             ON CONFLICT(producto_id, sucursal_id) DO UPDATE SET
-              stock = inventario_sucursal.stock + excluded.stock
+              stock = inventario_sucursal.stock + excluded.stock,
+              sincronizado = 0,
+              updated_at = datetime('now')
             ",
             params![movimiento.producto_id, movimiento.sucursal_id, movimiento.cantidad, costo_unitario],
         )
@@ -8715,7 +10147,9 @@ fn registrar_merma_ajuste(
             .execute(
                 "
                 UPDATE inventario_sucursal
-                SET stock = stock - ?1
+                SET stock = stock - ?1,
+                    sincronizado = 0,
+                    updated_at = datetime('now')
                 WHERE producto_id = ?2 AND sucursal_id = ?3 AND stock >= ?1
                 ",
                 params![movimiento.cantidad, movimiento.producto_id, movimiento.sucursal_id],
@@ -8732,8 +10166,11 @@ fn registrar_merma_ajuste(
 
     tx.execute(
         "
-        INSERT INTO mermas_ajustes (id, producto_id, sucursal_id, usuario_id, cantidad, tipo_movimiento, motivo, fecha)
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+        INSERT INTO mermas_ajustes (
+            id, producto_id, sucursal_id, usuario_id, cantidad, tipo_movimiento, motivo, fecha,
+            sync_uuid, sincronizado, updated_at
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, datetime('now'))
         ",
         params![
             movimiento.id,
@@ -8741,9 +10178,10 @@ fn registrar_merma_ajuste(
             movimiento.sucursal_id,
             movimiento.usuario_id,
             movimiento.cantidad,
-            movimiento.tipo_movimiento,
-            movimiento.motivo,
-            movimiento.fecha
+            tipo_movimiento,
+            movimiento.motivo.trim(),
+            movimiento.fecha,
+            generate_uuid_like()
         ],
     )
     .map_err(|error| map_write_error(error, "merma/ajuste"))
@@ -8846,6 +10284,7 @@ fn get_historial_mermas(
 #[tauri::command]
 fn registrar_venta(
     state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
     venta: RegistrarVentaInput,
 ) -> AppResult<()> {
     let venta = RegistrarVentaInput {
@@ -8853,6 +10292,11 @@ fn registrar_venta(
         ..venta
     };
     validate_registrar_venta_input(&venta).map_err(to_command_error)?;
+
+    let actor = current_session_user(&state_sesion)?;
+    if actor.id != venta.usuario_id || actor.sucursal_id != venta.sucursal_id {
+        return Err("No puedes registrar ventas para otro usuario o sucursal.".to_string());
+    }
 
     let mut conn = get_conn(&state_db).map_err(to_command_error)?;
     let tx = conn.transaction().map_err(AppError::from).map_err(to_command_error)?;
@@ -8922,6 +10366,7 @@ fn registrar_venta(
                 WHERE p.id = ?1
                   AND i.sucursal_id = ?2
                   AND p.eliminado = 0
+                  AND i.eliminado = 0
                 ",
                 params![detalle.producto_id, venta.sucursal_id],
                 |row| {
@@ -8976,8 +10421,31 @@ fn registrar_venta(
         ));
     }
     let total = cents_to_money(total_centavos);
+    let (efectivo_recibido, cambio_entregado) = if venta.metodo_pago == "EFECTIVO" {
+        let recibido = normalize_money(
+            venta.efectivo_recibido.unwrap_or(total),
+            "El efectivo recibido",
+            false,
+        )
+        .map_err(to_command_error)?;
+        if recibido + 0.0001 < total {
+            return Err("El efectivo recibido es insuficiente para cubrir el total de la venta.".to_string());
+        }
+        let cambio = round_money(recibido - total);
+        if let Some(cambio_cliente) = venta.cambio_entregado {
+            if (round_money(cambio_cliente) - cambio).abs() > 0.01 {
+                return Err("El cambio recibido no coincide con el total calculado por el backend.".to_string());
+            }
+        }
+        (Some(recibido), Some(cambio))
+    } else {
+        (None, None)
+    };
 
     if venta.metodo_pago == "CREDITO" {
+        if !matches!(usuario_role.as_str(), "ADMIN" | "SUPERADMIN") {
+            return Err("Solo ADMIN o SUPERADMIN pueden registrar ventas a crédito.".to_string());
+        }
         let cliente_id = venta
             .cliente_id
             .as_ref()
@@ -8993,24 +10461,39 @@ fn registrar_venta(
             )
             .map_err(|_| "El cliente seleccionado no existe.".to_string())?;
 
-        if saldo_deudor + total > limite_credito {
+        if limite_credito <= 0.0 {
+            return Err("El cliente no tiene crédito autorizado.".to_string());
+        }
+        if round_money(saldo_deudor + total) > round_money(limite_credito) {
             return Err("La venta supera el límite de crédito del cliente.".to_string());
         }
 
-        tx.execute(
-            "UPDATE clientes SET saldo_deudor = ?1 WHERE id = ?2",
-            params![saldo_deudor + total, cliente_id],
+        let affected = tx.execute(
+            "
+            UPDATE clientes
+            SET saldo_deudor = ROUND(saldo_deudor + ?1, 2),
+                sincronizado = 0,
+                updated_at = datetime('now')
+            WHERE id = ?2
+              AND eliminado = 0
+              AND limite_credito > 0
+              AND ROUND(saldo_deudor + ?1, 2) <= ROUND(limite_credito, 2)
+            ",
+            params![total, cliente_id],
         )
         .map_err(|error| map_write_error(error, "cliente"))
         .map_err(to_command_error)?;
+        if affected != 1 {
+            return Err("No se pudo autorizar el crédito porque el saldo del cliente cambió. Actualiza e intenta de nuevo.".to_string());
+        }
     }
 
     tx.execute(
         "
         INSERT INTO ventas (
-            id, usuario_id, sucursal_id, fecha, total, metodo_pago, cliente_id, estado,
-            sync_uuid, sincronizado, updated_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'COMPLETADA', ?8, 0, datetime('now'))
+            id, usuario_id, sucursal_id, fecha, total, metodo_pago, efectivo_recibido,
+            cambio_entregado, cliente_id, estado, sync_uuid, sincronizado, updated_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'COMPLETADA', ?10, 0, datetime('now'))
         ",
         params![
             venta.id,
@@ -9019,6 +10502,8 @@ fn registrar_venta(
             venta.fecha,
             total,
             venta.metodo_pago,
+            efectivo_recibido,
+            cambio_entregado,
             venta.cliente_id,
             generate_uuid_like()
         ],
@@ -9051,7 +10536,9 @@ fn registrar_venta(
             .execute(
             "
             UPDATE inventario_sucursal
-            SET stock = stock - ?1
+            SET stock = stock - ?1,
+                sincronizado = 0,
+                updated_at = datetime('now')
             WHERE producto_id = ?2 AND sucursal_id = ?3 AND stock >= ?1
             ",
             params![cantidad, producto_id, venta.sucursal_id],
@@ -9086,7 +10573,12 @@ fn registrar_venta(
 }
 
 #[tauri::command]
-fn create_sucursal(state_db: tauri::State<DbState>, sucursal: Sucursal) -> AppResult<()> {
+fn create_sucursal(
+    state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
+    sucursal: Sucursal,
+) -> AppResult<()> {
+    require_superadmin(&state_sesion)?;
     validate_sucursal(&sucursal).map_err(to_command_error)?;
 
     let conn = get_conn(&state_db).map_err(to_command_error)?;
@@ -9101,7 +10593,13 @@ fn create_sucursal(state_db: tauri::State<DbState>, sucursal: Sucursal) -> AppRe
 }
 
 #[tauri::command]
-fn update_sucursal(state_db: tauri::State<DbState>, id: String, sucursal: Sucursal) -> AppResult<()> {
+fn update_sucursal(
+    state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
+    id: String,
+    sucursal: Sucursal,
+) -> AppResult<()> {
+    require_superadmin(&state_sesion)?;
     validate_sucursal(&sucursal).map_err(to_command_error)?;
 
     let conn = get_conn(&state_db).map_err(to_command_error)?;
@@ -9121,7 +10619,12 @@ fn update_sucursal(state_db: tauri::State<DbState>, id: String, sucursal: Sucurs
 }
 
 #[tauri::command]
-fn delete_sucursal(state_db: tauri::State<DbState>, id: String) -> AppResult<()> {
+fn delete_sucursal(
+    state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
+    id: String,
+) -> AppResult<()> {
+    require_superadmin(&state_sesion)?;
     let conn = get_conn(&state_db).map_err(to_command_error)?;
     let active_users: i64 = conn
         .query_row(
@@ -9223,11 +10726,13 @@ pub fn run() {
             delete_sucursal,
             get_productos_por_sucursal,
             buscar_productos_por_sucursal,
+            buscar_productos_para_compra,
             asegurar_producto_venta_diversa,
             get_productos_catalogo,
             create_producto_catalogo,
             update_producto_catalogo,
             guardar_inventario_sucursal,
+            eliminar_inventario_sucursal,
             get_promociones,
             get_productos_para_promociones,
             guardar_promocion,
@@ -9240,6 +10745,7 @@ pub fn run() {
             abrir_caja,
             registrar_movimiento_caja,
             cerrar_caja,
+            imprimir_ticket_y_abrir_caja,
             get_dashboard_stats,
             get_productos_bajo_stock,
             get_productos_mas_vendidos,
@@ -9253,6 +10759,7 @@ pub fn run() {
             crear_respaldo_local,
             aplicar_respaldo_local,
             sincronizar_hacia_nube,
+            subir_base_local_completa_a_nube,
             sincronizar_desde_nube,
             get_sync_status,
             get_notificaciones,
@@ -9273,3 +10780,4 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+

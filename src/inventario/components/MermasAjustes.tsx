@@ -26,6 +26,9 @@ const motivosSugeridos = [
   'Ajuste por conteo físico',
 ];
 
+const QUANTITY_PATTERN = /^\d+(\.\d{0,3})?$/;
+type TipoMovimiento = 'MERMA' | 'AJUSTE_ENTRADA' | 'AJUSTE_SALIDA';
+
 export function MermasAjustesView() {
   const { user } = useAuth();
   const { sucursales } = useCatalogos();
@@ -33,7 +36,7 @@ export function MermasAjustesView() {
   const [search, setSearch] = useState('');
   const [productos, setProductos] = useState<ProductoInventario[]>([]);
   const [productoSeleccionado, setProductoSeleccionado] = useState<ProductoInventario | null>(null);
-  const [tipoMovimiento, setTipoMovimiento] = useState<'MERMA' | 'AJUSTE'>('MERMA');
+  const [tipoMovimiento, setTipoMovimiento] = useState<TipoMovimiento>('MERMA');
   const [motivo, setMotivo] = useState(motivosSugeridos[0]);
   const [cantidad, setCantidad] = useState('');
   const [snackbar, setSnackbar] = useState('');
@@ -42,6 +45,14 @@ export function MermasAjustesView() {
   const isSuperAdmin = user?.role === 'SUPERADMIN';
   const sucursalTrabajo = isSuperAdmin ? selectedSucursalId : user?.sucursalId ?? '';
   const searchDebounced = useDebouncedValue(search, 300);
+  const cantidadValida =
+    QUANTITY_PATTERN.test(cantidad.trim()) &&
+    Number(cantidad) > 0 &&
+    (
+      tipoMovimiento === 'AJUSTE_ENTRADA' ||
+      !productoSeleccionado ||
+      Number(cantidad) <= productoSeleccionado.stock
+    );
 
   useEffect(() => {
     if (!selectedSucursalId && sucursales.length > 0) {
@@ -83,12 +94,12 @@ export function MermasAjustesView() {
       setSnackbar('Completa sucursal y producto.');
       return;
     }
-    const qty = Number(cantidad || 0);
-    if (qty <= 0) {
-      setSnackbar('La cantidad debe ser mayor a cero.');
+    if (!cantidadValida) {
+      setSnackbar('La cantidad debe ser mayor a cero, máximo 3 decimales y no superar stock si es salida.');
       return;
     }
-    if (productoSeleccionado && qty > productoSeleccionado.stock) {
+    const qty = Number(cantidad || 0);
+    if (tipoMovimiento !== 'AJUSTE_ENTRADA' && productoSeleccionado && qty > productoSeleccionado.stock) {
       setSnackbar('La cantidad supera el stock disponible.');
       return;
     }
@@ -200,9 +211,10 @@ export function MermasAjustesView() {
             fullWidth
           />
 
-          <TextField select label="Tipo de movimiento" value={tipoMovimiento} onChange={(e) => setTipoMovimiento(e.target.value as 'MERMA' | 'AJUSTE')}>
+          <TextField select label="Tipo de movimiento" value={tipoMovimiento} onChange={(e) => setTipoMovimiento(e.target.value as TipoMovimiento)}>
             <MenuItem value="MERMA">Merma</MenuItem>
-            <MenuItem value="AJUSTE">Ajuste</MenuItem>
+            <MenuItem value="AJUSTE_SALIDA">Ajuste de salida</MenuItem>
+            <MenuItem value="AJUSTE_ENTRADA">Ajuste de entrada</MenuItem>
           </TextField>
 
           <TextField
@@ -210,8 +222,16 @@ export function MermasAjustesView() {
             type="number"
             value={cantidad}
             onChange={(e) => setCantidad(e.target.value)}
+            error={Boolean(cantidad) && !cantidadValida}
+            helperText={
+              Boolean(cantidad) && !cantidadValida
+                ? 'Mayor a 0, máximo 3 decimales y no debe superar stock en salidas.'
+                : tipoMovimiento === 'AJUSTE_ENTRADA'
+                  ? 'Entrada por conteo físico o corrección autorizada.'
+                  : 'Salida de inventario por pérdida, daño o corrección.'
+            }
             fullWidth
-            slotProps={{ htmlInput: { min: 0.01, step: '0.01' } }}
+            slotProps={{ htmlInput: { min: 0.001, step: '0.001', inputMode: 'decimal' } }}
           />
 
           <TextField
@@ -233,7 +253,7 @@ export function MermasAjustesView() {
             variant="contained"
             startIcon={loading ? <CircularProgress size={18} color="inherit" /> : <AjusteIcon />}
             onClick={handleRegistrar}
-            disabled={loading || !productoSeleccionado?.id || !cantidad || !motivo.trim()}
+            disabled={loading || !productoSeleccionado?.id || !cantidadValida || !motivo.trim()}
           >
             {loading ? 'Registrando...' : 'Registrar Ajuste'}
           </Button>

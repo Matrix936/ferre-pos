@@ -26,7 +26,7 @@ import {
   FiberManualRecord as FiberManualRecordIcon,
   Notifications as NotificationsIcon
 } from '@mui/icons-material';
-import { useContext, useEffect, useMemo, useState } from 'react';
+import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { useAuth } from '../../auth/context/AuthContext';
 import { useCatalogos } from '../../catalogos/context/CatalogosContext';
 import { useNavigate } from 'react-router-dom';
@@ -79,6 +79,7 @@ export function Topbar({ onToggleSidebar }: TopbarProps) {
   const [notificaciones, setNotificaciones] = useState<Notificacion[]>([]);
   const [anchorEl, setAnchorEl] = useState<null | HTMLElement>(null);
   const [notificationsAnchorEl, setNotificationsAnchorEl] = useState<null | HTMLElement>(null);
+  const notificationsMountedRef = useRef(true);
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -110,21 +111,27 @@ export function Topbar({ onToggleSidebar }: TopbarProps) {
     };
   }, []);
 
-  const loadNotificaciones = async () => {
+  const loadNotificaciones = useCallback(async () => {
     try {
       const data = await invoke<Notificacion[]>('get_notificaciones', { soloNoLeidas: false });
-      setNotificaciones(data);
+      if (notificationsMountedRef.current) {
+        setNotificaciones(data);
+      }
     } catch (error) {
       console.error('Error al consultar notificaciones:', error);
     }
-  };
+  }, []);
 
   useEffect(() => {
+    notificationsMountedRef.current = true;
     loadNotificaciones();
     const intervalId = window.setInterval(loadNotificaciones, 15000);
 
-    return () => window.clearInterval(intervalId);
-  }, []);
+    return () => {
+      notificationsMountedRef.current = false;
+      window.clearInterval(intervalId);
+    };
+  }, [loadNotificaciones]);
 
   const sucursalNombre = useMemo(() => {
     const sucursal = sucursales.find((item) => item.id === user?.sucursalId);
@@ -178,13 +185,21 @@ export function Topbar({ onToggleSidebar }: TopbarProps) {
   };
 
   const handleMarkNotificationRead = async (id: string) => {
-    await invoke('marcar_notificacion_leida', { id });
-    loadNotificaciones();
+    try {
+      await invoke('marcar_notificacion_leida', { id });
+      loadNotificaciones();
+    } catch (error) {
+      console.error('Error al marcar notificación:', error);
+    }
   };
 
   const handleMarkAllNotificationsRead = async () => {
-    await invoke('marcar_todas_notificaciones_leidas');
-    loadNotificaciones();
+    try {
+      await invoke('marcar_todas_notificaciones_leidas');
+      loadNotificaciones();
+    } catch (error) {
+      console.error('Error al marcar notificaciones:', error);
+    }
   };
 
   const handleLogout = async () => {

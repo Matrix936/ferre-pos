@@ -74,8 +74,21 @@ export function FacturacionHub() {
     () => ventas.filter((venta) => venta.estado === 'COMPLETADA').slice(0, 30),
     [ventas],
   );
+  const facturaPorVenta = useMemo(
+    () => new Map(facturas.map((factura) => [factura.ventaId, factura])),
+    [facturas],
+  );
 
   const handleGenerarFactura = async (venta: HistorialVenta) => {
+    const factura = facturaPorVenta.get(venta.id);
+    if (factura?.estado === 'TIMBRADA') {
+      setError('Esta venta ya tiene una factura timbrada.');
+      return;
+    }
+    if (factura?.estado === 'CANCELADA') {
+      setError('Esta venta tiene una factura cancelada. Revisa el historial antes de generar otra.');
+      return;
+    }
     setError('');
     setLoadingVentaId(venta.id);
     try {
@@ -124,6 +137,9 @@ export function FacturacionHub() {
       <Paper elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider', overflow: 'hidden', mb: 3 }}>
         <Box sx={{ p: 2, borderBottom: '1px solid', borderColor: 'divider' }}>
           <Typography variant="h6" sx={{ fontWeight: 700 }}>Ventas completadas</Typography>
+          <Typography variant="body2" color="text.secondary">
+            Solo se puede timbrar una vez por venta. Las ventas con CFDI timbrado quedan protegidas contra duplicados.
+          </Typography>
         </Box>
         <TableContainer>
           <Table>
@@ -133,34 +149,50 @@ export function FacturacionHub() {
                 <TableCell sx={{ fontWeight: 600 }}>Fecha</TableCell>
                 <TableCell sx={{ fontWeight: 600 }}>Cliente</TableCell>
                 <TableCell sx={{ fontWeight: 600 }}>Sucursal</TableCell>
+                <TableCell sx={{ fontWeight: 600 }}>Pago</TableCell>
+                <TableCell sx={{ fontWeight: 600 }}>Factura</TableCell>
                 <TableCell sx={{ fontWeight: 600 }}>Total</TableCell>
                 <TableCell align="right" sx={{ fontWeight: 600 }}>Acción</TableCell>
               </TableRow>
             </TableHead>
             <TableBody>
-              {ventasFacturables.map((venta) => (
-                <TableRow key={venta.id} hover>
-                  <TableCell>{venta.id.slice(0, 8)}</TableCell>
-                  <TableCell>{new Date(venta.fecha).toLocaleString()}</TableCell>
-                  <TableCell>{venta.clienteNombre || 'Sin cliente'}</TableCell>
-                  <TableCell>{venta.sucursalNombre}</TableCell>
-                  <TableCell>${venta.total.toFixed(2)}</TableCell>
-                  <TableCell align="right">
-                    <Button
-                      size="small"
-                      variant="outlined"
-                      startIcon={loadingVentaId === venta.id ? <CircularProgress size={16} /> : <FacturarIcon />}
-                      onClick={() => handleGenerarFactura(venta)}
-                      disabled={Boolean(loadingVentaId)}
-                    >
-                      {loadingVentaId === venta.id ? 'Generando...' : 'Generar Factura'}
-                    </Button>
-                  </TableCell>
-                </TableRow>
-              ))}
+              {ventasFacturables.map((venta) => {
+                const factura = facturaPorVenta.get(venta.id);
+                const yaTimbrada = factura?.estado === 'TIMBRADA';
+                const facturaCancelada = factura?.estado === 'CANCELADA';
+                return (
+                  <TableRow key={venta.id} hover>
+                    <TableCell>{venta.id.slice(0, 8)}</TableCell>
+                    <TableCell>{new Date(venta.fecha).toLocaleString()}</TableCell>
+                    <TableCell>{venta.clienteNombre || 'Sin cliente'}</TableCell>
+                    <TableCell>{venta.sucursalNombre}</TableCell>
+                    <TableCell>{venta.metodoPago}</TableCell>
+                    <TableCell>
+                      <Chip
+                        label={factura?.estado ?? 'SIN CFDI'}
+                        size="small"
+                        color={yaTimbrada ? 'success' : facturaCancelada ? 'error' : factura ? 'warning' : 'default'}
+                        sx={{ borderRadius: '6px', fontWeight: 700 }}
+                      />
+                    </TableCell>
+                    <TableCell>${venta.total.toFixed(2)}</TableCell>
+                    <TableCell align="right">
+                      <Button
+                        size="small"
+                        variant="outlined"
+                        startIcon={loadingVentaId === venta.id ? <CircularProgress size={16} /> : <FacturarIcon />}
+                        onClick={() => handleGenerarFactura(venta)}
+                        disabled={Boolean(loadingVentaId) || yaTimbrada || facturaCancelada}
+                      >
+                        {loadingVentaId === venta.id ? 'Generando...' : factura ? 'Ver payload' : 'Generar Factura'}
+                      </Button>
+                    </TableCell>
+                  </TableRow>
+                );
+              })}
               {ventasFacturables.length === 0 && (
                 <TableRow>
-                  <TableCell colSpan={6} align="center" sx={{ py: 4, color: 'text.secondary' }}>
+                  <TableCell colSpan={8} align="center" sx={{ py: 4, color: 'text.secondary' }}>
                     No hay ventas completadas para facturar.
                   </TableCell>
                 </TableRow>
@@ -195,7 +227,7 @@ export function FacturacionHub() {
                     <Chip
                       label={factura.estado}
                       size="small"
-                      color={factura.estado === 'TIMBRADA' ? 'success' : 'warning'}
+                      color={factura.estado === 'TIMBRADA' ? 'success' : factura.estado === 'CANCELADA' ? 'error' : 'warning'}
                       sx={{ borderRadius: '6px', fontWeight: 700 }}
                     />
                   </TableCell>

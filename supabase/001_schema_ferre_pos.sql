@@ -118,6 +118,7 @@ CREATE TABLE IF NOT EXISTS inventario_sucursal (
   stock_minimo NUMERIC(12, 3) NOT NULL DEFAULT 0,
   costo_promedio NUMERIC(12, 4) NOT NULL DEFAULT 0,
   precio_venta NUMERIC(12, 2) NOT NULL DEFAULT 0,
+  eliminado BOOLEAN NOT NULL DEFAULT FALSE,
   sincronizado BOOLEAN NOT NULL DEFAULT TRUE,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (producto_id, sucursal_id)
@@ -180,6 +181,8 @@ CREATE TABLE IF NOT EXISTS ventas (
   fecha TIMESTAMPTZ NOT NULL,
   total NUMERIC(12, 2) NOT NULL DEFAULT 0,
   metodo_pago TEXT NOT NULL CHECK (metodo_pago IN ('EFECTIVO', 'TARJETA', 'TRANSFERENCIA', 'CREDITO')),
+  efectivo_recibido NUMERIC(12, 2) NULL,
+  cambio_entregado NUMERIC(12, 2) NULL,
   cliente_id TEXT NULL REFERENCES clientes(id) ON UPDATE CASCADE ON DELETE RESTRICT,
   usuario_autorizo_cancelacion_id TEXT NULL REFERENCES usuarios(id) ON UPDATE CASCADE ON DELETE RESTRICT,
   motivo_cancelacion TEXT NULL,
@@ -336,6 +339,7 @@ ALTER TABLE IF EXISTS unidades ADD COLUMN IF NOT EXISTS eliminado BOOLEAN NOT NU
 ALTER TABLE IF EXISTS productos ADD COLUMN IF NOT EXISTS costo_promedio NUMERIC(12, 4) NOT NULL DEFAULT 0;
 ALTER TABLE IF EXISTS inventario_sucursal ADD COLUMN IF NOT EXISTS costo_promedio NUMERIC(12, 4) NOT NULL DEFAULT 0;
 ALTER TABLE IF EXISTS inventario_sucursal ADD COLUMN IF NOT EXISTS precio_venta NUMERIC(12, 2) NOT NULL DEFAULT 0;
+ALTER TABLE IF EXISTS inventario_sucursal ADD COLUMN IF NOT EXISTS eliminado BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE IF EXISTS detalle_compras ADD COLUMN IF NOT EXISTS costo_promedio_resultante NUMERIC(12, 4) NULL;
 ALTER TABLE IF EXISTS detalle_ventas ADD COLUMN IF NOT EXISTS costo_unitario_pactado NUMERIC(12, 4) NOT NULL DEFAULT 0;
 ALTER TABLE IF EXISTS traspasos ADD COLUMN IF NOT EXISTS estado TEXT NOT NULL DEFAULT 'EN_TRANSITO';
@@ -356,6 +360,7 @@ CREATE INDEX IF NOT EXISTS idx_clientes_eliminado ON clientes (eliminado);
 CREATE INDEX IF NOT EXISTS idx_productos_codigo_barras ON productos (codigo_barras);
 CREATE INDEX IF NOT EXISTS idx_productos_codigo_proveedor ON productos (codigo_proveedor);
 CREATE INDEX IF NOT EXISTS idx_inventario_sucursal_id ON inventario_sucursal (sucursal_id);
+CREATE INDEX IF NOT EXISTS idx_inventario_sucursal_eliminado ON inventario_sucursal (eliminado);
 CREATE INDEX IF NOT EXISTS idx_ventas_sucursal_fecha ON ventas (sucursal_id, fecha);
 CREATE INDEX IF NOT EXISTS idx_ventas_updated_at ON ventas (updated_at);
 CREATE INDEX IF NOT EXISTS idx_detalle_ventas_venta_uuid ON detalle_ventas (venta_uuid);
