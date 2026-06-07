@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { Alert, Box, Button, CircularProgress, Divider, Paper, TextField, Typography } from '@mui/material';
-import { Save as SaveIcon } from '@mui/icons-material';
+import { Business as BusinessIcon, Save as SaveIcon } from '@mui/icons-material';
+import { configActionButtonSx, configIconBadgeSx, configPanelSx, configSectionHeaderSx } from '../components/configSectionStyles';
 
 interface EmpresaConfigFiscal {
   rfc: string;
@@ -58,10 +59,22 @@ export function ConfiguracionFiscalView() {
   };
 
   return (
-    <Paper elevation={0} sx={{ p: 4, borderRadius: 2, border: '1px solid', borderColor: 'divider' }}>
-      <Typography variant="h6" sx={{ mb: 2, fontWeight: 600 }}>
-        Configuración fiscal del emisor
-      </Typography>
+    <Paper elevation={0} sx={configPanelSx}>
+      <Box sx={configSectionHeaderSx}>
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
+          <Box sx={configIconBadgeSx}>
+            <BusinessIcon fontSize="small" />
+          </Box>
+          <Box>
+            <Typography variant="h6" sx={{ fontWeight: 800 }}>
+              Configuración fiscal del emisor
+            </Typography>
+            <Typography variant="body2" color="text.secondary">
+              Datos fiscales globales usados para pre-facturación CFDI.
+            </Typography>
+          </Box>
+        </Box>
+      </Box>
       <Divider sx={{ mb: 3 }} />
 
       <Box sx={{ display: 'grid', gap: 2.5, gridTemplateColumns: { xs: '1fr', md: '1fr 1fr' } }}>
@@ -104,7 +117,7 @@ export function ConfiguracionFiscalView() {
           onClick={handleSave}
           disabled={loading || !rfc.trim() || !razonSocial.trim() || !regimenFiscal.trim()}
           disableElevation
-          sx={{ px: 4, py: 1, borderRadius: '8px' }}
+          sx={configActionButtonSx}
         >
           {loading ? 'Guardando...' : 'Guardar configuración fiscal'}
         </Button>

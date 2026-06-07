@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react';
 import {
+  Alert,
   Box,
   Button,
   Checkbox,
@@ -15,7 +16,11 @@ import {
   Typography,
 } from '@mui/material';
 import { Print as PrintIcon } from '@mui/icons-material';
+import { invoke } from '@tauri-apps/api/core';
 import { useConfig } from '../../config/context/ConfigContext';
+import { AsyncButton } from '../../shared/components/AsyncButton';
+import { useDialogHotkeys } from '../../shared/hooks/useDialogHotkeys';
+import { dialogActionsSx, dialogContentSx } from '../../shared/ui/patterns';
 import { ProductoInventario } from '../types';
 
 interface EtiquetasPrecioModalProps {
@@ -30,6 +35,12 @@ interface LabelOptions {
   mostrarCodigoBarras: boolean;
   mostrarClave: boolean;
   mostrarPrecio: boolean;
+}
+
+interface PerifericosConfig {
+  impresoraTickets: string;
+  impresoraEtiquetas: string;
+  updatedAt: string;
 }
 
 const labelFont = "'Arial Narrow', Arial, sans-serif";
@@ -153,6 +164,8 @@ export function EtiquetasPrecioModal({ open, productos, onClose }: EtiquetasPrec
   const { systemName } = useConfig();
   const [options, setOptions] = useState<LabelOptions>(defaultOptions);
   const [cantidad, setCantidad] = useState(1);
+  const [printing, setPrinting] = useState(false);
+  const [printError, setPrintError] = useState('');
 
   const productoPreview = productos[0] ?? null;
   const negocio = systemName?.trim() || 'Ferre-Materiales La Mixteca';
@@ -162,72 +175,57 @@ export function EtiquetasPrecioModal({ open, productos, onClose }: EtiquetasPrec
     setOptions((prev) => ({ ...prev, [key]: !prev[key] }));
   };
 
-  const buildBarcodeHtml = (codigo: string) =>
-    Array.from(codigo || 'SIN-CODIGO')
-      .flatMap((char) =>
-        Array.from({ length: 7 }, (_, bit) => {
-          const black = ((char.charCodeAt(0) >> bit) & 1) === 1;
-          const width = bit % 3 === 0 ? 2 : 1;
-          return `<span style="display:inline-block;width:${width}px;height:38px;background:${black ? '#111' : '#fff'}"></span>`;
-        }),
-      )
-      .join('');
-
-  const handlePrint = () => {
-    if (productos.length === 0) return;
-    const copies = Math.max(1, Math.min(500, Math.floor(cantidad || 1)));
-    const printWindow = window.open('', '_blank', 'width=640,height=720');
-    if (!printWindow) return;
-
-    const labelHtml = productos
-      .flatMap((producto) => {
-        const codigo = producto.codigoBarras || producto.codigoProveedor || producto.claveProducto || producto.id;
-        const barcode = options.mostrarCodigoBarras ? `<div class="barcode">${buildBarcodeHtml(codigo)}</div>` : '';
-        const key = producto.claveProducto || producto.codigoProveedor || codigo;
-        return Array.from({ length: copies }, () => `
-          <section class="label">
-            ${options.mostrarNegocio ? `<div class="business">${negocio}</div>` : ''}
-            ${options.mostrarDescripcion ? `<div class="description">${producto.descripcion}</div>` : ''}
-            <div class="bottom">
-              ${(options.mostrarCodigoBarras || options.mostrarClave) ? `<div class="code">${barcode}${options.mostrarClave ? `<div class="key">${key}</div>` : ''}</div>` : ''}
-              ${options.mostrarPrecio ? `<div class="price">${formatMoney(producto.precioVenta)}</div>` : ''}
-            </div>
-          </section>
-        `);
-      })
-      .join('');
-
-    printWindow.document.write(`
-      <html>
-        <head>
-          <title>Etiquetas de inventario</title>
-          <style>
-            @page { size: auto; margin: 6mm; }
-            body { margin: 0; font-family: ${labelFont}; background: #fff; }
-            .sheet { display: flex; flex-wrap: wrap; gap: 6px; }
-            .label { box-sizing: border-box; width: 290px; height: 160px; padding: 10px; border: 1px solid #ddd; display: flex; flex-direction: column; gap: 4px; page-break-inside: avoid; color: #111; }
-            .business { font-size: 12px; font-weight: 800; text-align: center; line-height: 1; }
-            .description { font-size: 14px; font-weight: 800; text-align: center; line-height: 1.05; min-height: 30px; overflow: hidden; }
-            .bottom { flex: 1; display: flex; align-items: center; justify-content: center; gap: 8px; }
-            .code { flex: 1.35; min-width: 0; text-align: center; }
-            .barcode { height: 42px; white-space: nowrap; overflow: hidden; }
-            .key { font-family: monospace; font-size: 10px; line-height: 1; }
-            .price { flex: 1; text-align: right; font-size: 30px; font-weight: 900; line-height: 1; }
-          </style>
-        </head>
-        <body><main class="sheet">${labelHtml}</main></body>
-      </html>
-    `);
-    printWindow.document.close();
-    printWindow.focus();
-    printWindow.print();
+  const buildSilentLabelText = (producto: ProductoInventario) => {
+    const codigo = producto.codigoBarras || producto.codigoProveedor || producto.claveProducto || producto.id;
+    const lines = [
+      options.mostrarNegocio ? negocio : '',
+      options.mostrarDescripcion ? producto.descripcion : '',
+      options.mostrarCodigoBarras ? `CODIGO: ${codigo}` : '',
+      options.mostrarClave ? `CLAVE: ${producto.claveProducto || producto.codigoProveedor || codigo}` : '',
+      options.mostrarPrecio ? `PRECIO: ${formatMoney(producto.precioVenta)}` : '',
+    ].filter(Boolean);
+    return `${lines.join('\n')}\n\n`;
   };
+
+  const handlePrint = async () => {
+    if (productos.length === 0) return;
+    setPrinting(true);
+    setPrintError('');
+    const copies = Math.max(1, Math.min(500, Math.floor(cantidad || 1)));
+    let printerName = '';
+    try {
+      const config = await invoke<PerifericosConfig>('get_perifericos_config');
+      printerName = config.impresoraEtiquetas?.trim() ?? '';
+      if (!printerName) {
+        throw new Error('No hay impresora de etiquetas configurada.');
+      }
+      const contenido = productos
+        .flatMap((producto) => Array.from({ length: copies }, () => buildSilentLabelText(producto)))
+        .join('');
+      await invoke('imprimir_silencioso', { input: { printerName, contenido } });
+      onClose();
+    } catch (error) {
+      setPrintError(`La impresora ${printerName || 'Etiquetas'} no está conectada o no se encuentra disponible. ${String(error)}`);
+    } finally {
+      setPrinting(false);
+    }
+  };
+
+  const printDisabled = printing || productos.length === 0;
+  useDialogHotkeys({
+    open,
+    disabled: printDisabled,
+    cancelDisabled: printing,
+    onConfirm: handlePrint,
+    onCancel: onClose,
+  });
 
   return (
     <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth>
       <DialogTitle sx={{ fontWeight: 700 }}>Etiquetas de precio</DialogTitle>
       <Divider />
-      <DialogContent sx={{ pt: 3 }}>
+      <DialogContent sx={dialogContentSx}>
+        {printError && <Alert severity="error" sx={{ mb: 2 }}>{printError}</Alert>}
         {productoPreview && (
           <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', md: '280px 1fr' }, gap: 3, alignItems: 'start' }}>
             <Paper elevation={0} sx={{ p: 2, borderRadius: 2, border: '1px solid', borderColor: 'divider' }}>
@@ -262,11 +260,18 @@ export function EtiquetasPrecioModal({ open, productos, onClose }: EtiquetasPrec
           </Box>
         )}
       </DialogContent>
-      <DialogActions sx={{ p: 3, pt: 1 }}>
-        <Button onClick={onClose}>Cancelar</Button>
-        <Button variant="contained" startIcon={<PrintIcon />} onClick={handlePrint} disabled={productos.length === 0}>
+      <DialogActions sx={{ ...dialogActionsSx, p: 3, pt: 1 }}>
+        <Button onClick={onClose} disabled={printing}>Cancelar</Button>
+        <AsyncButton
+          variant="contained"
+          startIcon={<PrintIcon />}
+          onClick={handlePrint}
+          disabled={printDisabled}
+          loading={printing}
+          loadingText="Imprimiendo..."
+        >
           Imprimir
-        </Button>
+        </AsyncButton>
       </DialogActions>
     </Dialog>
   );

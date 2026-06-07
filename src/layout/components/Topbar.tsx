@@ -32,6 +32,8 @@ import { useCatalogos } from '../../catalogos/context/CatalogosContext';
 import { useNavigate } from 'react-router-dom';
 import { RoleGuard } from '../../auth/components/RoleGuard';
 import { ColorModeContext } from '../../theme';
+import { FeedbackSnackbar } from '../../shared/components/FeedbackSnackbar';
+import { useFeedback } from '../../shared/hooks/useFeedback';
 
 interface TopbarProps {
   onToggleSidebar: () => void;
@@ -40,6 +42,14 @@ interface TopbarProps {
 interface SyncStatus {
   pendientes: number;
   ventasPendientes?: number;
+  tablasPendientes?: Array<{
+    tabla: string;
+    pendientes: number;
+  }>;
+  ultimoIntentoAt?: string | null;
+  ultimoExitoAt?: string | null;
+  ultimoErrorAt?: string | null;
+  ultimoError?: string | null;
 }
 
 interface Notificacion {
@@ -69,6 +79,13 @@ const formatCurrentDateTime = (date: Date) => {
   return `${formattedDate.charAt(0).toUpperCase()}${formattedDate.slice(1)} - ${formattedTime.toUpperCase()}`;
 };
 
+const formatSyncDate = (value?: string | null) => {
+  if (!value) return '';
+  const parsed = new Date(value.replace(' ', 'T'));
+  if (Number.isNaN(parsed.getTime())) return value;
+  return parsed.toLocaleString('es-MX', { dateStyle: 'short', timeStyle: 'short' });
+};
+
 export function Topbar({ onToggleSidebar }: TopbarProps) {
   const { user, logout } = useAuth();
   const theme = useTheme();
@@ -79,6 +96,7 @@ export function Topbar({ onToggleSidebar }: TopbarProps) {
   const [notificaciones, setNotificaciones] = useState<Notificacion[]>([]);
   const [anchorEl, setAnchorEl] = useState<null | HTMLElement>(null);
   const [notificationsAnchorEl, setNotificationsAnchorEl] = useState<null | HTMLElement>(null);
+  const { feedbackMessage, feedbackSeverity, showFeedback, closeFeedback } = useFeedback();
   const notificationsMountedRef = useRef(true);
   const navigate = useNavigate();
 
@@ -147,13 +165,25 @@ export function Topbar({ onToggleSidebar }: TopbarProps) {
   }, [syncStatus]);
 
   const syncTooltip = useMemo(() => {
+    const lastSuccess = formatSyncDate(syncStatus.ultimoExitoAt);
+    const lastError = formatSyncDate(syncStatus.ultimoErrorAt);
     if (syncStatus.pendientes <= 0) {
-      return 'Todos los cambios locales están sincronizados con Supabase.';
+      return lastSuccess
+        ? `Todos los cambios locales están sincronizados con Supabase. Última sync correcta: ${lastSuccess}.`
+        : 'Todos los cambios locales están sincronizados con Supabase.';
     }
 
-    const ventas = syncStatus.ventasPendientes ?? 0;
-    const otros = Math.max(syncStatus.pendientes - ventas, 0);
-    return `Pendientes por subir: ${syncStatus.pendientes}. Ventas: ${ventas}. Otros cambios: ${otros}.`;
+    const topTables = (syncStatus.tablasPendientes ?? [])
+      .slice(0, 5)
+      .map((item) => `${item.tabla}: ${item.pendientes}`)
+      .join(' · ');
+    const detail = topTables
+      ? `Pendientes por subir: ${syncStatus.pendientes}. ${topTables}.`
+      : `Pendientes por subir: ${syncStatus.pendientes}.`;
+    if (syncStatus.ultimoError) {
+      return `${detail} Último error${lastError ? ` (${lastError})` : ''}: ${syncStatus.ultimoError}`;
+    }
+    return lastSuccess ? `${detail} Última sync correcta: ${lastSuccess}.` : detail;
   }, [syncStatus]);
 
   const unreadNotifications = useMemo(
@@ -207,7 +237,7 @@ export function Topbar({ onToggleSidebar }: TopbarProps) {
     try {
       await logout();
     } catch (error) {
-      window.alert(String(error));
+      showFeedback(String(error), 'error');
     }
   };
 
@@ -529,6 +559,7 @@ export function Topbar({ onToggleSidebar }: TopbarProps) {
         </Box>
 
       </Toolbar>
+      <FeedbackSnackbar message={feedbackMessage} severity={feedbackSeverity} onClose={closeFeedback} />
     </AppBar>
   );
 }

@@ -6,6 +6,7 @@ import {
   Button,
   Card,
   CardContent,
+  Chip,
   CircularProgress,
   Divider,
   TextField,
@@ -26,6 +27,10 @@ import {
   Upload as UploadIcon,
   WarningAmber as WarningIcon,
 } from '@mui/icons-material';
+import { ConfirmActionDialog } from '../../shared/components/ConfirmActionDialog';
+import { FeedbackSnackbar } from '../../shared/components/FeedbackSnackbar';
+import { useFeedback } from '../../shared/hooks/useFeedback';
+import { configActionButtonSx, configIconBadgeSx, configPanelSx, configSectionHeaderSx } from '../components/configSectionStyles';
 
 interface SupabaseConfig {
   url: string;
@@ -38,6 +43,34 @@ interface SyncUploadResult {
   porTabla: Record<string, number>;
 }
 
+interface SyncStatus {
+  pendientes: number;
+  ventasPendientes?: number;
+  tablasPendientes?: Array<{
+    tabla: string;
+    pendientes: number;
+  }>;
+  ultimoIntentoAt?: string | null;
+  ultimoExitoAt?: string | null;
+  ultimoErrorAt?: string | null;
+  ultimoError?: string | null;
+}
+
+interface PendingConfirm {
+  title: string;
+  message: string;
+  confirmText: string;
+  confirmColor?: 'primary' | 'error' | 'warning';
+  onConfirm: () => Promise<void> | void;
+}
+
+const formatSyncDate = (value?: string | null) => {
+  if (!value) return 'Sin registro';
+  const parsed = new Date(value.replace(' ', 'T'));
+  if (Number.isNaN(parsed.getTime())) return value;
+  return parsed.toLocaleString('es-MX', { dateStyle: 'short', timeStyle: 'short' });
+};
+
 export function SincronizacionConfigView() {
   const theme = useTheme();
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -45,23 +78,32 @@ export function SincronizacionConfigView() {
   const [inputKey, setInputKey] = useState('');
   const [currentUrl, setCurrentUrl] = useState('');
   const [isConnected, setIsConnected] = useState(false);
+  const [checkingStatus, setCheckingStatus] = useState(true);
+  const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null);
   const [isBusy, setIsBusy] = useState(false);
   const [isBusyBackup, setIsBusyBackup] = useState(false);
   const [backupAction, setBackupAction] = useState<'download' | 'apply' | 'upload' | 'uploadFull' | 'restore' | ''>('');
   const [errorMessage, setErrorMessage] = useState('');
   const [backupMessage, setBackupMessage] = useState('');
+  const [pendingConfirm, setPendingConfirm] = useState<PendingConfirm | null>(null);
+  const { feedbackMessage, feedbackSeverity, showFeedback, closeFeedback } = useFeedback();
 
   const isDark = theme.palette.mode === 'dark';
 
   const loadStatus = async () => {
+    setCheckingStatus(true);
     try {
       const config = await invoke<SupabaseConfig>('get_supabase_config');
+      const status = await invoke<SyncStatus>('get_sync_status').catch(() => null);
       setIsConnected(config.isConnected);
+      setSyncStatus(status);
       setCurrentUrl(config.url || '');
       setInputUrl(config.isConnected ? '' : config.url || '');
       setInputKey('');
     } catch (error) {
       setErrorMessage(String(error));
+    } finally {
+      setCheckingStatus(false);
     }
   };
 
@@ -83,34 +125,46 @@ export function SincronizacionConfigView() {
         anonKey: inputKey.trim(),
       });
       setIsConnected(config.isConnected);
+      await loadStatus();
       setCurrentUrl(config.url);
       setInputUrl('');
       setInputKey('');
-      window.alert('Conexión exitosa. El sistema ahora está listo para sincronizar.');
+      showFeedback('Conexión exitosa. El sistema ahora está listo para sincronizar.');
     } catch (error) {
       setErrorMessage(String(error));
+      showFeedback(String(error), 'error');
     } finally {
       setIsBusy(false);
     }
   };
 
-  const handleDisconnect = async () => {
-    const confirmed = window.confirm('¿Seguro que deseas desvincular? La sincronización se detendrá.');
-    if (!confirmed) return;
-
+  const executeDisconnect = async () => {
     setIsBusy(true);
     setErrorMessage('');
     try {
       await invoke('disconnect_supabase');
       setIsConnected(false);
+      setSyncStatus(null);
       setCurrentUrl('');
       setInputUrl('');
       setInputKey('');
+      showFeedback('Conexión a Supabase desactivada.', 'info');
     } catch (error) {
       setErrorMessage(String(error));
+      showFeedback(String(error), 'error');
     } finally {
       setIsBusy(false);
     }
+  };
+
+  const handleDisconnect = () => {
+    setPendingConfirm({
+      title: 'Desconectar Supabase',
+      message: 'La sincronización se detendrá hasta que vuelvas a conectar las credenciales.',
+      confirmText: 'Desconectar',
+      confirmColor: 'error',
+      onConfirm: executeDisconnect,
+    });
   };
 
   const handleDownloadBackup = async () => {
@@ -120,11 +174,30 @@ export function SincronizacionConfigView() {
     try {
       const path = await invoke<string>('crear_respaldo_local');
       setBackupMessage(`Respaldo guardado en: ${path}`);
-      window.alert('Respaldo guardado correctamente.');
+      showFeedback('Respaldo guardado correctamente.');
     } catch (error) {
       const message = `Error al generar respaldo: ${String(error)}`;
       setBackupMessage(message);
-      window.alert(message);
+      showFeedback(message, 'error');
+    } finally {
+      setIsBusyBackup(false);
+      setBackupAction('');
+    }
+  };
+
+  const executeApplyBackup = async (file: File) => {
+    setIsBusyBackup(true);
+    setBackupAction('apply');
+    setBackupMessage('');
+    try {
+      const backupJson = await file.text();
+      await invoke('aplicar_respaldo_local', { backupJson });
+      setBackupMessage('Respaldo local aplicado correctamente.');
+      showFeedback('Respaldo aplicado correctamente.');
+    } catch (error) {
+      const message = `Error al aplicar respaldo: ${String(error)}`;
+      setBackupMessage(message);
+      showFeedback(message, 'error');
     } finally {
       setIsBusyBackup(false);
       setBackupAction('');
@@ -139,48 +212,42 @@ export function SincronizacionConfigView() {
       return;
     }
 
-    const confirmed = window.confirm('Aplicar un respaldo puede modificar datos locales. ¿Deseas continuar?');
-    if (!confirmed) return;
+    setPendingConfirm({
+      title: 'Restaurar respaldo local',
+      message: 'Aplicar un respaldo puede modificar datos locales. Revisa que el archivo corresponda a este sistema antes de continuar.',
+      confirmText: 'Restaurar',
+      confirmColor: 'warning',
+      onConfirm: () => executeApplyBackup(file),
+    });
+  };
 
+  const executeRestoreFromCloud = async () => {
     setIsBusyBackup(true);
-    setBackupAction('apply');
-    setBackupMessage('');
+    setBackupAction('restore');
+    setBackupMessage('Descargando datos de la nube, por favor espera...');
     try {
-      const backupJson = await file.text();
-      await invoke('aplicar_respaldo_local', { backupJson });
-      setBackupMessage('Respaldo local aplicado correctamente.');
-      window.alert('Respaldo aplicado correctamente.');
+      await invoke('sincronizar_desde_nube');
+      await loadStatus();
+      setBackupMessage('Base de datos actualizada desde la nube correctamente.');
+      showFeedback('Restauración exitosa. Tus datos locales han sido actualizados.');
     } catch (error) {
-      const message = `Error al aplicar respaldo: ${String(error)}`;
+      const message = `Error en la restauración: ${String(error)}`;
       setBackupMessage(message);
-      window.alert(message);
+      showFeedback(message, 'error');
     } finally {
       setIsBusyBackup(false);
       setBackupAction('');
     }
   };
 
-  const handleRestoreFromCloud = async () => {
-    const confirmed = window.confirm(
-      'ADVERTENCIA:\n\nEsto descargará toda la información de la nube y sobrescribirá los datos locales que coincidan.\n\n¿Estás seguro de que quieres continuar?'
-    );
-    if (!confirmed) return;
-
-    setIsBusyBackup(true);
-    setBackupAction('restore');
-    setBackupMessage('Descargando datos de la nube, por favor espera...');
-    try {
-      await invoke('sincronizar_desde_nube');
-      setBackupMessage('Base de datos actualizada desde la nube correctamente.');
-      window.alert('Restauración exitosa. Tus datos locales han sido actualizados.');
-    } catch (error) {
-      const message = `Error en la restauración: ${String(error)}`;
-      setBackupMessage(message);
-      window.alert(message);
-    } finally {
-      setIsBusyBackup(false);
-      setBackupAction('');
-    }
+  const handleRestoreFromCloud = () => {
+    setPendingConfirm({
+      title: 'Restaurar desde nube',
+      message: 'Esto descargará la información de Supabase y sobrescribirá los datos locales que coincidan.',
+      confirmText: 'Restaurar nube',
+      confirmColor: 'warning',
+      onConfirm: executeRestoreFromCloud,
+    });
   };
 
   const handleUploadToCloud = async () => {
@@ -189,6 +256,7 @@ export function SincronizacionConfigView() {
     setBackupMessage('Subiendo cambios locales a Supabase...');
     try {
       const result = await invoke<SyncUploadResult>('sincronizar_hacia_nube');
+      await loadStatus();
       const tableSummary = Object.entries(result.porTabla)
         .map(([table, count]) => `${table}: ${count}`)
         .join(', ');
@@ -197,28 +265,24 @@ export function SincronizacionConfigView() {
           ? `Sincronización completada. ${result.totalRegistros} registros subidos (${tableSummary}).`
           : 'No hay cambios locales pendientes por subir.'
       );
-      window.alert('Sincronización hacia la nube completada.');
+      showFeedback('Sincronización hacia la nube completada.');
     } catch (error) {
       const message = `Error al subir cambios: ${String(error)}`;
       setBackupMessage(message);
-      window.alert(message);
+      showFeedback(message, 'error');
     } finally {
       setIsBusyBackup(false);
       setBackupAction('');
     }
   };
 
-  const handleUploadFullToCloud = async () => {
-    const confirmed = window.confirm(
-      'ADVERTENCIA:\n\nEsto tomará la base de datos local como fuente principal y subirá todos sus registros a Supabase, sobrescribiendo los datos que coincidan en la nube.\n\nNo elimina registros que existan solo en Supabase. Para un espejo exacto, primero limpia la nube y después ejecuta esta acción.\n\n¿Estás seguro de que quieres continuar?'
-    );
-    if (!confirmed) return;
-
+  const executeUploadFullToCloud = async () => {
     setIsBusyBackup(true);
     setBackupAction('uploadFull');
     setBackupMessage('Subiendo base local completa a Supabase, por favor espera...');
     try {
       const result = await invoke<SyncUploadResult>('subir_base_local_completa_a_nube');
+      await loadStatus();
       const tableSummary = Object.entries(result.porTabla)
         .map(([table, count]) => `${table}: ${count}`)
         .join(', ');
@@ -227,15 +291,25 @@ export function SincronizacionConfigView() {
           ? `Base local subida correctamente. ${result.totalRegistros} registros enviados (${tableSummary}). No se purgaron registros existentes solo en Supabase.`
           : 'No se encontraron registros locales para subir.'
       );
-      window.alert('Base local subida a Supabase correctamente.');
+      showFeedback('Base local subida a Supabase correctamente.');
     } catch (error) {
       const message = `Error al subir base local completa: ${String(error)}`;
       setBackupMessage(message);
-      window.alert(message);
+      showFeedback(message, 'error');
     } finally {
       setIsBusyBackup(false);
       setBackupAction('');
     }
+  };
+
+  const handleUploadFullToCloud = () => {
+    setPendingConfirm({
+      title: 'Subir base local completa',
+      message: 'Esto tomará la base local como fuente principal y subirá sus registros a Supabase. No elimina registros que existan solo en la nube.',
+      confirmText: 'Subir local',
+      confirmColor: 'error',
+      onConfirm: executeUploadFullToCloud,
+    });
   };
 
   const actionCardSx = {
@@ -243,7 +317,7 @@ export function SincronizacionConfigView() {
     justifyContent: 'flex-start',
     textAlign: 'left',
     p: 2,
-    borderRadius: 2,
+    borderRadius: '12px',
     borderColor: 'divider',
     bgcolor: isDark ? 'background.default' : '#f8f9fa',
     color: 'text.primary',
@@ -254,33 +328,30 @@ export function SincronizacionConfigView() {
   };
 
   return (
-    <Box sx={{ maxWidth: 900, mx: 'auto', mb: 3 }}>
-      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', mb: 3, gap: 2 }}>
-        <Box>
-          <Typography variant="h6" sx={{ fontWeight: 700 }}>
-            Sincronización y respaldos
-          </Typography>
-          <Typography variant="body2" color="text.secondary">
-            Administra la conexión a Supabase y tus copias locales.
-          </Typography>
+    <Box sx={{ width: '100%', mb: 3 }}>
+      <Box sx={configSectionHeaderSx}>
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
+          <Box sx={configIconBadgeSx}>
+            <CloudDoneIcon fontSize="small" />
+          </Box>
+          <Box>
+            <Typography variant="h6" sx={{ fontWeight: 800 }}>
+              Sincronización y respaldos
+            </Typography>
+            <Typography variant="body2" color="text.secondary">
+              Administra la conexión a Supabase y tus copias locales.
+            </Typography>
+          </Box>
         </Box>
       </Box>
 
       <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', lg: '7fr 5fr' }, gap: 3 }}>
-        <Card elevation={0} sx={{ border: '1px solid', borderColor: 'divider', borderRadius: 2 }}>
-          <CardContent sx={{ p: 4 }}>
+        <Card elevation={0} sx={configPanelSx}>
+          <CardContent sx={{ p: 0 }}>
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mb: 4 }}>
               <Box
                 sx={{
-                  width: 50,
-                  height: 50,
-                  borderRadius: '50%',
-                  bgcolor: 'primary.main',
-                  color: 'primary.contrastText',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  opacity: 0.9,
+                  ...configIconBadgeSx,
                 }}
               >
                 <CloudDoneIcon />
@@ -293,7 +364,25 @@ export function SincronizacionConfigView() {
               </Box>
             </Box>
 
-            {isConnected ? (
+            {checkingStatus ? (
+              <Box
+                sx={{
+                  textAlign: 'center',
+                  py: 5,
+                  px: 3,
+                  borderRadius: 3,
+                  border: '1px solid',
+                  borderColor: 'divider',
+                  bgcolor: isDark ? 'rgba(255,255,255,0.03)' : 'grey.50',
+                }}
+              >
+                <CircularProgress size={34} sx={{ mb: 2 }} />
+                <Typography sx={{ fontWeight: 700 }}>Verificando conexión...</Typography>
+                <Typography variant="body2" color="text.secondary">
+                  Consultando la configuración local de Supabase.
+                </Typography>
+              </Box>
+            ) : isConnected ? (
               <Box
                 sx={{
                   textAlign: 'center',
@@ -353,6 +442,43 @@ export function SincronizacionConfigView() {
                   {currentUrl || 'Conectado'}
                 </Typography>
 
+                <Box sx={{ mb: 3 }}>
+                  <Chip
+                    size="small"
+                    color={(syncStatus?.pendientes ?? 0) > 0 ? 'warning' : 'success'}
+                    label={(syncStatus?.pendientes ?? 0) > 0
+                      ? `${syncStatus?.pendientes ?? 0} pendientes por subir`
+                      : 'Sin pendientes locales'}
+                    sx={{ borderRadius: '8px', fontWeight: 800, mb: (syncStatus?.tablasPendientes?.length ?? 0) > 0 ? 1 : 0 }}
+                  />
+                  {(syncStatus?.tablasPendientes?.length ?? 0) > 0 && (
+                    <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.75, justifyContent: 'center' }}>
+                      {syncStatus?.tablasPendientes?.slice(0, 8).map((item) => (
+                        <Chip
+                          key={item.tabla}
+                          size="small"
+                          variant="outlined"
+                          label={`${item.tabla}: ${item.pendientes}`}
+                          sx={{ borderRadius: '8px', fontFamily: 'monospace', fontSize: '0.7rem' }}
+                        />
+                      ))}
+                    </Box>
+                  )}
+                  {syncStatus?.ultimoError && (
+                    <Alert severity="warning" sx={{ mt: 2, textAlign: 'left' }}>
+                      <Typography variant="caption" sx={{ display: 'block', fontWeight: 800 }}>
+                        Último error de sincronización: {formatSyncDate(syncStatus.ultimoErrorAt)}
+                      </Typography>
+                      <Typography variant="caption" sx={{ display: 'block', wordBreak: 'break-word' }}>
+                        {syncStatus.ultimoError}
+                      </Typography>
+                    </Alert>
+                  )}
+                  <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1.5 }}>
+                    Último intento: {formatSyncDate(syncStatus?.ultimoIntentoAt)} · Último éxito: {formatSyncDate(syncStatus?.ultimoExitoAt)}
+                  </Typography>
+                </Box>
+
                 <Box>
                   <Button
                     color="error"
@@ -361,7 +487,7 @@ export function SincronizacionConfigView() {
                     startIcon={isBusy ? <CircularProgress size={16} /> : <PowerSettingsNewIcon />}
                     onClick={handleDisconnect}
                     disabled={isBusy}
-                    sx={{ px: 3, borderRadius: 999 }}
+                    sx={configActionButtonSx}
                   >
                     Desconectar
                   </Button>
@@ -405,7 +531,7 @@ export function SincronizacionConfigView() {
                   disabled={isBusy}
                   endIcon={isBusy ? <CircularProgress size={18} color="inherit" /> : <ArrowForwardIcon />}
                   disableElevation
-                  sx={{ py: 1.4, borderRadius: 999, fontWeight: 700 }}
+                  sx={{ ...configActionButtonSx, py: 1.4 }}
                 >
                   {isBusy ? 'Conectando...' : 'Conectar servicio'}
                 </Button>
@@ -414,19 +540,13 @@ export function SincronizacionConfigView() {
           </CardContent>
         </Card>
 
-        <Card elevation={0} sx={{ border: '1px solid', borderColor: 'divider', borderRadius: 2 }}>
-          <CardContent sx={{ p: 4 }}>
+        <Card elevation={0} sx={configPanelSx}>
+          <CardContent sx={{ p: 0 }}>
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mb: 4 }}>
               <Box
                 sx={{
-                  width: 50,
-                  height: 50,
-                  borderRadius: '50%',
-                  bgcolor: 'warning.light',
-                  color: 'warning.contrastText',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
+                  ...configIconBadgeSx,
+                  color: 'warning.main',
                 }}
               >
                 <StorageIcon />
@@ -475,7 +595,7 @@ export function SincronizacionConfigView() {
                 </Box>
               </Button>
 
-              {isConnected && (
+              {!checkingStatus && isConnected && (
                 <>
                   <Divider sx={{ my: 0.5 }} />
                   <Button
@@ -518,7 +638,7 @@ export function SincronizacionConfigView() {
                         onClick={handleRestoreFromCloud}
                         disabled={isBusyBackup}
                         disableElevation
-                        sx={{ borderRadius: 999, fontWeight: 700 }}
+                        sx={configActionButtonSx}
                       >
                         {backupAction === 'restore' ? 'Restaurando nube...' : 'Restaurar nube'}
                       </Button>
@@ -529,7 +649,7 @@ export function SincronizacionConfigView() {
                         startIcon={backupAction === 'uploadFull' ? <CircularProgress size={16} color="inherit" /> : <CloudUploadSyncIcon />}
                         onClick={handleUploadFullToCloud}
                         disabled={isBusyBackup}
-                        sx={{ borderRadius: 999, fontWeight: 700 }}
+                        sx={configActionButtonSx}
                       >
                         {backupAction === 'uploadFull' ? 'Subiendo local...' : 'Subir local a nube'}
                       </Button>
@@ -547,6 +667,22 @@ export function SincronizacionConfigView() {
           </CardContent>
         </Card>
       </Box>
+      <ConfirmActionDialog
+        open={Boolean(pendingConfirm)}
+        title={pendingConfirm?.title ?? ''}
+        message={pendingConfirm?.message ?? ''}
+        confirmText={pendingConfirm?.confirmText ?? 'Continuar'}
+        confirmColor={pendingConfirm?.confirmColor ?? 'primary'}
+        loading={isBusy || isBusyBackup}
+        onCancel={() => setPendingConfirm(null)}
+        onConfirm={async () => {
+          if (!pendingConfirm) return;
+          const action = pendingConfirm.onConfirm;
+          setPendingConfirm(null);
+          await action();
+        }}
+      />
+      <FeedbackSnackbar message={feedbackMessage} severity={feedbackSeverity} onClose={closeFeedback} />
     </Box>
   );
 }

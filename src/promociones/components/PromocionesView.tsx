@@ -29,14 +29,19 @@ import {
 } from '@mui/material';
 import {
   Add as AddIcon,
-  CalendarMonth as CalendarIcon,
   Delete as DeleteIcon,
-  LocalOffer as PromoIcon,
   Save as SaveIcon,
-  Storefront as StorefrontIcon,
 } from '@mui/icons-material';
 import { useAuth } from '../../auth/context/AuthContext';
 import { useCatalogos } from '../../catalogos/context/CatalogosContext';
+import { AsyncButton } from '../../shared/components/AsyncButton';
+import { ConfirmActionDialog } from '../../shared/components/ConfirmActionDialog';
+import { FeedbackSnackbar } from '../../shared/components/FeedbackSnackbar';
+import { TablePager } from '../../shared/components/TablePager';
+import { useDialogHotkeys } from '../../shared/hooks/useDialogHotkeys';
+import { useFeedback } from '../../shared/hooks/useFeedback';
+import { useLocalPagination } from '../../shared/hooks/useLocalPagination';
+import { dialogActionsSx, dialogContentSx } from '../../shared/ui/patterns';
 
 type TipoDescuento = 'PORCENTAJE' | 'MONTO_FIJO';
 type TipoAlcance = '' | 'PRODUCTO' | 'CATEGORIA' | 'MARCA';
@@ -111,6 +116,8 @@ export function PromocionesView() {
   const [sucursalesError, setSucursalesError] = useState('');
   const [sucursalIds, setSucursalIds] = useState<string[]>([]);
   const [deletingId, setDeletingId] = useState('');
+  const [deleteTarget, setDeleteTarget] = useState<Promocion | null>(null);
+  const { feedbackMessage, feedbackSeverity, showFeedback, closeFeedback } = useFeedback();
 
   const isSuperAdmin = user?.role === 'SUPERADMIN';
   const sucursalesDisponibles = isSuperAdmin
@@ -350,21 +357,25 @@ export function PromocionesView() {
       });
       setOpen(false);
       await fetchData();
+      showFeedback('Promoción guardada correctamente.');
     } catch (err) {
       setError(String(err));
+      showFeedback(String(err), 'error');
     } finally {
       setSaving(false);
     }
   };
 
   const handleDelete = async (id: string) => {
-    if (!confirm('¿Eliminar esta promoción?')) return;
     setDeletingId(id);
     try {
       await invoke('eliminar_promocion', { id });
       await fetchData();
+      setDeleteTarget(null);
+      showFeedback('Promoción eliminada correctamente.');
     } catch (err) {
       setError(String(err));
+      showFeedback(String(err), 'error');
     } finally {
       setDeletingId('');
     }
@@ -393,11 +404,19 @@ export function PromocionesView() {
     return { label: 'Vigente', color: 'success' as const };
   };
 
-  const promocionesVigentes = promociones.filter((promo) => getEstadoPromo(promo).label === 'Vigente').length;
-  const promocionesProgramadas = promociones.filter((promo) => getEstadoPromo(promo).label === 'Programada').length;
+  const promocionesPager = useLocalPagination(promociones);
+  const saveDisabled = saving || !nombre || !valor || !fechaInicio || !fechaFin || !tipoAlcance || (isSuperAdmin && sucursalIds.length === 0);
+
+  useDialogHotkeys({
+    open,
+    disabled: saveDisabled,
+    cancelDisabled: saving,
+    onConfirm: handleSave,
+    onCancel: () => setOpen(false),
+  });
 
   return (
-    <Box sx={{ maxWidth: 1280, mx: 'auto', mt: 2 }}>
+    <Box sx={{ width: '100%', mt: 2 }}>
       <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: { xs: 'flex-start', md: 'center' }, mb: 3, gap: 2, flexWrap: 'wrap' }}>
         <Box>
           <Typography variant="h5" sx={{ fontWeight: 700 }}>
@@ -414,38 +433,6 @@ export function PromocionesView() {
 
       {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
 
-      <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', md: 'repeat(3, minmax(0, 1fr))' }, gap: 1.5, mb: 2 }}>
-        {[
-          { label: 'Total', value: promociones.length, icon: <PromoIcon fontSize="small" />, color: 'primary.main' },
-          { label: 'Vigentes', value: promocionesVigentes, icon: <CalendarIcon fontSize="small" />, color: 'success.main' },
-          { label: 'Programadas', value: promocionesProgramadas, icon: <StorefrontIcon fontSize="small" />, color: 'info.main' },
-        ].map((item) => (
-          <Paper
-            key={item.label}
-            elevation={0}
-            sx={{
-              p: 1.75,
-              borderRadius: 2,
-              border: '1px solid',
-              borderColor: 'divider',
-              display: 'flex',
-              alignItems: 'center',
-              gap: 1.5,
-            }}
-          >
-            <Box sx={{ color: item.color, display: 'flex' }}>{item.icon}</Box>
-            <Box>
-              <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, textTransform: 'uppercase' }}>
-                {item.label}
-              </Typography>
-              <Typography variant="h6" sx={{ fontWeight: 800, lineHeight: 1 }}>
-                {item.value}
-              </Typography>
-            </Box>
-          </Paper>
-        ))}
-      </Box>
-
       <Paper elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider', overflow: 'hidden' }}>
         <TableContainer>
           <Table>
@@ -455,20 +442,18 @@ export function PromocionesView() {
                 <TableCell sx={{ fontWeight: 600 }}>Alcance</TableCell>
                 <TableCell sx={{ fontWeight: 600 }}>Descuento</TableCell>
                 <TableCell sx={{ fontWeight: 600 }}>Vigencia</TableCell>
+                <TableCell sx={{ fontWeight: 600 }}>Estado</TableCell>
                 <TableCell sx={{ fontWeight: 600 }}>Sucursales</TableCell>
-                <TableCell align="right" sx={{ fontWeight: 600 }}>Acciones</TableCell>
+                <TableCell sx={{ fontWeight: 600 }}>Acciones</TableCell>
               </TableRow>
             </TableHead>
             <TableBody>
-              {promociones.map((promo) => {
+              {promocionesPager.paginatedRows.map((promo) => {
                 const estado = getEstadoPromo(promo);
                 return (
                 <TableRow key={promo.id} hover>
                   <TableCell sx={{ minWidth: 220 }}>
-                    <Stack spacing={0.75}>
-                      <Typography variant="body2" sx={{ fontWeight: 800 }}>{promo.nombre}</Typography>
-                      <Chip label={estado.label} size="small" color={estado.color} sx={{ width: 'fit-content', borderRadius: '6px', fontWeight: 700 }} />
-                    </Stack>
+                    <Typography variant="body2" sx={{ fontWeight: 800 }}>{promo.nombre}</Typography>
                   </TableCell>
                   <TableCell sx={{ maxWidth: 320 }}>
                     <Typography variant="body2" sx={{ fontWeight: 600 }}>
@@ -494,19 +479,22 @@ export function PromocionesView() {
                     </Stack>
                   </TableCell>
                   <TableCell>
+                    <Chip label={estado.label} size="small" color={estado.color} sx={{ borderRadius: '6px', fontWeight: 700 }} />
+                  </TableCell>
+                  <TableCell>
                     <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap' }}>
                       {promo.sucursalIds.map((id) => (
                         <Chip key={id} label={getSucursalNombre(id)} size="small" sx={{ borderRadius: '6px' }} />
                       ))}
                     </Box>
                   </TableCell>
-                  <TableCell align="right">
+                  <TableCell>
                     <Button size="small" onClick={() => handleOpen(promo)} disabled={Boolean(deletingId)}>Editar</Button>
                     <Button
                       size="small"
                       color="error"
                       startIcon={deletingId === promo.id ? <CircularProgress size={16} /> : <DeleteIcon />}
-                      onClick={() => handleDelete(promo.id)}
+                      onClick={() => setDeleteTarget(promo)}
                       disabled={Boolean(deletingId)}
                     >
                       {deletingId === promo.id ? 'Eliminando...' : 'Eliminar'}
@@ -517,7 +505,7 @@ export function PromocionesView() {
               })}
               {promociones.length === 0 && (
                 <TableRow>
-                  <TableCell colSpan={6} align="center" sx={{ py: 4, color: 'text.secondary' }}>
+                  <TableCell colSpan={7} align="center" sx={{ py: 4, color: 'text.secondary' }}>
                     No hay promociones configuradas.
                   </TableCell>
                 </TableRow>
@@ -525,6 +513,20 @@ export function PromocionesView() {
             </TableBody>
           </Table>
         </TableContainer>
+        <TablePager
+          page={promocionesPager.page}
+          pageSize={promocionesPager.pageSize}
+          totalPages={promocionesPager.totalPages}
+          totalRows={promocionesPager.totalRows}
+          fromRow={promocionesPager.fromRow}
+          toRow={promocionesPager.toRow}
+          canPreviousPage={promocionesPager.canPreviousPage}
+          canNextPage={promocionesPager.canNextPage}
+          onPreviousPage={promocionesPager.previousPage}
+          onNextPage={promocionesPager.nextPage}
+          onPageSizeChange={promocionesPager.setPageSize}
+          rowLabel="promociones"
+        />
       </Paper>
 
       <Dialog open={open} onClose={saving ? undefined : () => setOpen(false)} maxWidth="md" fullWidth>
@@ -535,7 +537,7 @@ export function PromocionesView() {
           </Typography>
         </DialogTitle>
         <Divider />
-        <DialogContent sx={{ '&&': { pt: 3 } }}>
+        <DialogContent sx={{ ...dialogContentSx, gap: 3 }}>
           <Stack spacing={3}>
             <Box>
               <Typography variant="subtitle2" sx={{ fontWeight: 800, mb: 1.5 }}>
@@ -745,18 +747,33 @@ export function PromocionesView() {
           </Box>
           </Stack>
         </DialogContent>
-        <DialogActions sx={{ p: 3, pt: 1 }}>
+        <DialogActions sx={{ ...dialogActionsSx, p: 3, pt: 1 }}>
           <Button onClick={() => setOpen(false)} disabled={saving}>Cancelar</Button>
-          <Button
+          <AsyncButton
             variant="contained"
-            startIcon={saving ? <CircularProgress size={18} color="inherit" /> : <SaveIcon />}
+            startIcon={<SaveIcon />}
             onClick={handleSave}
-            disabled={saving || !nombre || !valor || !fechaInicio || !fechaFin || !tipoAlcance || (isSuperAdmin && sucursalIds.length === 0)}
+            disabled={saveDisabled}
+            loading={saving}
+            loadingText="Guardando..."
           >
-            {saving ? 'Guardando...' : 'Guardar'}
-          </Button>
+            Guardar
+          </AsyncButton>
         </DialogActions>
       </Dialog>
+      <ConfirmActionDialog
+        open={Boolean(deleteTarget)}
+        title="Eliminar promoción"
+        message={`¿Eliminar la promoción "${deleteTarget?.nombre ?? ''}"?`}
+        confirmText="Eliminar"
+        confirmColor="error"
+        loading={Boolean(deletingId)}
+        onCancel={() => setDeleteTarget(null)}
+        onConfirm={() => {
+          if (deleteTarget) return handleDelete(deleteTarget.id);
+        }}
+      />
+      <FeedbackSnackbar message={feedbackMessage} severity={feedbackSeverity} onClose={closeFeedback} />
     </Box>
   );
 }

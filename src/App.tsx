@@ -1,5 +1,6 @@
 import { lazy, Suspense } from "react";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+import { Box, CircularProgress, Typography } from "@mui/material";
 import { AuthProvider, useAuth } from "./auth/context/AuthContext";
 import { CatalogosProvider } from "./catalogos/context/CatalogosContext";
 import { ConfigProvider } from "./config/context/ConfigContext";
@@ -18,6 +19,10 @@ const NuevoTraspasoView = lazy(() => import("./traspasos/components/NuevoTraspas
 const InventarioView = lazy(() => import("./inventario/components/InventarioView").then((module) => ({ default: module.InventarioView })));
 const ProductosView = lazy(() => import("./productos/components/ProductosView").then((module) => ({ default: module.ProductosView })));
 const PromocionesView = lazy(() => import("./promociones/components/PromocionesView").then((module) => ({ default: module.PromocionesView })));
+const RentabilidadView = lazy(() => import("./indicadores/components/RentabilidadView").then((module) => ({ default: module.RentabilidadView })));
+const IndicadorVentasView = lazy(() => import("./indicadores/components/IndicadorVentasView").then((module) => ({ default: module.IndicadorVentasView })));
+const IndicadorInventarioView = lazy(() => import("./indicadores/components/IndicadorInventarioView").then((module) => ({ default: module.IndicadorInventarioView })));
+const IndicadorFinancieroView = lazy(() => import("./indicadores/components/IndicadorFinancieroView").then((module) => ({ default: module.IndicadorFinancieroView })));
 const MermasAjustesView = lazy(() => import("./inventario/components/MermasAjustes").then((module) => ({ default: module.MermasAjustesView })));
 const ProveedoresView = lazy(() => import("./proveedores/components/ProveedoresView").then((module) => ({ default: module.ProveedoresView })));
 const MarcasView = lazy(() => import("./catalogos/components/MarcasView").then((module) => ({ default: module.MarcasView })));
@@ -30,9 +35,12 @@ const ConfiguracionView = lazy(() => import("./config/components/ConfiguracionVi
 
 function RouteFallback() {
   return (
-    <div style={{ padding: 24, color: "var(--mui-palette-text-secondary, #667085)" }}>
-      Cargando...
-    </div>
+    <Box sx={{ minHeight: 220, display: "grid", placeItems: "center", color: "text.secondary" }}>
+      <Box sx={{ display: "flex", alignItems: "center", gap: 1.5 }}>
+        <CircularProgress size={20} />
+        <Typography variant="body2">Cargando...</Typography>
+      </Box>
+    </Box>
   );
 }
 
@@ -81,6 +89,26 @@ function Root() {
           <Route path="/promociones" element={
             <RoleGuard allowedRoles={["SUPERADMIN", "ADMIN"]}>
               <PromocionesView />
+            </RoleGuard>
+          } />
+          <Route path="/indicadores/rentabilidad" element={
+            <RoleGuard allowedRoles={["SUPERADMIN", "ADMIN"]}>
+              <RentabilidadView />
+            </RoleGuard>
+          } />
+          <Route path="/indicadores/ventas" element={
+            <RoleGuard allowedRoles={["SUPERADMIN", "ADMIN"]}>
+              <IndicadorVentasView />
+            </RoleGuard>
+          } />
+          <Route path="/indicadores/inventario" element={
+            <RoleGuard allowedRoles={["SUPERADMIN", "ADMIN"]}>
+              <IndicadorInventarioView />
+            </RoleGuard>
+          } />
+          <Route path="/indicadores/financiero" element={
+            <RoleGuard allowedRoles={["SUPERADMIN", "ADMIN"]}>
+              <IndicadorFinancieroView />
             </RoleGuard>
           } />
           <Route path="/inventario/mermas" element={

@@ -15,14 +15,16 @@ export function DashboardLayout({ children }: { children: React.ReactNode }) {
   };
 
   return (
-    <Box className="flex h-screen font-sans overflow-hidden" sx={{ bgcolor: 'background.default' }}>
+    <Box sx={{ display: 'flex', height: '100vh', overflow: 'hidden', bgcolor: 'background.default', fontFamily: (theme) => theme.typography.fontFamily }}>
       <Sidebar isOpen={sidebarOpen} onClose={closeSidebar} />
-      <div className="flex-1 flex flex-col min-w-0">
+      <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
         <Topbar onToggleSidebar={toggleSidebar} />
-        <main className="flex-1 overflow-x-hidden overflow-y-auto p-6">
-          {children}
-        </main>
-      </div>
+        <Box component="main" sx={{ flex: 1, overflowX: 'hidden', overflowY: 'auto' }}>
+          <Box sx={{ width: '100%', minHeight: '100%', p: { xs: 2, md: 3 } }}>
+            {children}
+          </Box>
+        </Box>
+      </Box>
     </Box>
   );
 }

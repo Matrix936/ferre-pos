@@ -111,6 +111,17 @@ create table if not exists public.productos (
   precio_venta numeric(12, 2) not null default 0,
   sat_clave_prod_serv varchar(8) not null default '',
   sat_clave_unidad varchar(3) not null default '',
+  precio_1 numeric(12, 2) not null default 0,
+  precio_2 numeric(12, 2) not null default 0,
+  precio_3 numeric(12, 2) not null default 0,
+  precio_4 numeric(12, 2) not null default 0,
+  mayoreo_apartir numeric(12, 3) not null default 0,
+  a_granel boolean not null default false,
+  no_en_catalogo boolean not null default false,
+  ventas_negativas boolean not null default false,
+  caducidad date null,
+  fotos text not null default '',
+  descripcion_catalogo text not null default '',
   eliminado boolean not null default false,
   sincronizado boolean not null default true,
   updated_at timestamptz not null default now()
@@ -220,6 +231,10 @@ create table if not exists public.ventas (
   efectivo_recibido numeric(12, 2) null,
   cambio_entregado numeric(12, 2) null,
   cliente_id text null references public.clientes(id) on update cascade on delete restrict,
+  cliente_rapido_nombre text null,
+  cliente_rapido_telefono text null,
+  cliente_rapido_domicilio text null,
+  requiere_factura boolean not null default false,
   usuario_autorizo_cancelacion_id text null references public.usuarios(id) on update cascade on delete restrict,
   motivo_cancelacion text null,
   fecha_cancelacion timestamptz null,
@@ -239,6 +254,9 @@ create table if not exists public.detalle_ventas (
   cantidad numeric(12, 3) not null default 0,
   precio_venta_pactado numeric(12, 2) not null default 0,
   costo_unitario_pactado numeric(12, 4) not null default 0,
+  tipo_precio_vendido text not null default 'MOSTRADOR',
+  precio_original numeric(12, 2) not null default 0,
+  descuento_aplicado numeric(12, 2) not null default 0,
   sincronizado boolean not null default true,
   updated_at timestamptz not null default now(),
   unique (id, sucursal_id)
@@ -375,6 +393,8 @@ create index if not exists idx_productos_eliminado on public.productos(eliminado
 create index if not exists idx_productos_descripcion on public.productos(descripcion);
 create index if not exists idx_productos_codigo_barras on public.productos(codigo_barras);
 create index if not exists idx_productos_codigo_proveedor on public.productos(codigo_proveedor);
+create index if not exists idx_productos_mayoreo on public.productos(mayoreo_apartir) where mayoreo_apartir > 0;
+create index if not exists idx_productos_caducidad on public.productos(caducidad) where caducidad is not null;
 create index if not exists idx_inventario_sucursal_id on public.inventario_sucursal(sucursal_id);
 create index if not exists idx_inventario_sucursal_eliminado on public.inventario_sucursal(eliminado);
 create index if not exists idx_promociones_producto on public.promociones(producto_id);

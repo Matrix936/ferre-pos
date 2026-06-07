@@ -1,6 +1,8 @@
-import { Alert, Button, Snackbar, Stack } from '@mui/material';
+import { Button, Stack } from '@mui/material';
 import { ContentCopy, FileDownload, PictureAsPdf } from '@mui/icons-material';
 import { useState } from 'react';
+import { FeedbackSnackbar } from './FeedbackSnackbar';
+import { useFeedback } from '../hooks/useFeedback';
 
 type ExportColumn<T> = {
   key: keyof T;
@@ -27,8 +29,7 @@ function toPlainRows<T extends Record<string, unknown>>(rows: T[], columns: Expo
 export function TableActions<T extends Record<string, unknown>>({ filename, rows, columns }: TableActionsProps<T>) {
   const [exportingExcel, setExportingExcel] = useState(false);
   const [exportingPdf, setExportingPdf] = useState(false);
-  const [copiedToast, setCopiedToast] = useState(false);
-  const [errorToast, setErrorToast] = useState('');
+  const { feedbackMessage, feedbackSeverity, showFeedback, closeFeedback } = useFeedback();
 
   const handleCopy = async () => {
     const header = columns.map((column) => column.label).join('\t');
@@ -37,9 +38,9 @@ export function TableActions<T extends Record<string, unknown>>({ filename, rows
       .join('\n');
     try {
       await navigator.clipboard.writeText(`${header}\n${body}`);
-      setCopiedToast(true);
+      showFeedback('Tabla copiada correctamente.');
     } catch {
-      setErrorToast('No se pudo copiar la tabla al portapapeles.');
+      showFeedback('No se pudo copiar la tabla al portapapeles.', 'error');
     }
   };
 
@@ -84,7 +85,7 @@ export function TableActions<T extends Record<string, unknown>>({ filename, rows
         XLSX.writeFile(workbook, `${filename}.xlsx`);
       }
     } catch {
-      setErrorToast('No se pudo exportar a Excel.');
+      showFeedback('No se pudo exportar a Excel.', 'error');
     } finally {
       setExportingExcel(false);
     }
@@ -110,7 +111,7 @@ export function TableActions<T extends Record<string, unknown>>({ filename, rows
         doc.save(`${filename}.pdf`);
       }
     } catch {
-      setErrorToast('No se pudo exportar a PDF.');
+      showFeedback('No se pudo exportar a PDF.', 'error');
     } finally {
       setExportingPdf(false);
     }
@@ -129,12 +130,7 @@ export function TableActions<T extends Record<string, unknown>>({ filename, rows
           {exportingPdf ? 'Exportando...' : 'Exportar PDF'}
         </Button>
       </Stack>
-      <Snackbar open={copiedToast} autoHideDuration={2000} onClose={() => setCopiedToast(false)}>
-        <Alert severity="success" variant="filled">Tabla copiada correctamente.</Alert>
-      </Snackbar>
-      <Snackbar open={Boolean(errorToast)} autoHideDuration={2500} onClose={() => setErrorToast('')}>
-        <Alert severity="error" variant="filled">{errorToast}</Alert>
-      </Snackbar>
+      <FeedbackSnackbar message={feedbackMessage} severity={feedbackSeverity} onClose={closeFeedback} />
     </>
   );
 }

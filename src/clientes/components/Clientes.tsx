@@ -24,6 +24,14 @@ import {
 import { Add as AddIcon, Delete as DeleteIcon, Edit as EditIcon, FactCheck as FiscalIcon, Payments as AbonoIcon, Save as SaveIcon } from '@mui/icons-material';
 import { useAuth } from '../../auth/context/AuthContext';
 import { Cliente } from '../../inventario/types';
+import { AsyncButton } from '../../shared/components/AsyncButton';
+import { ConfirmActionDialog } from '../../shared/components/ConfirmActionDialog';
+import { FeedbackSnackbar } from '../../shared/components/FeedbackSnackbar';
+import { TablePager } from '../../shared/components/TablePager';
+import { useDialogHotkeys } from '../../shared/hooks/useDialogHotkeys';
+import { useFeedback } from '../../shared/hooks/useFeedback';
+import { useLocalPagination } from '../../shared/hooks/useLocalPagination';
+import { dialogActionsSx, dialogContentSx } from '../../shared/ui/patterns';
 
 interface ClienteDatosFiscales {
   clienteId: string;
@@ -70,6 +78,8 @@ export function ClientesView() {
   const [savingFiscal, setSavingFiscal] = useState(false);
   const [savingAbono, setSavingAbono] = useState(false);
   const [loadingFiscalId, setLoadingFiscalId] = useState('');
+  const [deleteTarget, setDeleteTarget] = useState<Cliente | null>(null);
+  const { feedbackMessage, feedbackSeverity, showFeedback, closeFeedback } = useFeedback();
   const montoAbonoValido =
     MONEY_PATTERN.test(montoAbono.trim()) &&
     Number(montoAbono) > 0 &&
@@ -120,15 +130,15 @@ export function ClientesView() {
   const handleSaveCliente = async () => {
     if (savingCliente) return;
     if (!nombre.trim()) {
-      alert('Captura el nombre del cliente.');
+      showFeedback('Captura el nombre del cliente.', 'warning');
       return;
     }
     if (!limiteCreditoValido) {
-      alert('Captura un límite de crédito válido, sin negativos y máximo 2 decimales.');
+      showFeedback('Captura un límite de crédito válido, sin negativos y máximo 2 decimales.', 'warning');
       return;
     }
     if (limiteCreditoMenorASaldo) {
-      alert(`El límite de crédito no puede ser menor al saldo deudor actual ($${saldoEdicion.toFixed(2)}).`);
+      showFeedback(`El límite de crédito no puede ser menor al saldo deudor actual ($${saldoEdicion.toFixed(2)}).`, 'warning');
       return;
     }
     const cliente: Cliente = {
@@ -148,21 +158,23 @@ export function ClientesView() {
       }
       setOpenCliente(false);
       fetchClientes();
+      showFeedback(editMode ? 'Cliente actualizado correctamente.' : 'Cliente creado correctamente.');
     } catch (error) {
-      alert(`Error al guardar cliente: ${error}`);
+      showFeedback(`Error al guardar cliente: ${error}`, 'error');
     } finally {
       setSavingCliente(false);
     }
   };
 
   const handleDeleteCliente = async (id: string) => {
-    if (!confirm('¿Eliminar cliente?')) return;
     setDeletingClienteId(id);
     try {
       await invoke('delete_cliente', { id });
       fetchClientes();
+      setDeleteTarget(null);
+      showFeedback('Cliente eliminado correctamente.');
     } catch (error) {
-      alert(`Error al eliminar cliente: ${error}`);
+      showFeedback(`Error al eliminar cliente: ${error}`, 'error');
     } finally {
       setDeletingClienteId('');
     }
@@ -193,7 +205,7 @@ export function ClientesView() {
         setCodigoPostalFiscal(data.codigoPostal);
       }
     } catch (error) {
-      alert(`Error al cargar datos fiscales: ${error}`);
+      showFeedback(`Error al cargar datos fiscales: ${error}`, 'error');
     } finally {
       setLoadingFiscalId('');
     }
@@ -214,8 +226,9 @@ export function ClientesView() {
       });
       setOpenFiscal(false);
       setClienteFiscal(null);
+      showFeedback('Datos fiscales guardados correctamente.');
     } catch (error) {
-      alert(`Error al guardar datos fiscales: ${error}`);
+      showFeedback(`Error al guardar datos fiscales: ${error}`, 'error');
     } finally {
       setSavingFiscal(false);
     }
@@ -224,7 +237,7 @@ export function ClientesView() {
   const handleRegistrarAbono = async () => {
     if (!clienteAbono || !user?.id) return;
     if (!montoAbonoValido) {
-      alert('Captura un abono válido, mayor a cero y no superior al saldo deudor.');
+      showFeedback('Captura un abono válido, mayor a cero y no superior al saldo deudor.', 'warning');
       return;
     }
 
@@ -242,8 +255,9 @@ export function ClientesView() {
       setOpenAbono(false);
       setClienteAbono(null);
       fetchClientes();
+      showFeedback('Abono registrado correctamente.');
     } catch (error) {
-      alert(`Error al registrar abono: ${error}`);
+      showFeedback(`Error al registrar abono: ${error}`, 'error');
     } finally {
       setSavingAbono(false);
     }
@@ -258,9 +272,37 @@ export function ClientesView() {
       cliente.direccion.toLowerCase().includes(q)
     );
   });
+  const clientesPager = useLocalPagination(filtered);
+
+  const clienteSaveDisabled = savingCliente || clienteFormInvalido;
+  const abonoSaveDisabled = savingAbono || !montoAbonoValido;
+  const fiscalSaveDisabled =
+    savingFiscal || rfc.trim().length < 12 || !razonSocial.trim() || !regimenFiscal || codigoPostalFiscal.trim().length !== 5;
+
+  useDialogHotkeys({
+    open: openCliente,
+    disabled: clienteSaveDisabled,
+    cancelDisabled: savingCliente,
+    onConfirm: handleSaveCliente,
+    onCancel: () => setOpenCliente(false),
+  });
+  useDialogHotkeys({
+    open: openAbono,
+    disabled: abonoSaveDisabled,
+    cancelDisabled: savingAbono,
+    onConfirm: handleRegistrarAbono,
+    onCancel: () => setOpenAbono(false),
+  });
+  useDialogHotkeys({
+    open: openFiscal,
+    disabled: fiscalSaveDisabled,
+    cancelDisabled: savingFiscal,
+    onConfirm: handleGuardarFiscal,
+    onCancel: () => setOpenFiscal(false),
+  });
 
   return (
-    <Box sx={{ maxWidth: 1280, mx: 'auto', mt: 2 }}>
+    <Box sx={{ width: '100%', mt: 2 }}>
       <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3, gap: 2, flexWrap: 'wrap' }}>
         <Typography variant="h5" sx={{ fontWeight: 700 }}>Clientes y Crédito</Typography>
         <Button variant="contained" startIcon={<AddIcon />} onClick={() => handleOpenCliente()} disableElevation>
@@ -286,17 +328,17 @@ export function ClientesView() {
                 <TableCell sx={{ fontWeight: 600 }}>Teléfono</TableCell>
                 <TableCell sx={{ fontWeight: 600 }}>Límite Crédito</TableCell>
                 <TableCell sx={{ fontWeight: 600 }}>Saldo Deudor</TableCell>
-                <TableCell align="right" sx={{ fontWeight: 600 }}>Acciones</TableCell>
+                <TableCell sx={{ fontWeight: 600 }}>Acciones</TableCell>
               </TableRow>
             </TableHead>
             <TableBody>
-              {filtered.map((cliente) => (
+              {clientesPager.paginatedRows.map((cliente) => (
                 <TableRow key={cliente.id} hover>
                   <TableCell>{cliente.nombre}</TableCell>
                   <TableCell>{cliente.telefono || '-'}</TableCell>
                   <TableCell>${cliente.limiteCredito.toFixed(2)}</TableCell>
                   <TableCell>${cliente.saldoDeudor.toFixed(2)}</TableCell>
-                  <TableCell align="right">
+                  <TableCell>
                     <IconButton color="primary" size="small" sx={{ mr: 1 }} onClick={() => handleOpenCliente(cliente)} disabled={Boolean(deletingClienteId)}>
                       <EditIcon fontSize="small" />
                     </IconButton>
@@ -306,7 +348,7 @@ export function ClientesView() {
                     <IconButton color="info" size="small" sx={{ mr: 1 }} onClick={() => handleOpenFiscal(cliente)} disabled={Boolean(deletingClienteId) || Boolean(loadingFiscalId)}>
                       {loadingFiscalId === cliente.id ? <CircularProgress size={18} /> : <FiscalIcon fontSize="small" />}
                     </IconButton>
-                    <IconButton color="error" size="small" onClick={() => handleDeleteCliente(cliente.id)} disabled={Boolean(deletingClienteId)}>
+                    <IconButton color="error" size="small" onClick={() => setDeleteTarget(cliente)} disabled={Boolean(deletingClienteId)}>
                       {deletingClienteId === cliente.id ? <CircularProgress size={18} /> : <DeleteIcon fontSize="small" />}
                     </IconButton>
                   </TableCell>
@@ -322,12 +364,26 @@ export function ClientesView() {
             </TableBody>
           </Table>
         </TableContainer>
+        <TablePager
+          page={clientesPager.page}
+          pageSize={clientesPager.pageSize}
+          totalPages={clientesPager.totalPages}
+          totalRows={clientesPager.totalRows}
+          fromRow={clientesPager.fromRow}
+          toRow={clientesPager.toRow}
+          canPreviousPage={clientesPager.canPreviousPage}
+          canNextPage={clientesPager.canNextPage}
+          onPreviousPage={clientesPager.previousPage}
+          onNextPage={clientesPager.nextPage}
+          onPageSizeChange={clientesPager.setPageSize}
+          rowLabel="clientes"
+        />
       </Paper>
 
       <Dialog open={openCliente} onClose={savingCliente ? undefined : () => setOpenCliente(false)} maxWidth="sm" fullWidth>
         <DialogTitle>{editMode ? 'Editar cliente' : 'Nuevo cliente'}</DialogTitle>
         <Divider />
-        <DialogContent sx={{ pt: 3 }}>
+        <DialogContent sx={{ ...dialogContentSx, gap: 2.5 }}>
           <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2.5 }}>
             <TextField label="Nombre" value={nombre} onChange={(e) => setNombre(e.target.value)} required />
             <TextField label="Teléfono" value={telefono} onChange={(e) => setTelefono(e.target.value)} />
@@ -349,23 +405,25 @@ export function ClientesView() {
             />
           </Box>
         </DialogContent>
-        <DialogActions sx={{ p: 3, pt: 1 }}>
+        <DialogActions sx={{ ...dialogActionsSx, p: 3, pt: 1 }}>
           <Button onClick={() => setOpenCliente(false)} disabled={savingCliente}>Cancelar</Button>
-          <Button
+          <AsyncButton
             onClick={handleSaveCliente}
             variant="contained"
-            startIcon={savingCliente ? <CircularProgress size={18} color="inherit" /> : <SaveIcon />}
+            startIcon={<SaveIcon />}
             disableElevation
-            disabled={savingCliente || clienteFormInvalido}
+            disabled={clienteSaveDisabled}
+            loading={savingCliente}
+            loadingText="Guardando..."
           >
-            {savingCliente ? 'Guardando...' : 'Guardar'}
-          </Button>
+            Guardar
+          </AsyncButton>
         </DialogActions>
       </Dialog>
 
       <Dialog open={openAbono} onClose={savingAbono ? undefined : () => setOpenAbono(false)} maxWidth="xs" fullWidth>
         <DialogTitle>Registrar abono</DialogTitle>
-        <DialogContent sx={{ pt: 2 }}>
+        <DialogContent sx={dialogContentSx}>
           <Typography variant="body2" sx={{ mb: 1.5 }}>
             Cliente: <strong>{clienteAbono?.nombre}</strong>
           </Typography>
@@ -387,23 +445,24 @@ export function ClientesView() {
             slotProps={{ htmlInput: { min: 0.01, step: '0.01', inputMode: 'decimal' } }}
           />
         </DialogContent>
-        <DialogActions sx={{ p: 2 }}>
+        <DialogActions sx={dialogActionsSx}>
           <Button onClick={() => setOpenAbono(false)} disabled={savingAbono}>Cancelar</Button>
-          <Button
+          <AsyncButton
             variant="contained"
             onClick={handleRegistrarAbono}
-            startIcon={savingAbono ? <CircularProgress size={18} color="inherit" /> : undefined}
-            disabled={savingAbono || !montoAbonoValido}
+            disabled={abonoSaveDisabled}
+            loading={savingAbono}
+            loadingText="Registrando..."
           >
-            {savingAbono ? 'Registrando...' : 'Registrar'}
-          </Button>
+            Registrar
+          </AsyncButton>
         </DialogActions>
       </Dialog>
 
       <Dialog open={openFiscal} onClose={savingFiscal ? undefined : () => setOpenFiscal(false)} maxWidth="sm" fullWidth>
         <DialogTitle>Datos Fiscales (SAT)</DialogTitle>
         <Divider />
-        <DialogContent sx={{ pt: 3 }}>
+        <DialogContent sx={dialogContentSx}>
           <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
             Cliente: <strong>{clienteFiscal?.nombre}</strong>
           </Typography>
@@ -444,19 +503,34 @@ export function ClientesView() {
             />
           </Box>
         </DialogContent>
-        <DialogActions sx={{ p: 3, pt: 1 }}>
+        <DialogActions sx={{ ...dialogActionsSx, p: 3, pt: 1 }}>
           <Button onClick={() => setOpenFiscal(false)} disabled={savingFiscal}>Cancelar</Button>
-          <Button
+          <AsyncButton
             variant="contained"
-            startIcon={savingFiscal ? <CircularProgress size={18} color="inherit" /> : <SaveIcon />}
+            startIcon={<SaveIcon />}
             onClick={handleGuardarFiscal}
-            disabled={savingFiscal || rfc.trim().length < 12 || !razonSocial.trim() || !regimenFiscal || codigoPostalFiscal.trim().length !== 5}
+            disabled={fiscalSaveDisabled}
+            loading={savingFiscal}
+            loadingText="Guardando..."
             disableElevation
           >
-            {savingFiscal ? 'Guardando...' : 'Guardar datos SAT'}
-          </Button>
+            Guardar datos SAT
+          </AsyncButton>
         </DialogActions>
       </Dialog>
+      <ConfirmActionDialog
+        open={Boolean(deleteTarget)}
+        title="Eliminar cliente"
+        message={`¿Eliminar el cliente "${deleteTarget?.nombre ?? ''}"?`}
+        confirmText="Eliminar"
+        confirmColor="error"
+        loading={Boolean(deletingClienteId)}
+        onCancel={() => setDeleteTarget(null)}
+        onConfirm={() => {
+          if (deleteTarget) return handleDeleteCliente(deleteTarget.id);
+        }}
+      />
+      <FeedbackSnackbar message={feedbackMessage} severity={feedbackSeverity} onClose={closeFeedback} />
     </Box>
   );
 }

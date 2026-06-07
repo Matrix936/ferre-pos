@@ -1,14 +1,12 @@
 import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import {
-  Alert,
   Autocomplete,
   Box,
   Button,
   CircularProgress,
   MenuItem,
   Paper,
-  Snackbar,
   TextField,
   Typography,
 } from '@mui/material';
@@ -16,7 +14,9 @@ import { BuildCircle as AjusteIcon } from '@mui/icons-material';
 import { useAuth } from '../../auth/context/AuthContext';
 import { useCatalogos } from '../../catalogos/context/CatalogosContext';
 import { ProductoInventario } from '../types';
+import { FeedbackSnackbar } from '../../shared/components/FeedbackSnackbar';
 import { useDebouncedValue } from '../../shared/hooks/useDebouncedValue';
+import { useFeedback } from '../../shared/hooks/useFeedback';
 
 const motivosSugeridos = [
   'Defecto de fábrica',
@@ -39,8 +39,8 @@ export function MermasAjustesView() {
   const [tipoMovimiento, setTipoMovimiento] = useState<TipoMovimiento>('MERMA');
   const [motivo, setMotivo] = useState(motivosSugeridos[0]);
   const [cantidad, setCantidad] = useState('');
-  const [snackbar, setSnackbar] = useState('');
   const [loading, setLoading] = useState(false);
+  const { feedbackMessage, feedbackSeverity, showFeedback, closeFeedback } = useFeedback();
 
   const isSuperAdmin = user?.role === 'SUPERADMIN';
   const sucursalTrabajo = isSuperAdmin ? selectedSucursalId : user?.sucursalId ?? '';
@@ -91,16 +91,16 @@ export function MermasAjustesView() {
 
   const handleRegistrar = async () => {
     if (!user?.id || !sucursalTrabajo || !productoSeleccionado?.id) {
-      setSnackbar('Completa sucursal y producto.');
+      showFeedback('Completa sucursal y producto.', 'warning');
       return;
     }
     if (!cantidadValida) {
-      setSnackbar('La cantidad debe ser mayor a cero, máximo 3 decimales y no superar stock si es salida.');
+      showFeedback('La cantidad debe ser mayor a cero, máximo 3 decimales y no superar stock si es salida.', 'warning');
       return;
     }
     const qty = Number(cantidad || 0);
     if (tipoMovimiento !== 'AJUSTE_ENTRADA' && productoSeleccionado && qty > productoSeleccionado.stock) {
-      setSnackbar('La cantidad supera el stock disponible.');
+      showFeedback('La cantidad supera el stock disponible.', 'warning');
       return;
     }
 
@@ -118,17 +118,17 @@ export function MermasAjustesView() {
           fecha: new Date().toISOString(),
         },
       });
-      setSnackbar('Ajuste registrado correctamente.');
+      showFeedback('Ajuste registrado correctamente.');
       clearForm();
     } catch (error) {
-      setSnackbar(`Error al registrar ajuste: ${error}`);
+      showFeedback(`Error al registrar ajuste: ${error}`, 'error');
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <Box sx={{ maxWidth: 1000, mx: 'auto', mt: 2 }}>
+    <Box sx={{ width: '100%', mt: 2 }}>
       <Typography variant="h5" sx={{ fontWeight: 700, mb: 3 }}>
         Registro de Merma y Ajustes
       </Typography>
@@ -260,11 +260,7 @@ export function MermasAjustesView() {
         </Box>
       </Paper>
 
-      <Snackbar open={Boolean(snackbar)} autoHideDuration={3200} onClose={() => setSnackbar('')}>
-        <Alert onClose={() => setSnackbar('')} severity={snackbar.startsWith('Error') ? 'error' : 'success'} variant="filled">
-          {snackbar}
-        </Alert>
-      </Snackbar>
+      <FeedbackSnackbar message={feedbackMessage} severity={feedbackSeverity} onClose={closeFeedback} />
     </Box>
   );
 }

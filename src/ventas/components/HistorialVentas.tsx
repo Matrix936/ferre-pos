@@ -4,7 +4,6 @@ import {
   Alert,
   Box,
   Button,
-  CircularProgress,
   Dialog,
   DialogActions,
   DialogContent,
@@ -25,7 +24,13 @@ import { RoleGuard } from '../../auth/components/RoleGuard';
 import { useAuth } from '../../auth/context/AuthContext';
 import { useCatalogos } from '../../catalogos/context/CatalogosContext';
 import { useConfig } from '../../config/context/ConfigContext';
+import { AsyncButton } from '../../shared/components/AsyncButton';
+import { TablePager } from '../../shared/components/TablePager';
+import { useDialogHotkeys } from '../../shared/hooks/useDialogHotkeys';
+import { useDebouncedValue } from '../../shared/hooks/useDebouncedValue';
+import { dialogActionsSx, dialogContentSx } from '../../shared/ui/patterns';
 import { TicketPreview } from './TicketPreview';
+import { buildEscposLogoRaster } from '../utils/escposLogo';
 
 interface HistorialVenta {
   id: string;
@@ -61,6 +66,17 @@ interface EmpresaConfigFiscal {
   actualizadoAt: string;
 }
 
+interface PerifericosConfig {
+  impresoraTickets: string;
+  impresoraEtiquetas: string;
+  updatedAt: string;
+}
+
+interface HistorialVentasPage {
+  rows: HistorialVenta[];
+  total: number;
+}
+
 export function HistorialVentasView() {
   const { user } = useAuth();
   const { sucursales, usuarios } = useCatalogos();
@@ -69,6 +85,7 @@ export function HistorialVentasView() {
   const [ventas, setVentas] = useState<HistorialVenta[]>([]);
   const [fechaInicio, setFechaInicio] = useState('');
   const [fechaFin, setFechaFin] = useState('');
+  const [folioSearch, setFolioSearch] = useState('');
   const [sucursalId, setSucursalId] = useState('');
   const [usuarioId, setUsuarioId] = useState('');
   const [selectedVenta, setSelectedVenta] = useState<HistorialVenta | null>(null);
@@ -81,6 +98,10 @@ export function HistorialVentasView() {
   const [printing, setPrinting] = useState(false);
   const [detailError, setDetailError] = useState('');
   const [empresaConfig, setEmpresaConfig] = useState<EmpresaConfigFiscal | null>(null);
+  const [page, setPage] = useState(0);
+  const [pageSize, setPageSizeState] = useState(10);
+  const [totalRows, setTotalRows] = useState(0);
+  const debouncedFolioSearch = useDebouncedValue(folioSearch, 250);
 
   const fetchVentas = async () => {
     const filtro = {
@@ -88,14 +109,16 @@ export function HistorialVentasView() {
       fechaFin: fechaFin ? `${fechaFin}T23:59:59.999Z` : undefined,
       sucursalId: isSuperAdmin ? sucursalId || undefined : user?.sucursalId,
       usuarioId: usuarioId || undefined,
+      folio: debouncedFolioSearch.trim() || undefined,
     };
-    const data = await invoke<HistorialVenta[]>('get_historial_ventas', { filtro });
-    setVentas(data);
+    const data = await invoke<HistorialVentasPage>('get_historial_ventas_page', { filtro, page, pageSize });
+    setVentas(data.rows);
+    setTotalRows(data.total);
   };
 
   useEffect(() => {
     fetchVentas().catch((error) => console.error('Error historial ventas:', error));
-  }, [fechaInicio, fechaFin, sucursalId, usuarioId, user?.sucursalId, isSuperAdmin]);
+  }, [fechaInicio, fechaFin, sucursalId, usuarioId, user?.sucursalId, isSuperAdmin, debouncedFolioSearch, page, pageSize]);
 
   useEffect(() => {
     invoke<EmpresaConfigFiscal | null>('get_empresa_config')
@@ -124,14 +147,19 @@ export function HistorialVentasView() {
 
   const handleReimprimirTicket = async () => {
     if (!selectedVenta || detalle.length === 0) return;
-    const printerName = window.prompt('Nombre o ruta de la impresora térmica', '\\\\localhost\\IMPRESORA_TICKETS');
-    if (!printerName?.trim()) return;
 
     setPrinting(true);
     setDetailError('');
     try {
+      const config = await invoke<PerifericosConfig>('get_perifericos_config');
+      const printerName = config.impresoraTickets?.trim();
+      if (!printerName) {
+        throw new Error('No hay impresora de tickets configurada.');
+      }
+      const sucursal = sucursales.find((item) => item.id === selectedVenta.sucursalId);
+      const logoBytes = await buildEscposLogoRaster(logo, 42).catch(() => undefined);
       await invoke('imprimir_ticket_y_abrir_caja', {
-        printerName: printerName.trim(),
+        printerName,
         paperWidth: 42,
         abrirCajon: false,
         ticket: {
@@ -139,9 +167,16 @@ export function HistorialVentasView() {
           fecha: new Date(selectedVenta.fecha).toLocaleString(),
           cajero: selectedVenta.usuarioNombre,
           sucursal: selectedVenta.sucursalNombre,
+          logoBytes,
+          empresaNombre: empresaConfig?.razonSocial,
+          rfc: empresaConfig?.rfc,
+          regimenFiscal: empresaConfig?.regimenFiscal,
+          codigoPostal: sucursal?.codigoPostal,
           metodoPago: selectedVenta.metodoPago,
+          estado: selectedVenta.estado,
           productos: detalle.map((item) => ({
             descripcion: item.descripcion,
+            marca: item.marca,
             cantidad: item.cantidad,
             precioUnitario: item.precioVentaPactado,
             importe: item.cantidad * item.precioVentaPactado,
@@ -193,6 +228,14 @@ export function HistorialVentasView() {
       setLoadingCancel(false);
     }
   };
+  const totalPages = Math.max(1, Math.ceil(totalRows / pageSize));
+  const fromRow = totalRows === 0 ? 0 : page * pageSize + 1;
+  const toRow = Math.min((page + 1) * pageSize, totalRows);
+  const setPageSize = (value: number) => {
+    setPageSizeState(value);
+    setPage(0);
+  };
+  const resetPage = () => setPage(0);
 
   const openCancelacion = () => {
     setMotivoCancelacion('');
@@ -201,25 +244,41 @@ export function HistorialVentasView() {
     setOpenCancelDialog(true);
   };
 
+  const cancelacionDisabled = loadingCancel || !motivoCancelacion.trim() || !usuarioAutorizoClave.trim();
+
+  useDialogHotkeys({
+    open: openCancelDialog,
+    disabled: cancelacionDisabled,
+    cancelDisabled: loadingCancel,
+    onConfirm: handleCancelarVenta,
+    onCancel: () => setOpenCancelDialog(false),
+  });
+
   return (
-    <Box sx={{ maxWidth: 1280, mx: 'auto', mt: 2 }}>
+    <Box sx={{ width: '100%', mt: 2 }}>
       <Typography variant="h5" sx={{ fontWeight: 700, mb: 3 }}>
         Historial de Ventas
       </Typography>
 
       <Paper elevation={0} sx={{ p: 2, borderRadius: 2, border: '1px solid', borderColor: 'divider', mb: 2 }}>
-        <Box sx={{ display: 'grid', gap: 2, gridTemplateColumns: { xs: '1fr', md: 'repeat(4, minmax(180px, 1fr))' } }}>
-          <TextField label="Fecha inicio" type="date" value={fechaInicio} onChange={(e) => setFechaInicio(e.target.value)} slotProps={{ inputLabel: { shrink: true } }} />
-          <TextField label="Fecha fin" type="date" value={fechaFin} onChange={(e) => setFechaFin(e.target.value)} slotProps={{ inputLabel: { shrink: true } }} />
+        <Box sx={{ display: 'grid', gap: 2, gridTemplateColumns: { xs: '1fr', md: 'repeat(5, minmax(180px, 1fr))' } }}>
+          <TextField label="Fecha inicio" type="date" value={fechaInicio} onChange={(e) => { setFechaInicio(e.target.value); resetPage(); }} slotProps={{ inputLabel: { shrink: true } }} />
+          <TextField label="Fecha fin" type="date" value={fechaFin} onChange={(e) => { setFechaFin(e.target.value); resetPage(); }} slotProps={{ inputLabel: { shrink: true } }} />
+          <TextField
+            label="Buscar por folio"
+            value={folioSearch}
+            onChange={(e) => { setFolioSearch(e.target.value); resetPage(); }}
+            placeholder="Ej: A1B2C3D4"
+          />
           {isSuperAdmin && (
-            <TextField select label="Sucursal" value={sucursalId} onChange={(e) => setSucursalId(e.target.value)}>
+            <TextField select label="Sucursal" value={sucursalId} onChange={(e) => { setSucursalId(e.target.value); resetPage(); }}>
               <MenuItem value="">Todas</MenuItem>
               {sucursales.map((sucursal) => (
                 <MenuItem key={sucursal.id} value={sucursal.id}>{sucursal.nombre}</MenuItem>
               ))}
             </TextField>
           )}
-          <TextField select label="Usuario" value={usuarioId} onChange={(e) => setUsuarioId(e.target.value)}>
+          <TextField select label="Usuario" value={usuarioId} onChange={(e) => { setUsuarioId(e.target.value); resetPage(); }}>
             <MenuItem value="">Todos</MenuItem>
             {usuarios.map((usuario) => (
               <MenuItem key={usuario.id} value={usuario.id}>{usuario.nombre}</MenuItem>
@@ -240,7 +299,7 @@ export function HistorialVentasView() {
                 <TableCell sx={{ fontWeight: 600 }}>Método</TableCell>
                 <TableCell sx={{ fontWeight: 600 }}>Estado</TableCell>
                 <TableCell sx={{ fontWeight: 600 }}>Total</TableCell>
-                <TableCell align="right" sx={{ fontWeight: 600 }}>Detalle</TableCell>
+                <TableCell sx={{ fontWeight: 600 }}>Detalle</TableCell>
               </TableRow>
             </TableHead>
             <TableBody>
@@ -253,7 +312,7 @@ export function HistorialVentasView() {
                   <TableCell>{venta.metodoPago}</TableCell>
                   <TableCell>{venta.estado}</TableCell>
                   <TableCell>${venta.total.toFixed(2)}</TableCell>
-                  <TableCell align="right">
+                  <TableCell>
                     <Button size="small" onClick={() => openDetalle(venta)}>Ver ticket</Button>
                   </TableCell>
                 </TableRow>
@@ -268,11 +327,25 @@ export function HistorialVentasView() {
             </TableBody>
           </Table>
         </TableContainer>
+        <TablePager
+          page={page}
+          pageSize={pageSize}
+          totalPages={totalPages}
+          totalRows={totalRows}
+          fromRow={fromRow}
+          toRow={toRow}
+          canPreviousPage={page > 0}
+          canNextPage={page + 1 < totalPages}
+          onPreviousPage={() => setPage((prev) => Math.max(0, prev - 1))}
+          onNextPage={() => setPage((prev) => Math.min(totalPages - 1, prev + 1))}
+          onPageSizeChange={setPageSize}
+          rowLabel="ventas"
+        />
       </Paper>
 
       <Dialog open={Boolean(selectedVenta)} onClose={handleCloseDetalle} maxWidth="md" fullWidth>
         <DialogTitle>Detalle de Venta</DialogTitle>
-        <DialogContent sx={{ '&&': { pt: 2.5 } }}>
+        <DialogContent sx={dialogContentSx}>
           {detailError && <Alert severity="error" sx={{ mb: 2 }}>{detailError}</Alert>}
           {selectedVenta && (
             <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', md: 'minmax(320px, 380px) 1fr' }, gap: 3, alignItems: 'start' }}>
@@ -306,33 +379,36 @@ export function HistorialVentasView() {
             </Box>
           )}
         </DialogContent>
-        <DialogActions sx={{ p: 2 }}>
+        <DialogActions sx={dialogActionsSx}>
           <RoleGuard allowedRoles={['SUPERADMIN', 'ADMIN']}>
-            <Button
+            <AsyncButton
               color="error"
               variant="contained"
               onClick={openCancelacion}
               disabled={!selectedVenta || selectedVenta.estado === 'CANCELADA' || loadingCancel}
-              startIcon={loadingCancel ? <CircularProgress size={18} color="inherit" /> : undefined}
+              loading={loadingCancel}
+              loadingText="Cancelando..."
             >
-              {loadingCancel ? 'Cancelando...' : 'Cancelar Venta'}
-            </Button>
+              Cancelar Venta
+            </AsyncButton>
           </RoleGuard>
-          <Button
+          <AsyncButton
             variant="outlined"
-            startIcon={printing ? <CircularProgress size={18} /> : <PrintIcon />}
+            startIcon={<PrintIcon />}
             onClick={handleReimprimirTicket}
+            loading={printing}
+            loadingText="Reimprimiendo..."
             disabled={printing || loadingCancel || detalle.length === 0}
           >
-            {printing ? 'Reimprimiendo...' : 'Reimprimir Ticket'}
-          </Button>
+            Reimprimir Ticket
+          </AsyncButton>
           <Button onClick={handleCloseDetalle} disabled={loadingCancel || printing}>Cerrar</Button>
         </DialogActions>
       </Dialog>
 
       <Dialog open={openCancelDialog} onClose={loadingCancel ? undefined : () => setOpenCancelDialog(false)} maxWidth="xs" fullWidth>
         <DialogTitle>Autorizar cancelación</DialogTitle>
-        <DialogContent sx={{ '&&': { pt: 2.5 }, display: 'flex', flexDirection: 'column', gap: 2 }}>
+        <DialogContent sx={dialogContentSx}>
           <Alert severity="warning">
             La venta se cancelará, el stock regresará a la sucursal y se registrará la salida de efectivo en caja.
           </Alert>
@@ -352,17 +428,18 @@ export function HistorialVentasView() {
             onChange={(e) => setUsuarioAutorizoClave(e.target.value)}
           />
         </DialogContent>
-        <DialogActions sx={{ p: 2 }}>
+        <DialogActions sx={dialogActionsSx}>
           <Button onClick={() => setOpenCancelDialog(false)} disabled={loadingCancel}>Cancelar</Button>
-          <Button
+          <AsyncButton
             color="error"
             variant="contained"
             onClick={handleCancelarVenta}
-            disabled={loadingCancel || !motivoCancelacion.trim() || !usuarioAutorizoClave.trim()}
-            startIcon={loadingCancel ? <CircularProgress size={18} color="inherit" /> : undefined}
+            disabled={cancelacionDisabled}
+            loading={loadingCancel}
+            loadingText="Cancelando..."
           >
-            {loadingCancel ? 'Cancelando...' : 'Confirmar cancelación'}
-          </Button>
+            Confirmar cancelación
+          </AsyncButton>
         </DialogActions>
       </Dialog>
     </Box>

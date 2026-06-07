@@ -4,13 +4,13 @@ import {
   Autocomplete,
   Box,
   Button,
-  CircularProgress,
   Chip,
   Dialog,
   DialogActions,
   DialogContent,
   DialogTitle,
   Divider,
+  LinearProgress,
   MenuItem,
   Paper,
   Table,
@@ -32,9 +32,16 @@ import {
 } from '@mui/icons-material';
 import { useAuth } from '../../auth/context/AuthContext';
 import { useCatalogos } from '../../catalogos/context/CatalogosContext';
-import { InventarioSucursalPayload, ProductoCatalogo, ProductoInventario } from '../types';
+import { InventarioSucursalPayload, ProductoCatalogo, ProductoCatalogoPage, ProductoInventario, ProductoInventarioPage } from '../types';
+import { AsyncButton } from '../../shared/components/AsyncButton';
+import { ConfirmActionDialog } from '../../shared/components/ConfirmActionDialog';
+import { FeedbackSnackbar } from '../../shared/components/FeedbackSnackbar';
+import { TablePager } from '../../shared/components/TablePager';
 import { TableActions } from '../../shared/components/TableActions';
 import { useDebouncedValue } from '../../shared/hooks/useDebouncedValue';
+import { useDialogHotkeys } from '../../shared/hooks/useDialogHotkeys';
+import { useFeedback } from '../../shared/hooks/useFeedback';
+import { dialogActionsSx, dialogContentSx } from '../../shared/ui/patterns';
 import { EtiquetasPrecioModal } from './EtiquetasPrecioModal';
 
 const QUANTITY_PATTERN = /^\d+(\.\d{0,3})?$/;
@@ -59,7 +66,6 @@ export function InventarioView() {
   const [catalogo, setCatalogo] = useState<ProductoCatalogo[]>([]);
   const [searchInput, setSearchInput] = useState('');
   const [searchApplied, setSearchApplied] = useState('');
-  const [searchOptions, setSearchOptions] = useState<ProductoInventario[]>([]);
   const [selectedSucursalId, setSelectedSucursalId] = useState('');
   const [open, setOpen] = useState(false);
   const [productoSeleccionado, setProductoSeleccionado] = useState<ProductoCatalogo | null>(null);
@@ -71,30 +77,57 @@ export function InventarioView() {
   const [precioVenta, setPrecioVenta] = useState('0');
   const [productosEtiqueta, setProductosEtiqueta] = useState<ProductoInventario[]>([]);
   const [deletingKey, setDeletingKey] = useState('');
+  const [deleteTarget, setDeleteTarget] = useState<ProductoInventario | null>(null);
   const [saving, setSaving] = useState(false);
+  const [loadingRows, setLoadingRows] = useState(false);
+  const [loadingCatalogo, setLoadingCatalogo] = useState(false);
+  const [totalRows, setTotalRows] = useState(0);
+  const [page, setPage] = useState(0);
+  const [pageSize, setPageSizeState] = useState(10);
+  const { feedbackMessage, feedbackSeverity, showFeedback, closeFeedback } = useFeedback();
 
   const userSucursalId = user?.sucursalId ?? '';
   const isSuperAdmin = user?.role === 'SUPERADMIN';
   const sucursalConsulta = isSuperAdmin ? selectedSucursalId : userSucursalId;
   const debouncedSearchInput = useDebouncedValue(searchInput, 300);
+  const debouncedCatalogoInput = useDebouncedValue(catalogoInput, 250);
   const stockInvalido = Boolean(stock) && !isValidQuantity(stock);
   const stockMinimoInvalido = Boolean(stockMinimo) && !isValidQuantity(stockMinimo);
   const costoPromedioInvalido = Boolean(costoPromedio) && !isValidMoney(costoPromedio);
   const precioVentaInvalido = Boolean(precioVenta) && !isValidMoney(precioVenta);
   const formInvalido = stockInvalido || stockMinimoInvalido || costoPromedioInvalido || precioVentaInvalido;
 
-  const fetchInventario = async () => {
+  const fetchInventario = async (options?: { active?: () => boolean }) => {
     if (!sucursalConsulta) return;
-    const query = searchApplied.trim();
-    const data = query
-      ? await invoke<ProductoInventario[]>('buscar_productos_por_sucursal', { sucursalId: sucursalConsulta, query })
-      : await invoke<ProductoInventario[]>('get_productos_por_sucursal', { sucursalId: sucursalConsulta });
-    setInventario(data);
+    setLoadingRows(true);
+    const data = await invoke<ProductoInventarioPage>('get_productos_por_sucursal_page', {
+      sucursalId: sucursalConsulta,
+      query: searchApplied.trim(),
+      page,
+      pageSize,
+    });
+    if (options?.active && !options.active()) return;
+    setInventario(data.rows);
+    setTotalRows(data.total);
+    setLoadingRows(false);
   };
 
-  const fetchCatalogo = async () => {
-    const data = await invoke<ProductoCatalogo[]>('get_productos_catalogo');
-    setCatalogo(data);
+  const fetchCatalogo = async (query: string, options?: { active?: () => boolean }) => {
+    const cleanQuery = query.trim();
+    if (cleanQuery.length < 2) {
+      setCatalogo(productoSeleccionado ? [productoSeleccionado] : []);
+      setLoadingCatalogo(false);
+      return;
+    }
+    setLoadingCatalogo(true);
+    const data = await invoke<ProductoCatalogoPage>('get_productos_catalogo_page', {
+      query: cleanQuery,
+      page: 0,
+      pageSize: 25,
+    });
+    if (options?.active && !options.active()) return;
+    setCatalogo(data.rows);
+    setLoadingCatalogo(false);
   };
 
   useEffect(() => {
@@ -108,52 +141,48 @@ export function InventarioView() {
   }, [isSuperAdmin, userSucursalId]);
 
   useEffect(() => {
-    fetchInventario().catch((error) => console.error('Error inventario:', error));
+    setPage(0);
   }, [sucursalConsulta, searchApplied]);
 
   useEffect(() => {
-    fetchCatalogo().catch((error) => console.error('Error catálogo productos:', error));
-  }, []);
-
-  useEffect(() => {
-    const q = debouncedSearchInput.trim();
-    if (!sucursalConsulta || q.length < 2) {
-      setSearchOptions([]);
-      if (!q) setSearchApplied('');
-      return;
-    }
     let active = true;
-    invoke<ProductoInventario[]>('buscar_productos_por_sucursal', { sucursalId: sucursalConsulta, query: q })
-      .then((data) => {
-        if (active) {
-          setSearchOptions(data);
-          setSearchApplied(q);
-        }
-      })
-      .catch((error) => {
-        console.error('Error sugerencias inventario:', error);
-        if (active) setSearchOptions([]);
-      });
+    fetchInventario({ active: () => active }).catch((error) => {
+      if (active) {
+        console.error('Error inventario:', error);
+        setLoadingRows(false);
+      }
+    });
     return () => {
       active = false;
     };
+  }, [sucursalConsulta, searchApplied, page, pageSize]);
+
+  useEffect(() => {
+    let active = true;
+    fetchCatalogo(debouncedCatalogoInput, { active: () => active }).catch((error) => {
+      if (active) {
+        console.error('Error catálogo productos:', error);
+        setLoadingCatalogo(false);
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, [debouncedCatalogoInput, productoSeleccionado?.id]);
+
+  useEffect(() => {
+    const q = debouncedSearchInput.trim();
+    if (!q) {
+      if (!q) setSearchApplied('');
+      return;
+    }
+    if (q.length >= 2) setSearchApplied(q);
   }, [sucursalConsulta, debouncedSearchInput]);
 
-  const catalogoDisponible = useMemo(() => {
-    const idsEnSucursal = new Set(inventario.map((item) => item.id));
-    return catalogo.filter((item) => !idsEnSucursal.has(item.id) || item.id === productoSeleccionado?.id);
-  }, [catalogo, inventario, productoSeleccionado?.id]);
-
   const catalogoOpciones = useMemo(() => {
-    const query = catalogoInput.trim().toLowerCase();
-    if (query.length < 2) return productoSeleccionado ? [productoSeleccionado] : [];
-    return catalogoDisponible
-      .filter((item) =>
-        [item.descripcion, item.codigoBarras, item.codigoProveedor, item.claveProducto, item.marca, item.unidad]
-          .some((value) => value.toLowerCase().includes(query)),
-      )
-      .slice(0, 25);
-  }, [catalogoDisponible, catalogoInput, productoSeleccionado]);
+    if (productoSeleccionado && catalogoInput.trim().length < 2) return [productoSeleccionado];
+    return catalogo;
+  }, [catalogo, catalogoInput, productoSeleccionado]);
 
   const openNew = () => {
     setProductoSeleccionado(null);
@@ -210,8 +239,9 @@ export function InventarioView() {
       });
       setOpen(false);
       await fetchInventario();
+      showFeedback('Inventario actualizado correctamente.');
     } catch (error) {
-      alert(`Error al guardar inventario: ${error}`);
+      showFeedback(`Error al guardar inventario: ${error}`, 'error');
     } finally {
       setSaving(false);
     }
@@ -220,10 +250,6 @@ export function InventarioView() {
   const handleEliminarInventario = async (producto: ProductoInventario) => {
     const key = `${producto.id}-${producto.sucursalId}`;
     if (deletingKey) return;
-    const confirmed = window.confirm(
-      `¿Quitar "${producto.descripcion}" del inventario de esta sucursal? El producto seguirá existiendo en el catálogo general.`,
-    );
-    if (!confirmed) return;
     setDeletingKey(key);
     try {
       await invoke('eliminar_inventario_sucursal', {
@@ -231,12 +257,24 @@ export function InventarioView() {
         sucursalId: producto.sucursalId,
       });
       await fetchInventario();
+      setDeleteTarget(null);
+      showFeedback('Producto retirado del inventario de la sucursal.');
     } catch (error) {
-      alert(`Error al eliminar del inventario: ${error}`);
+      showFeedback(`Error al eliminar del inventario: ${error}`, 'error');
     } finally {
       setDeletingKey('');
     }
   };
+
+  const inventarioSaveDisabled = saving || !productoSeleccionado || !stockSucursalId || formInvalido;
+  const closeInventarioDialog = () => setOpen(false);
+  useDialogHotkeys({
+    open,
+    disabled: inventarioSaveDisabled,
+    cancelDisabled: saving,
+    onConfirm: handleSave,
+    onCancel: closeInventarioDialog,
+  });
 
   const exportRows = useMemo(
     () =>
@@ -251,9 +289,16 @@ export function InventarioView() {
       })),
     [inventario],
   );
+  const totalPages = Math.max(1, Math.ceil(totalRows / pageSize));
+  const fromRow = totalRows === 0 ? 0 : page * pageSize + 1;
+  const toRow = Math.min((page + 1) * pageSize, totalRows);
+  const setPageSize = (value: number) => {
+    setPageSizeState(value);
+    setPage(0);
+  };
 
   return (
-    <Box sx={{ maxWidth: 1280, mx: 'auto', mt: 2 }}>
+    <Box sx={{ width: '100%', mt: 2 }}>
       <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3, gap: 2, flexWrap: 'wrap' }}>
         <Typography variant="h5" sx={{ fontWeight: 700 }}>Inventario por sucursal</Typography>
         <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
@@ -273,35 +318,12 @@ export function InventarioView() {
 
       <Paper elevation={0} sx={{ p: 2, borderRadius: 2, border: '1px solid', borderColor: 'divider', mb: 2 }}>
         <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap', alignItems: 'center' }}>
-          <Autocomplete
-            freeSolo
-            options={searchOptions}
-            getOptionLabel={(option) => (typeof option === 'string' ? option : option.descripcion)}
-            filterOptions={(options) => options}
-            noOptionsText="Escribe al menos 2 letras para buscar coincidencias"
-            inputValue={searchInput}
-            onInputChange={(_, value, reason) => {
-              if (reason === 'reset') {
-                setSearchOptions([]);
-                return;
-              }
-              setSearchInput(value);
-              if (reason !== 'input' || !value.trim()) {
-                setSearchOptions([]);
-                setSearchApplied('');
-              }
-            }}
-            onChange={(_, value) => {
-              if (!value) return;
-              const query = typeof value === 'string' ? value.trim() : value.descripcion.trim();
-              if (!query) return;
-              setSearchApplied(query);
-              setSearchInput('');
-              setSearchOptions([]);
-            }}
-            renderInput={(params) => (
-              <TextField {...params} label="Buscar inventario por producto, código o marca" fullWidth />
-            )}
+          <TextField
+            label="Buscar inventario por producto, código o marca"
+            value={searchInput}
+            onChange={(event) => setSearchInput(event.target.value)}
+            helperText={searchInput.trim() && searchInput.trim().length < 2 ? 'Escribe al menos 2 letras para buscar.' : ' '}
+            fullWidth
             sx={{ flex: 1, minWidth: 320 }}
           />
           {isSuperAdmin && (
@@ -328,6 +350,7 @@ export function InventarioView() {
       </Paper>
 
       <Paper elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider', overflow: 'hidden' }}>
+        {loadingRows && <LinearProgress />}
         <TableContainer>
           <Table sx={{ minWidth: 900 }}>
             <TableHead sx={{ bgcolor: 'background.default' }}>
@@ -339,7 +362,7 @@ export function InventarioView() {
                 <TableCell sx={{ fontWeight: 600 }}>Costo prom.</TableCell>
                 <TableCell sx={{ fontWeight: 600 }}>Stock</TableCell>
                 <TableCell sx={{ fontWeight: 600 }}>Mínimo</TableCell>
-                <TableCell align="right" sx={{ fontWeight: 600 }}>Acciones</TableCell>
+                <TableCell sx={{ fontWeight: 600 }}>Acciones</TableCell>
               </TableRow>
             </TableHead>
             <TableBody>
@@ -352,7 +375,7 @@ export function InventarioView() {
                   <TableCell>${(producto.costoPromedio ?? producto.precioCosto ?? 0).toFixed(2)}</TableCell>
                   <TableCell>{producto.stock}</TableCell>
                   <TableCell>{producto.stockMinimo}</TableCell>
-                  <TableCell align="right">
+                  <TableCell>
                     <Button size="small" startIcon={<LocalOfferIcon />} onClick={() => setProductosEtiqueta([producto])}>
                       Etiqueta
                     </Button>
@@ -363,7 +386,7 @@ export function InventarioView() {
                       size="small"
                       color="error"
                       startIcon={<DeleteOutlineIcon />}
-                      onClick={() => handleEliminarInventario(producto)}
+                      onClick={() => setDeleteTarget(producto)}
                       disabled={deletingKey === `${producto.id}-${producto.sucursalId}`}
                     >
                       Eliminar
@@ -371,7 +394,7 @@ export function InventarioView() {
                   </TableCell>
                 </TableRow>
               ))}
-              {inventario.length === 0 && (
+              {!loadingRows && inventario.length === 0 && (
                 <TableRow>
                   <TableCell colSpan={8} align="center" sx={{ py: 4, color: 'text.secondary' }}>
                     No hay productos configurados en esta sucursal.
@@ -381,12 +404,26 @@ export function InventarioView() {
             </TableBody>
           </Table>
         </TableContainer>
+        <TablePager
+          page={page}
+          pageSize={pageSize}
+          totalPages={totalPages}
+          totalRows={totalRows}
+          fromRow={fromRow}
+          toRow={toRow}
+          canPreviousPage={page > 0 && !loadingRows}
+          canNextPage={page < totalPages - 1 && !loadingRows}
+          onPreviousPage={() => setPage((current) => Math.max(0, current - 1))}
+          onNextPage={() => setPage((current) => Math.min(totalPages - 1, current + 1))}
+          onPageSizeChange={setPageSize}
+          rowLabel="productos"
+        />
       </Paper>
 
       <Dialog open={open} onClose={saving ? undefined : () => setOpen(false)} maxWidth="sm" fullWidth>
         <DialogTitle sx={{ fontWeight: 600 }}>Configurar inventario por sucursal</DialogTitle>
         <Divider />
-        <DialogContent sx={{ pt: 3, display: 'flex', flexDirection: 'column', gap: 2 }}>
+        <DialogContent sx={dialogContentSx}>
           <Autocomplete
             options={catalogoOpciones}
             value={productoSeleccionado}
@@ -402,6 +439,7 @@ export function InventarioView() {
             getOptionLabel={(option) => `${option.descripcion}${option.marca ? ` · ${option.marca}` : ''}`}
             isOptionEqualToValue={(option, value) => option.id === value.id}
             filterOptions={(options) => options}
+            loading={loadingCatalogo}
             noOptionsText="Escribe al menos 2 letras para buscar producto"
             renderInput={(params) => <TextField {...params} label="Producto" required />}
           />
@@ -447,16 +485,18 @@ export function InventarioView() {
             slotProps={{ htmlInput: { min: 0, step: '0.01', inputMode: 'decimal' } }}
           />
         </DialogContent>
-        <DialogActions sx={{ p: 3, pt: 1 }}>
+        <DialogActions sx={{ ...dialogActionsSx, p: 3, pt: 1 }}>
           <Button onClick={() => setOpen(false)} disabled={saving}>Cancelar</Button>
-          <Button
+          <AsyncButton
             variant="contained"
-            startIcon={saving ? <CircularProgress size={18} color="inherit" /> : <SaveIcon />}
+            startIcon={<SaveIcon />}
             onClick={handleSave}
-            disabled={saving || !productoSeleccionado || !stockSucursalId || formInvalido}
+            disabled={inventarioSaveDisabled}
+            loading={saving}
+            loadingText="Guardando..."
           >
-            {saving ? 'Guardando...' : 'Guardar'}
-          </Button>
+            Guardar
+          </AsyncButton>
         </DialogActions>
       </Dialog>
       <EtiquetasPrecioModal
@@ -464,6 +504,19 @@ export function InventarioView() {
         productos={productosEtiqueta}
         onClose={() => setProductosEtiqueta([])}
       />
+      <ConfirmActionDialog
+        open={Boolean(deleteTarget)}
+        title="Quitar del inventario"
+        message={`¿Quitar "${deleteTarget?.descripcion ?? ''}" del inventario de esta sucursal? El producto seguirá existiendo en el catálogo general.`}
+        confirmText="Quitar"
+        confirmColor="error"
+        loading={Boolean(deletingKey)}
+        onCancel={() => setDeleteTarget(null)}
+        onConfirm={() => {
+          if (deleteTarget) return handleEliminarInventario(deleteTarget);
+        }}
+      />
+      <FeedbackSnackbar message={feedbackMessage} severity={feedbackSeverity} onClose={closeFeedback} />
     </Box>
   );
 }

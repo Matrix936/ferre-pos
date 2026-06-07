@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import {
-  Alert,
   Box,
   Button,
   CircularProgress,
@@ -10,12 +9,17 @@ import {
   DialogContent,
   DialogTitle,
   Paper,
-  Snackbar,
   TextField,
   Typography,
 } from '@mui/material';
 import { Add as AddIcon, Remove as RemoveIcon, PointOfSale as CorteIcon, Save as SaveIcon } from '@mui/icons-material';
 import { useAuth } from '../../auth/context/AuthContext';
+import { AsyncButton } from '../../shared/components/AsyncButton';
+import { ConfirmActionDialog } from '../../shared/components/ConfirmActionDialog';
+import { FeedbackSnackbar } from '../../shared/components/FeedbackSnackbar';
+import { useDialogHotkeys } from '../../shared/hooks/useDialogHotkeys';
+import { useFeedback } from '../../shared/hooks/useFeedback';
+import { dialogActionsSx, dialogContentSx } from '../../shared/ui/patterns';
 
 interface CajaSesion {
   id: string;
@@ -59,7 +63,8 @@ export function CajaView() {
   const [cajaActual, setCajaActual] = useState<CajaEstado | null>(null);
   const [montoInicial, setMontoInicial] = useState('0');
   const [loading, setLoading] = useState(false);
-  const [snackbar, setSnackbar] = useState('');
+  const [pendingCloseAmount, setPendingCloseAmount] = useState<number | null>(null);
+  const { feedbackMessage, feedbackSeverity, showFeedback, closeFeedback } = useFeedback();
 
   const [openMovimiento, setOpenMovimiento] = useState(false);
   const [tipoMovimiento, setTipoMovimiento] = useState<'INGRESO' | 'EGRESO'>('INGRESO');
@@ -116,15 +121,16 @@ export function CajaView() {
         },
       });
       setCajaActual(data);
-      setSnackbar('Caja abierta correctamente.');
+      showFeedback('Caja abierta correctamente.');
     } catch (error) {
-      setSnackbar(`Error al abrir caja: ${error}`);
+      showFeedback(`Error al abrir caja: ${error}`, 'error');
     } finally {
       setLoading(false);
     }
   };
 
   const handleGuardarMovimiento = async () => {
+    if (loading) return;
     if (!cajaActual) return;
     setLoading(true);
     try {
@@ -151,32 +157,19 @@ export function CajaView() {
       setOpenMovimiento(false);
       setMontoMovimiento('');
       setMotivoMovimiento('');
-      setSnackbar('Movimiento registrado correctamente.');
+      showFeedback('Movimiento registrado correctamente.');
     } catch (error) {
-      setSnackbar(`Error al registrar movimiento: ${error}`);
+      showFeedback(`Error al registrar movimiento: ${error}`, 'error');
     } finally {
       setLoading(false);
     }
   };
 
-  const handleCerrarCaja = async () => {
+  const cerrarCajaConMonto = async (montoContado: number) => {
+    if (loading) return;
     if (!cajaActual) return;
     setLoading(true);
     try {
-      const montoContado = parseMoneyInput(montoFinalReal || '0', 'El monto contado físicamente');
-      if (cajaActual.montoEsperadoActual > 0 && montoContado <= 0) {
-        throw new Error('No puedes cerrar la caja en $0.00 cuando el monto esperado es mayor a cero.');
-      }
-      const diferenciaCierre = Math.round((montoContado - cajaActual.montoEsperadoActual) * 100) / 100;
-      if (
-        diferenciaCierre !== 0 &&
-        !window.confirm(
-          `La caja cerrará con una diferencia de ${diferenciaCierre >= 0 ? '+' : ''}$${diferenciaCierre.toFixed(2)}. ¿Confirmas el corte?`
-        )
-      ) {
-        return;
-      }
-
       await invoke('cerrar_caja', {
         cierre: {
           sesionId: cajaActual.sesion.id,
@@ -187,16 +180,52 @@ export function CajaView() {
       setOpenCorte(false);
       setMontoFinalReal('');
       setCajaActual(null);
-      setSnackbar('Caja cerrada correctamente.');
+      setPendingCloseAmount(null);
+      showFeedback('Caja cerrada correctamente.');
     } catch (error) {
-      setSnackbar(`Error al cerrar caja: ${error}`);
+      showFeedback(`Error al cerrar caja: ${error}`, 'error');
     } finally {
       setLoading(false);
     }
   };
 
+  const handleCerrarCaja = async () => {
+    if (!cajaActual) return;
+    try {
+      const montoContado = parseMoneyInput(montoFinalReal || '0', 'El monto contado físicamente');
+      if (cajaActual.montoEsperadoActual > 0 && montoContado <= 0) {
+        throw new Error('No puedes cerrar la caja en $0.00 cuando el monto esperado es mayor a cero.');
+      }
+      const diferenciaCierre = Math.round((montoContado - cajaActual.montoEsperadoActual) * 100) / 100;
+      if (diferenciaCierre !== 0) {
+        setPendingCloseAmount(montoContado);
+        return;
+      }
+      await cerrarCajaConMonto(montoContado);
+    } catch (error) {
+      showFeedback(`Error al cerrar caja: ${error}`, 'error');
+    }
+  };
+
+  const movimientoDisabled = loading || !motivoMovimiento.trim() || !montoMovimientoValido || egresoSuperaCaja;
+  const corteDisabled = loading || !montoFinalRealValido || cierreEnCeroInvalido;
+  useDialogHotkeys({
+    open: openMovimiento,
+    disabled: movimientoDisabled,
+    cancelDisabled: loading,
+    onConfirm: handleGuardarMovimiento,
+    onCancel: () => setOpenMovimiento(false),
+  });
+  useDialogHotkeys({
+    open: openCorte,
+    disabled: corteDisabled,
+    cancelDisabled: loading,
+    onConfirm: handleCerrarCaja,
+    onCancel: () => setOpenCorte(false),
+  });
+
   return (
-    <Box sx={{ maxWidth: 920, mx: 'auto', mt: 2 }}>
+    <Box sx={{ width: '100%', mt: 2 }}>
       <Typography variant="h5" sx={{ fontWeight: 700, mb: 3 }}>
         Caja
       </Typography>
@@ -272,7 +301,7 @@ export function CajaView() {
 
       <Dialog open={openMovimiento} onClose={loading ? undefined : () => setOpenMovimiento(false)} maxWidth="xs" fullWidth>
         <DialogTitle>{tipoMovimiento === 'INGRESO' ? 'Registrar ingreso' : 'Registrar egreso'}</DialogTitle>
-        <DialogContent sx={{ pt: 2, display: 'flex', flexDirection: 'column', gap: 2 }}>
+        <DialogContent sx={dialogContentSx}>
           <TextField
             label="Monto"
             type="number"
@@ -290,16 +319,18 @@ export function CajaView() {
           />
           <TextField label="Motivo" value={motivoMovimiento} onChange={(e) => setMotivoMovimiento(e.target.value)} />
         </DialogContent>
-        <DialogActions sx={{ p: 2 }}>
+        <DialogActions sx={dialogActionsSx}>
           <Button onClick={() => setOpenMovimiento(false)} disabled={loading}>Cancelar</Button>
-          <Button
+          <AsyncButton
             variant="contained"
             onClick={handleGuardarMovimiento}
-            disabled={loading || !motivoMovimiento.trim() || !montoMovimientoValido || egresoSuperaCaja}
-            startIcon={loading ? <CircularProgress size={18} color="inherit" /> : <SaveIcon />}
+            disabled={movimientoDisabled}
+            loading={loading}
+            loadingText="Guardando..."
+            startIcon={<SaveIcon />}
           >
-            {loading ? 'Guardando...' : 'Guardar'}
-          </Button>
+            Guardar
+          </AsyncButton>
         </DialogActions>
       </Dialog>
 
@@ -328,25 +359,35 @@ export function CajaView() {
             disabled
           />
         </DialogContent>
-        <DialogActions sx={{ p: 2 }}>
+        <DialogActions sx={dialogActionsSx}>
           <Button onClick={() => setOpenCorte(false)} disabled={loading}>Cancelar</Button>
-          <Button
+          <AsyncButton
             variant="contained"
             color="error"
             onClick={handleCerrarCaja}
-            disabled={loading || !montoFinalRealValido || cierreEnCeroInvalido}
-            startIcon={loading ? <CircularProgress size={18} color="inherit" /> : <CorteIcon />}
+            disabled={corteDisabled}
+            loading={loading}
+            loadingText="Cerrando..."
+            startIcon={<CorteIcon />}
           >
-            {loading ? 'Cerrando...' : 'Cerrar turno'}
-          </Button>
+            Cerrar turno
+          </AsyncButton>
         </DialogActions>
       </Dialog>
 
-      <Snackbar open={Boolean(snackbar)} autoHideDuration={3500} onClose={() => setSnackbar('')}>
-        <Alert onClose={() => setSnackbar('')} severity={snackbar.startsWith('Error') ? 'error' : 'success'} variant="filled">
-          {snackbar}
-        </Alert>
-      </Snackbar>
+      <ConfirmActionDialog
+        open={pendingCloseAmount !== null}
+        title="Confirmar corte con diferencia"
+        message={`La caja cerrará con una diferencia de ${diferencia >= 0 ? '+' : ''}$${diferencia.toFixed(2)}. ¿Confirmas el corte?`}
+        confirmText="Confirmar corte"
+        confirmColor={diferencia < 0 ? 'error' : 'warning'}
+        loading={loading}
+        onCancel={() => setPendingCloseAmount(null)}
+        onConfirm={() => {
+          if (pendingCloseAmount !== null) return cerrarCajaConMonto(pendingCloseAmount);
+        }}
+      />
+      <FeedbackSnackbar message={feedbackMessage} severity={feedbackSeverity} onClose={closeFeedback} />
     </Box>
   );
 }

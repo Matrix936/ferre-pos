@@ -1,14 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import {
-  Alert,
   Autocomplete,
   Box,
   Button,
-  CircularProgress,
   MenuItem,
   Paper,
-  Snackbar,
   Table,
   TableBody,
   TableCell,
@@ -22,7 +19,12 @@ import { Delete as DeleteIcon, Save as SaveIcon } from '@mui/icons-material';
 import { useAuth } from '../../auth/context/AuthContext';
 import { useCatalogos } from '../../catalogos/context/CatalogosContext';
 import { ProductoInventario, RegistrarCompraPayload } from '../../inventario/types';
+import { AsyncButton } from '../../shared/components/AsyncButton';
+import { FeedbackSnackbar } from '../../shared/components/FeedbackSnackbar';
+import { TablePager } from '../../shared/components/TablePager';
 import { useDebouncedValue } from '../../shared/hooks/useDebouncedValue';
+import { useFeedback } from '../../shared/hooks/useFeedback';
+import { useLocalPagination } from '../../shared/hooks/useLocalPagination';
 
 interface CompraRow {
   productoId: string;
@@ -43,8 +45,8 @@ export function NuevaCompra() {
   const [search, setSearch] = useState('');
   const [proveedorId, setProveedorId] = useState('');
   const [selectedSucursalId, setSelectedSucursalId] = useState(user?.sucursalId ?? '');
-  const [snackbar, setSnackbar] = useState('');
   const [loading, setLoading] = useState(false);
+  const { feedbackMessage, feedbackSeverity, showFeedback, closeFeedback } = useFeedback();
 
   const isSuperAdmin = user?.role === 'SUPERADMIN';
   const sucursalCompraId = isSuperAdmin ? selectedSucursalId : user?.sucursalId ?? '';
@@ -85,6 +87,7 @@ export function NuevaCompra() {
       }, 0),
     [detalle],
   );
+  const detallePager = useLocalPagination(detalle);
   const detalleValido = detalle.every((row) => {
     const cantidad = row.cantidad.trim();
     const costo = row.precioCostoPactado.trim();
@@ -126,9 +129,10 @@ export function NuevaCompra() {
   };
 
   const handleRegistrar = async () => {
+    if (loading) return;
     if (!proveedorId || !sucursalCompraId || detalle.length === 0) return;
     if (!detalleValido) {
-      setSnackbar('Error: Revisa cantidades y costos. Cantidad máximo 3 decimales y costo máximo 2 decimales.');
+      showFeedback('Revisa cantidades y costos. Cantidad máximo 3 decimales y costo máximo 2 decimales.', 'warning');
       return;
     }
     setLoading(true);
@@ -147,18 +151,20 @@ export function NuevaCompra() {
       };
       await invoke('registrar_compra', { compra: payload });
       clearForm();
-      setSnackbar('Entrada registrada correctamente.');
+      showFeedback('Entrada registrada correctamente.');
       setProductosBusqueda([]);
     } catch (error) {
       console.error('Error al registrar compra:', error);
-      setSnackbar(`Error al registrar compra: ${error}`);
+      showFeedback(`Error al registrar compra: ${error}`, 'error');
     } finally {
       setLoading(false);
     }
   };
 
+  const registrarDisabled = loading || !proveedorId || !sucursalCompraId || detalle.length === 0 || !detalleValido;
+
   return (
-    <Box sx={{ maxWidth: 1280, mx: 'auto', mt: 2 }}>
+    <Box sx={{ width: '100%', mt: 2 }}>
       <Typography variant="h5" sx={{ fontWeight: 700, mb: 3 }}>
         Compras (Entradas de Almacén)
       </Typography>
@@ -254,11 +260,11 @@ export function NuevaCompra() {
                 <TableCell sx={{ fontWeight: 600 }}>Cantidad</TableCell>
                 <TableCell sx={{ fontWeight: 600 }}>Costo pactado</TableCell>
                 <TableCell sx={{ fontWeight: 600 }}>Subtotal</TableCell>
-                <TableCell align="right" sx={{ fontWeight: 600 }}>Acciones</TableCell>
+                <TableCell sx={{ fontWeight: 600 }}>Acciones</TableCell>
               </TableRow>
             </TableHead>
             <TableBody>
-              {detalle.map((row) => {
+              {detallePager.paginatedRows.map((row) => {
                 const subtotal = Number(row.cantidad || 0) * Number(row.precioCostoPactado || 0);
                 const cantidadInvalida =
                   Boolean(row.cantidad) &&
@@ -293,7 +299,7 @@ export function NuevaCompra() {
                       />
                     </TableCell>
                     <TableCell>${subtotal.toFixed(2)}</TableCell>
-                    <TableCell align="right">
+                    <TableCell>
                       <Button color="error" size="small" startIcon={<DeleteIcon />} onClick={() => removeRow(row.productoId)}>
                         Quitar
                       </Button>
@@ -311,27 +317,39 @@ export function NuevaCompra() {
             </TableBody>
           </Table>
         </TableContainer>
+        <TablePager
+          page={detallePager.page}
+          pageSize={detallePager.pageSize}
+          totalPages={detallePager.totalPages}
+          totalRows={detallePager.totalRows}
+          fromRow={detallePager.fromRow}
+          toRow={detallePager.toRow}
+          canPreviousPage={detallePager.canPreviousPage}
+          canNextPage={detallePager.canNextPage}
+          onPreviousPage={detallePager.previousPage}
+          onNextPage={detallePager.nextPage}
+          onPageSizeChange={detallePager.setPageSize}
+          rowLabel="productos"
+        />
       </Paper>
 
       <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mt: 2 }}>
         <Typography variant="h6" sx={{ fontWeight: 700 }}>
           Total: ${total.toFixed(2)}
         </Typography>
-        <Button
+        <AsyncButton
           variant="contained"
-          startIcon={loading ? <CircularProgress size={18} color="inherit" /> : <SaveIcon />}
+          startIcon={<SaveIcon />}
           onClick={handleRegistrar}
-          disabled={loading || !proveedorId || !sucursalCompraId || detalle.length === 0 || !detalleValido}
+          disabled={registrarDisabled}
+          loading={loading}
+          loadingText="Registrando..."
         >
-          {loading ? 'Registrando...' : 'Registrar entrada'}
-        </Button>
+          Registrar entrada
+        </AsyncButton>
       </Box>
 
-      <Snackbar open={Boolean(snackbar)} autoHideDuration={3000} onClose={() => setSnackbar('')}>
-        <Alert onClose={() => setSnackbar('')} severity={snackbar.startsWith('Error') ? 'error' : 'success'} variant="filled">
-          {snackbar}
-        </Alert>
-      </Snackbar>
+      <FeedbackSnackbar message={feedbackMessage} severity={feedbackSeverity} onClose={closeFeedback} />
     </Box>
   );
 }

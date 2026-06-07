@@ -22,7 +22,15 @@ import {
 import { Add as AddIcon, Edit as EditIcon, Delete as DeleteIcon, Save as SaveIcon } from '@mui/icons-material';
 import { invoke } from '@tauri-apps/api/core';
 import { Sucursal } from '../types';
+import { AsyncButton } from '../../shared/components/AsyncButton';
+import { ConfirmActionDialog } from '../../shared/components/ConfirmActionDialog';
+import { FeedbackSnackbar } from '../../shared/components/FeedbackSnackbar';
+import { TablePager } from '../../shared/components/TablePager';
 import { TableActions } from '../../shared/components/TableActions';
+import { useDialogHotkeys } from '../../shared/hooks/useDialogHotkeys';
+import { useFeedback } from '../../shared/hooks/useFeedback';
+import { useLocalPagination } from '../../shared/hooks/useLocalPagination';
+import { dialogActionsSx, dialogContentSx } from '../../shared/ui/patterns';
 import { useCatalogos } from '../../catalogos/context/CatalogosContext';
 
 export function SucursalesView() {
@@ -38,6 +46,8 @@ export function SucursalesView() {
   const [search, setSearch] = useState('');
   const [saving, setSaving] = useState(false);
   const [deletingId, setDeletingId] = useState('');
+  const [deleteTarget, setDeleteTarget] = useState<Sucursal | null>(null);
+  const { feedbackMessage, feedbackSeverity, showFeedback, closeFeedback } = useFeedback();
 
   const handleOpen = (sucursal?: Sucursal) => {
     if (sucursal) {
@@ -81,26 +91,27 @@ export function SucursalesView() {
       }
       handleClose();
       await refreshCatalogos();
+      showFeedback(editMode ? 'Sucursal actualizada correctamente.' : 'Sucursal creada correctamente.');
     } catch (error) {
       console.error('Error al guardar sucursal:', error);
-      alert(`Error al guardar: ${error}`);
+      showFeedback(`Error al guardar: ${error}`, 'error');
     } finally {
       setSaving(false);
     }
   };
 
   const handleDelete = async (id: string) => {
-    if (confirm('¿Está seguro de que desea eliminar esta sucursal?')) {
-      setDeletingId(id);
-      try {
-        await invoke('delete_sucursal', { id });
-        await refreshCatalogos();
-      } catch (error) {
-        console.error('Error al eliminar sucursal:', error);
-        alert(`Error al eliminar: ${error}`);
-      } finally {
-        setDeletingId('');
-      }
+    setDeletingId(id);
+    try {
+      await invoke('delete_sucursal', { id });
+      await refreshCatalogos();
+      setDeleteTarget(null);
+      showFeedback('Sucursal eliminada correctamente.');
+    } catch (error) {
+      console.error('Error al eliminar sucursal:', error);
+      showFeedback(`Error al eliminar: ${error}`, 'error');
+    } finally {
+      setDeletingId('');
     }
   };
 
@@ -114,9 +125,20 @@ export function SucursalesView() {
       sucursal.codigoPostal.toLowerCase().includes(query)
     );
   });
+  const sucursalesPager = useLocalPagination(filteredSucursales);
+
+  const saveDisabled = saving || !nombre || !direccion || !codigoPostal || !currentId;
+
+  useDialogHotkeys({
+    open,
+    disabled: saveDisabled,
+    cancelDisabled: saving,
+    onConfirm: handleSave,
+    onCancel: handleClose,
+  });
 
   return (
-    <Box sx={{ maxWidth: 1200, mx: 'auto', mt: 2 }}>
+    <Box sx={{ width: '100%', mt: 2 }}>
       <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
         <Typography variant="h5" sx={{ fontWeight: 700, color: 'text.primary' }}>
           Gestión de sucursales
@@ -167,21 +189,21 @@ export function SucursalesView() {
                 <TableCell sx={{ fontWeight: 600 }}>Dirección</TableCell>
                 <TableCell sx={{ fontWeight: 600 }}>Teléfono</TableCell>
                 <TableCell sx={{ fontWeight: 600 }}>Código postal</TableCell>
-                <TableCell align="right" sx={{ fontWeight: 600 }}>Acciones</TableCell>
+                <TableCell sx={{ fontWeight: 600 }}>Acciones</TableCell>
               </TableRow>
             </TableHead>
             <TableBody>
-              {filteredSucursales.map((sucursal) => (
+              {sucursalesPager.paginatedRows.map((sucursal) => (
                 <TableRow key={sucursal.id} hover sx={{ '&:last-child td, &:last-child th': { border: 0 } }}>
                   <TableCell>{sucursal.nombre}</TableCell>
                   <TableCell>{sucursal.direccion}</TableCell>
                   <TableCell>{sucursal.telefono}</TableCell>
                   <TableCell>{sucursal.codigoPostal || '-'}</TableCell>
-                  <TableCell align="right">
+                  <TableCell>
                     <IconButton color="primary" onClick={() => handleOpen(sucursal)} size="small" sx={{ mr: 1 }} disabled={Boolean(deletingId)}>
                       <EditIcon fontSize="small" />
                     </IconButton>
-                    <IconButton color="error" onClick={() => handleDelete(sucursal.id)} size="small" disabled={Boolean(deletingId)}>
+                    <IconButton color="error" onClick={() => setDeleteTarget(sucursal)} size="small" disabled={Boolean(deletingId)}>
                       {deletingId === sucursal.id ? <CircularProgress size={18} /> : <DeleteIcon fontSize="small" />}
                     </IconButton>
                   </TableCell>
@@ -197,6 +219,20 @@ export function SucursalesView() {
             </TableBody>
           </Table>
         </TableContainer>
+        <TablePager
+          page={sucursalesPager.page}
+          pageSize={sucursalesPager.pageSize}
+          totalPages={sucursalesPager.totalPages}
+          totalRows={sucursalesPager.totalRows}
+          fromRow={sucursalesPager.fromRow}
+          toRow={sucursalesPager.toRow}
+          canPreviousPage={sucursalesPager.canPreviousPage}
+          canNextPage={sucursalesPager.canNextPage}
+          onPreviousPage={sucursalesPager.previousPage}
+          onNextPage={sucursalesPager.nextPage}
+          onPageSizeChange={sucursalesPager.setPageSize}
+          rowLabel="sucursales"
+        />
       </Paper>
 
       <Dialog open={open} onClose={saving ? undefined : handleClose} maxWidth="sm" fullWidth slotProps={{ paper: { sx: { borderRadius: 2 } } }}>
@@ -204,7 +240,7 @@ export function SucursalesView() {
           {editMode ? 'Editar sucursal' : 'Nueva sucursal'}
         </DialogTitle>
         <Divider />
-        <DialogContent sx={{ pt: 3 }}>
+        <DialogContent sx={dialogContentSx}>
           <Box component="form" sx={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
             <TextField 
               label="Nombre" 
@@ -236,22 +272,37 @@ export function SucursalesView() {
             />
           </Box>
         </DialogContent>
-        <DialogActions sx={{ p: 3, pt: 1 }}>
+        <DialogActions sx={{ ...dialogActionsSx, p: 3, pt: 1 }}>
           <Button onClick={handleClose} disabled={saving} sx={{ borderRadius: '8px' }}>
             Cancelar
           </Button>
-          <Button 
-            onClick={handleSave} 
+          <AsyncButton
+            onClick={handleSave}
             variant="contained" 
             disableElevation
-            startIcon={saving ? <CircularProgress size={18} color="inherit" /> : <SaveIcon />}
-            disabled={saving || !nombre || !direccion || !codigoPostal || !currentId}
+            startIcon={<SaveIcon />}
+            disabled={saveDisabled}
+            loading={saving}
+            loadingText="Guardando..."
             sx={{ borderRadius: '8px', px: 3 }}
           >
-            {saving ? 'Guardando...' : 'Guardar'}
-          </Button>
+            Guardar
+          </AsyncButton>
         </DialogActions>
       </Dialog>
+      <ConfirmActionDialog
+        open={Boolean(deleteTarget)}
+        title="Eliminar sucursal"
+        message={`¿Eliminar la sucursal "${deleteTarget?.nombre ?? ''}"?`}
+        confirmText="Eliminar"
+        confirmColor="error"
+        loading={Boolean(deletingId)}
+        onCancel={() => setDeleteTarget(null)}
+        onConfirm={() => {
+          if (deleteTarget) return handleDelete(deleteTarget.id);
+        }}
+      />
+      <FeedbackSnackbar message={feedbackMessage} severity={feedbackSeverity} onClose={closeFeedback} />
     </Box>
   );
 }

@@ -25,7 +25,15 @@ import { Add as AddIcon, Edit as EditIcon, Delete as DeleteIcon, Save as SaveIco
 import { invoke } from '@tauri-apps/api/core';
 import { Usuario } from '../types';
 import { Role } from '../../auth/types';
+import { AsyncButton } from '../../shared/components/AsyncButton';
+import { ConfirmActionDialog } from '../../shared/components/ConfirmActionDialog';
+import { FeedbackSnackbar } from '../../shared/components/FeedbackSnackbar';
+import { TablePager } from '../../shared/components/TablePager';
 import { TableActions } from '../../shared/components/TableActions';
+import { useDialogHotkeys } from '../../shared/hooks/useDialogHotkeys';
+import { useFeedback } from '../../shared/hooks/useFeedback';
+import { useLocalPagination } from '../../shared/hooks/useLocalPagination';
+import { dialogActionsSx, dialogContentSx } from '../../shared/ui/patterns';
 import { useCatalogos } from '../../catalogos/context/CatalogosContext';
 import { useAuth } from '../../auth/context/AuthContext';
 
@@ -76,6 +84,8 @@ export function UsuariosView() {
   const [search, setSearch] = useState('');
   const [saving, setSaving] = useState(false);
   const [deletingId, setDeletingId] = useState('');
+  const [deleteTarget, setDeleteTarget] = useState<Usuario | null>(null);
+  const { feedbackMessage, feedbackSeverity, showFeedback, closeFeedback } = useFeedback();
 
   const canManageUsuario = (usuario: Usuario) => {
     if (!usuarioSesion || usuario.id === usuarioSesion.id) return false;
@@ -85,7 +95,7 @@ export function UsuariosView() {
 
   const handleOpen = (user?: Usuario) => {
     if (user && !canManageUsuario(user)) {
-      alert('No puedes modificar esta cuenta con tu rol actual.');
+      showFeedback('No puedes modificar esta cuenta con tu rol actual.', 'warning');
       return;
     }
 
@@ -130,7 +140,7 @@ export function UsuariosView() {
     const effectiveSucursalId = isAdmin ? usuarioSesion?.sucursalId || '' : sucursalId;
 
     if (isAdmin && !effectiveSucursalId) {
-      alert('Tu cuenta no tiene sucursal asignada.');
+      showFeedback('Tu cuenta no tiene sucursal asignada.', 'warning');
       return;
     }
 
@@ -151,9 +161,10 @@ export function UsuariosView() {
       }
       handleClose();
       await refreshCatalogos();
+      showFeedback(editMode ? 'Usuario actualizado correctamente.' : 'Usuario creado correctamente.');
     } catch (error) {
       console.error('Error al guardar usuario:', error);
-      alert(`Error al guardar: ${error}`);
+      showFeedback(`Error al guardar: ${error}`, 'error');
     } finally {
       setSaving(false);
     }
@@ -162,21 +173,21 @@ export function UsuariosView() {
   const handleDelete = async (id: string) => {
     const usuario = usuarios.find((item) => item.id === id);
     if (usuario && !canManageUsuario(usuario)) {
-      alert('No puedes eliminar esta cuenta con tu rol actual.');
+      showFeedback('No puedes eliminar esta cuenta con tu rol actual.', 'warning');
       return;
     }
 
-    if (confirm('¿Está seguro de que desea eliminar este usuario?')) {
-      setDeletingId(id);
-      try {
-        await invoke('delete_usuario', { id });
-        await refreshCatalogos();
-      } catch (error) {
-        console.error('Error al eliminar usuario:', error);
-        alert(`Error al eliminar: ${error}`);
-      } finally {
-        setDeletingId('');
-      }
+    setDeletingId(id);
+    try {
+      await invoke('delete_usuario', { id });
+      await refreshCatalogos();
+      setDeleteTarget(null);
+      showFeedback('Usuario eliminado correctamente.');
+    } catch (error) {
+      console.error('Error al eliminar usuario:', error);
+      showFeedback(`Error al eliminar: ${error}`, 'error');
+    } finally {
+      setDeletingId('');
     }
   };
 
@@ -195,9 +206,21 @@ export function UsuariosView() {
       getSucursalName(usuario.sucursalId).toLowerCase().includes(query)
     );
   });
+  const usuariosPager = useLocalPagination(filteredUsuarios);
+
+  const saveDisabled =
+    saving || !nombres || !apellidoPaterno || !email || (!editMode && !password) || !(isAdmin ? usuarioSesion?.sucursalId : sucursalId);
+
+  useDialogHotkeys({
+    open,
+    disabled: saveDisabled,
+    cancelDisabled: saving,
+    onConfirm: handleSave,
+    onCancel: handleClose,
+  });
 
   return (
-    <Box sx={{ maxWidth: 1200, mx: 'auto', mt: 2 }}>
+    <Box sx={{ width: '100%', mt: 2 }}>
       <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
         <Typography variant="h5" sx={{ fontWeight: 700, color: 'text.primary' }}>
           Gestión de usuarios
@@ -248,11 +271,11 @@ export function UsuariosView() {
                 <TableCell sx={{ fontWeight: 600 }}>Email</TableCell>
                 <TableCell sx={{ fontWeight: 600 }}>Rol</TableCell>
                 <TableCell sx={{ fontWeight: 600 }}>Sucursal</TableCell>
-                <TableCell align="right" sx={{ fontWeight: 600 }}>Acciones</TableCell>
+                <TableCell sx={{ fontWeight: 600 }}>Acciones</TableCell>
               </TableRow>
             </TableHead>
             <TableBody>
-              {filteredUsuarios.map((usuario) => (
+              {usuariosPager.paginatedRows.map((usuario) => (
                 <TableRow key={usuario.id} hover sx={{ '&:last-child td, &:last-child th': { border: 0 } }}>
                   <TableCell>{usuario.nombre}</TableCell>
                   <TableCell>{usuario.email}</TableCell>
@@ -265,7 +288,7 @@ export function UsuariosView() {
                     />
                   </TableCell>
                   <TableCell>{getSucursalName(usuario.sucursalId)}</TableCell>
-                  <TableCell align="right">
+                  <TableCell>
                     <IconButton
                       color="primary"
                       onClick={() => handleOpen(usuario)}
@@ -277,7 +300,7 @@ export function UsuariosView() {
                     </IconButton>
                     <IconButton
                       color="error"
-                      onClick={() => handleDelete(usuario.id)}
+                      onClick={() => setDeleteTarget(usuario)}
                       size="small"
                       disabled={!canManageUsuario(usuario) || Boolean(deletingId)}
                     >
@@ -296,6 +319,20 @@ export function UsuariosView() {
             </TableBody>
           </Table>
         </TableContainer>
+        <TablePager
+          page={usuariosPager.page}
+          pageSize={usuariosPager.pageSize}
+          totalPages={usuariosPager.totalPages}
+          totalRows={usuariosPager.totalRows}
+          fromRow={usuariosPager.fromRow}
+          toRow={usuariosPager.toRow}
+          canPreviousPage={usuariosPager.canPreviousPage}
+          canNextPage={usuariosPager.canNextPage}
+          onPreviousPage={usuariosPager.previousPage}
+          onNextPage={usuariosPager.nextPage}
+          onPageSizeChange={usuariosPager.setPageSize}
+          rowLabel="usuarios"
+        />
       </Paper>
 
       <Dialog open={open} onClose={saving ? undefined : handleClose} maxWidth="sm" fullWidth slotProps={{ paper: { sx: { borderRadius: 2 } } }}>
@@ -303,7 +340,7 @@ export function UsuariosView() {
           {editMode ? 'Editar usuario' : 'Nuevo usuario'}
         </DialogTitle>
         <Divider />
-        <DialogContent sx={{ pt: 3 }}>
+        <DialogContent sx={dialogContentSx}>
           <Box component="form" sx={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
             <TextField 
               label="Nombres" 
@@ -376,22 +413,37 @@ export function UsuariosView() {
             </TextField>
           </Box>
         </DialogContent>
-        <DialogActions sx={{ p: 3, pt: 1 }}>
+        <DialogActions sx={{ ...dialogActionsSx, p: 3, pt: 1 }}>
           <Button onClick={handleClose} disabled={saving} sx={{ borderRadius: '8px' }}>
             Cancelar
           </Button>
-          <Button 
-            onClick={handleSave} 
+          <AsyncButton
+            onClick={handleSave}
             variant="contained" 
             disableElevation
-            startIcon={saving ? <CircularProgress size={18} color="inherit" /> : <SaveIcon />}
-            disabled={saving || !nombres || !apellidoPaterno || !email || (!editMode && !password) || !(isAdmin ? usuarioSesion?.sucursalId : sucursalId)}
+            startIcon={<SaveIcon />}
+            disabled={saveDisabled}
+            loading={saving}
+            loadingText="Guardando..."
             sx={{ borderRadius: '8px', px: 3 }}
           >
-            {saving ? 'Guardando...' : 'Guardar'}
-          </Button>
+            Guardar
+          </AsyncButton>
         </DialogActions>
       </Dialog>
+      <ConfirmActionDialog
+        open={Boolean(deleteTarget)}
+        title="Eliminar usuario"
+        message={`¿Eliminar la cuenta de "${deleteTarget?.nombre ?? ''}"?`}
+        confirmText="Eliminar"
+        confirmColor="error"
+        loading={Boolean(deletingId)}
+        onCancel={() => setDeleteTarget(null)}
+        onConfirm={() => {
+          if (deleteTarget) return handleDelete(deleteTarget.id);
+        }}
+      />
+      <FeedbackSnackbar message={feedbackMessage} severity={feedbackSeverity} onClose={closeFeedback} />
     </Box>
   );
 }

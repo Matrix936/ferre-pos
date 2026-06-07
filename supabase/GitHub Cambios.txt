@@ -1,0 +1,8 @@
+# 1. Agrega todos los archivos modificados al "escenario" de preparación
+git add .
+
+# 2. Crea el commit con un mensaje descriptivo de lo que hiciste
+git commit -m "Feat: Se corrige diseño del botón de caja y se unifican alcances"
+
+# 3. Empuja los cambios al servidor (reemplaza 'main' por tu rama si usas 'master')
+git push origin main

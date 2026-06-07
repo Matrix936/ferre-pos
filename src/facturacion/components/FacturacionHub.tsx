@@ -20,6 +20,10 @@ import {
   Typography,
 } from '@mui/material';
 import { FactCheck as FacturarIcon, Verified as TimbrarIcon } from '@mui/icons-material';
+import { AsyncButton } from '../../shared/components/AsyncButton';
+import { TablePager } from '../../shared/components/TablePager';
+import { useDialogHotkeys } from '../../shared/hooks/useDialogHotkeys';
+import { dialogActionsSx, dialogContentSx } from '../../shared/ui/patterns';
 
 interface HistorialVenta {
   id: string;
@@ -44,6 +48,16 @@ interface FacturaEmitida {
 
 type FacturaPayload = Record<string, unknown>;
 
+interface HistorialVentasPage {
+  rows: HistorialVenta[];
+  total: number;
+}
+
+interface FacturasEmitidasPage {
+  rows: FacturaEmitida[];
+  total: number;
+}
+
 function buildTestUuid() {
   return `TEST-${crypto.randomUUID().toUpperCase()}`;
 }
@@ -51,33 +65,65 @@ function buildTestUuid() {
 export function FacturacionHub() {
   const [ventas, setVentas] = useState<HistorialVenta[]>([]);
   const [facturas, setFacturas] = useState<FacturaEmitida[]>([]);
+  const [facturasVentas, setFacturasVentas] = useState<FacturaEmitida[]>([]);
   const [selectedVenta, setSelectedVenta] = useState<HistorialVenta | null>(null);
   const [payload, setPayload] = useState<FacturaPayload | null>(null);
   const [error, setError] = useState('');
   const [loadingVentaId, setLoadingVentaId] = useState('');
   const [loadingTimbrado, setLoadingTimbrado] = useState(false);
+  const [ventasPage, setVentasPage] = useState(0);
+  const [ventasPageSize, setVentasPageSizeState] = useState(10);
+  const [ventasTotalRows, setVentasTotalRows] = useState(0);
+  const [facturasPage, setFacturasPage] = useState(0);
+  const [facturasPageSize, setFacturasPageSizeState] = useState(10);
+  const [facturasTotalRows, setFacturasTotalRows] = useState(0);
 
   const fetchData = async () => {
     const [ventasData, facturasData] = await Promise.all([
-      invoke<HistorialVenta[]>('get_historial_ventas', { filtro: {} }),
-      invoke<FacturaEmitida[]>('get_facturas_emitidas'),
+      invoke<HistorialVentasPage>('get_historial_ventas_page', {
+        filtro: { estado: 'COMPLETADA' },
+        page: ventasPage,
+        pageSize: ventasPageSize,
+      }),
+      invoke<FacturasEmitidasPage>('get_facturas_emitidas_page', {
+        page: facturasPage,
+        pageSize: facturasPageSize,
+      }),
     ]);
-    setVentas(ventasData);
-    setFacturas(facturasData);
+    const facturasVentasData = ventasData.rows.length > 0
+      ? await invoke<FacturaEmitida[]>('get_facturas_por_ventas', {
+        ventaIds: ventasData.rows.map((venta) => venta.id),
+      })
+      : [];
+    setVentas(ventasData.rows);
+    setVentasTotalRows(ventasData.total);
+    setFacturas(facturasData.rows);
+    setFacturasVentas(facturasVentasData);
+    setFacturasTotalRows(facturasData.total);
   };
 
   useEffect(() => {
     fetchData().catch((err) => setError(String(err)));
-  }, []);
+  }, [ventasPage, ventasPageSize, facturasPage, facturasPageSize]);
 
-  const ventasFacturables = useMemo(
-    () => ventas.filter((venta) => venta.estado === 'COMPLETADA').slice(0, 30),
-    [ventas],
-  );
   const facturaPorVenta = useMemo(
-    () => new Map(facturas.map((factura) => [factura.ventaId, factura])),
-    [facturas],
+    () => new Map([...facturas, ...facturasVentas].map((factura) => [factura.ventaId, factura])),
+    [facturas, facturasVentas],
   );
+  const ventasTotalPages = Math.max(1, Math.ceil(ventasTotalRows / ventasPageSize));
+  const ventasFromRow = ventasTotalRows === 0 ? 0 : ventasPage * ventasPageSize + 1;
+  const ventasToRow = Math.min((ventasPage + 1) * ventasPageSize, ventasTotalRows);
+  const setVentasPageSize = (value: number) => {
+    setVentasPageSizeState(value);
+    setVentasPage(0);
+  };
+  const facturasTotalPages = Math.max(1, Math.ceil(facturasTotalRows / facturasPageSize));
+  const facturasFromRow = facturasTotalRows === 0 ? 0 : facturasPage * facturasPageSize + 1;
+  const facturasToRow = Math.min((facturasPage + 1) * facturasPageSize, facturasTotalRows);
+  const setFacturasPageSize = (value: number) => {
+    setFacturasPageSizeState(value);
+    setFacturasPage(0);
+  };
 
   const handleGenerarFactura = async (venta: HistorialVenta) => {
     const factura = facturaPorVenta.get(venta.id);
@@ -126,8 +172,16 @@ export function FacturacionHub() {
     }
   };
 
+  useDialogHotkeys({
+    open: Boolean(payload),
+    disabled: loadingTimbrado,
+    cancelDisabled: loadingTimbrado,
+    onConfirm: handleSimularTimbrado,
+    onCancel: () => setPayload(null),
+  });
+
   return (
-    <Box sx={{ maxWidth: 1280, mx: 'auto', mt: 2 }}>
+    <Box sx={{ width: '100%', mt: 2 }}>
       <Typography variant="h5" sx={{ fontWeight: 700, mb: 3 }}>
         Facturación electrónica
       </Typography>
@@ -152,11 +206,11 @@ export function FacturacionHub() {
                 <TableCell sx={{ fontWeight: 600 }}>Pago</TableCell>
                 <TableCell sx={{ fontWeight: 600 }}>Factura</TableCell>
                 <TableCell sx={{ fontWeight: 600 }}>Total</TableCell>
-                <TableCell align="right" sx={{ fontWeight: 600 }}>Acción</TableCell>
+                <TableCell sx={{ fontWeight: 600 }}>Acción</TableCell>
               </TableRow>
             </TableHead>
             <TableBody>
-              {ventasFacturables.map((venta) => {
+              {ventas.map((venta) => {
                 const factura = facturaPorVenta.get(venta.id);
                 const yaTimbrada = factura?.estado === 'TIMBRADA';
                 const facturaCancelada = factura?.estado === 'CANCELADA';
@@ -176,7 +230,7 @@ export function FacturacionHub() {
                       />
                     </TableCell>
                     <TableCell>${venta.total.toFixed(2)}</TableCell>
-                    <TableCell align="right">
+                    <TableCell>
                       <Button
                         size="small"
                         variant="outlined"
@@ -190,7 +244,7 @@ export function FacturacionHub() {
                   </TableRow>
                 );
               })}
-              {ventasFacturables.length === 0 && (
+              {ventas.length === 0 && (
                 <TableRow>
                   <TableCell colSpan={8} align="center" sx={{ py: 4, color: 'text.secondary' }}>
                     No hay ventas completadas para facturar.
@@ -200,6 +254,20 @@ export function FacturacionHub() {
             </TableBody>
           </Table>
         </TableContainer>
+        <TablePager
+          page={ventasPage}
+          pageSize={ventasPageSize}
+          totalPages={ventasTotalPages}
+          totalRows={ventasTotalRows}
+          fromRow={ventasFromRow}
+          toRow={ventasToRow}
+          canPreviousPage={ventasPage > 0}
+          canNextPage={ventasPage + 1 < ventasTotalPages}
+          onPreviousPage={() => setVentasPage((prev) => Math.max(0, prev - 1))}
+          onNextPage={() => setVentasPage((prev) => Math.min(ventasTotalPages - 1, prev + 1))}
+          onPageSizeChange={setVentasPageSize}
+          rowLabel="ventas"
+        />
       </Paper>
 
       <Paper elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider', overflow: 'hidden' }}>
@@ -244,11 +312,25 @@ export function FacturacionHub() {
             </TableBody>
           </Table>
         </TableContainer>
+        <TablePager
+          page={facturasPage}
+          pageSize={facturasPageSize}
+          totalPages={facturasTotalPages}
+          totalRows={facturasTotalRows}
+          fromRow={facturasFromRow}
+          toRow={facturasToRow}
+          canPreviousPage={facturasPage > 0}
+          canNextPage={facturasPage + 1 < facturasTotalPages}
+          onPreviousPage={() => setFacturasPage((prev) => Math.max(0, prev - 1))}
+          onNextPage={() => setFacturasPage((prev) => Math.min(facturasTotalPages - 1, prev + 1))}
+          onPageSizeChange={setFacturasPageSize}
+          rowLabel="facturas"
+        />
       </Paper>
 
       <Dialog open={Boolean(payload)} onClose={loadingTimbrado ? undefined : () => setPayload(null)} maxWidth="md" fullWidth>
         <DialogTitle>Payload CFDI 4.0</DialogTitle>
-        <DialogContent>
+        <DialogContent sx={dialogContentSx}>
           <Box
             component="pre"
             sx={{
@@ -264,17 +346,19 @@ export function FacturacionHub() {
             {JSON.stringify(payload, null, 2)}
           </Box>
         </DialogContent>
-        <DialogActions sx={{ p: 2 }}>
+        <DialogActions sx={dialogActionsSx}>
           <Button onClick={() => setPayload(null)} disabled={loadingTimbrado}>Cerrar</Button>
-          <Button
+          <AsyncButton
             variant="contained"
-            startIcon={loadingTimbrado ? <CircularProgress size={18} color="inherit" /> : <TimbrarIcon />}
+            startIcon={<TimbrarIcon />}
             onClick={handleSimularTimbrado}
             disabled={loadingTimbrado}
+            loading={loadingTimbrado}
+            loadingText="Timbrando..."
             disableElevation
           >
-            {loadingTimbrado ? 'Timbrando...' : 'Simular Timbrado'}
-          </Button>
+            Simular Timbrado
+          </AsyncButton>
         </DialogActions>
       </Dialog>
     </Box>

@@ -22,7 +22,15 @@ import {
 import { Add as AddIcon, Delete as DeleteIcon, Edit as EditIcon, Save as SaveIcon } from '@mui/icons-material';
 import { invoke } from '@tauri-apps/api/core';
 import { Proveedor } from '../../inventario/types';
+import { AsyncButton } from '../../shared/components/AsyncButton';
+import { ConfirmActionDialog } from '../../shared/components/ConfirmActionDialog';
+import { FeedbackSnackbar } from '../../shared/components/FeedbackSnackbar';
+import { TablePager } from '../../shared/components/TablePager';
 import { TableActions } from '../../shared/components/TableActions';
+import { useDialogHotkeys } from '../../shared/hooks/useDialogHotkeys';
+import { useFeedback } from '../../shared/hooks/useFeedback';
+import { useLocalPagination } from '../../shared/hooks/useLocalPagination';
+import { dialogActionsSx, dialogContentSx } from '../../shared/ui/patterns';
 import { useCatalogos } from '../../catalogos/context/CatalogosContext';
 
 export function ProveedoresView() {
@@ -38,6 +46,8 @@ export function ProveedoresView() {
   const [direccion, setDireccion] = useState('');
   const [saving, setSaving] = useState(false);
   const [deletingId, setDeletingId] = useState('');
+  const [deleteTarget, setDeleteTarget] = useState<Proveedor | null>(null);
+  const { feedbackMessage, feedbackSeverity, showFeedback, closeFeedback } = useFeedback();
 
   const handleOpen = (proveedor?: Proveedor) => {
     if (proveedor) {
@@ -82,23 +92,25 @@ export function ProveedoresView() {
       }
       handleClose();
       await refreshCatalogos();
+      showFeedback(editMode ? 'Proveedor actualizado correctamente.' : 'Proveedor creado correctamente.');
     } catch (error) {
       console.error('Error al guardar proveedor:', error);
-      alert(`Error al guardar: ${error}`);
+      showFeedback(`Error al guardar: ${error}`, 'error');
     } finally {
       setSaving(false);
     }
   };
 
   const handleDelete = async (id: string) => {
-    if (!confirm('¿Está seguro de que desea eliminar este proveedor?')) return;
     setDeletingId(id);
     try {
       await invoke('delete_provider', { id });
       await refreshCatalogos();
+      setDeleteTarget(null);
+      showFeedback('Proveedor eliminado correctamente.');
     } catch (error) {
       console.error('Error al eliminar proveedor:', error);
-      alert(`Error al eliminar: ${error}`);
+      showFeedback(`Error al eliminar: ${error}`, 'error');
     } finally {
       setDeletingId('');
     }
@@ -114,9 +126,20 @@ export function ProveedoresView() {
       proveedor.email.toLowerCase().includes(q)
     );
   });
+  const proveedoresPager = useLocalPagination(filtered);
+
+  const saveDisabled = saving || !nombre.trim();
+
+  useDialogHotkeys({
+    open,
+    disabled: saveDisabled,
+    cancelDisabled: saving,
+    onConfirm: handleSave,
+    onCancel: handleClose,
+  });
 
   return (
-    <Box sx={{ maxWidth: 1280, mx: 'auto', mt: 2 }}>
+    <Box sx={{ width: '100%', mt: 2 }}>
       <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3, gap: 2, flexWrap: 'wrap' }}>
         <Typography variant="h5" sx={{ fontWeight: 700, color: 'text.primary' }}>
           Proveedores
@@ -164,22 +187,22 @@ export function ProveedoresView() {
                 <TableCell sx={{ fontWeight: 600 }}>Teléfono</TableCell>
                 <TableCell sx={{ fontWeight: 600 }}>Email</TableCell>
                 <TableCell sx={{ fontWeight: 600 }}>Dirección</TableCell>
-                <TableCell align="right" sx={{ fontWeight: 600 }}>Acciones</TableCell>
+                <TableCell sx={{ fontWeight: 600 }}>Acciones</TableCell>
               </TableRow>
             </TableHead>
             <TableBody>
-              {filtered.map((proveedor) => (
+              {proveedoresPager.paginatedRows.map((proveedor) => (
                 <TableRow key={proveedor.id} hover>
                   <TableCell>{proveedor.nombre}</TableCell>
                   <TableCell>{proveedor.contactoNombre || '-'}</TableCell>
                   <TableCell>{proveedor.telefono || '-'}</TableCell>
                   <TableCell>{proveedor.email || '-'}</TableCell>
                   <TableCell>{proveedor.direccion || '-'}</TableCell>
-                  <TableCell align="right">
+                  <TableCell>
                     <IconButton color="primary" size="small" sx={{ mr: 1 }} onClick={() => handleOpen(proveedor)} disabled={Boolean(deletingId)}>
                       <EditIcon fontSize="small" />
                     </IconButton>
-                    <IconButton color="error" size="small" onClick={() => handleDelete(proveedor.id)} disabled={Boolean(deletingId)}>
+                    <IconButton color="error" size="small" onClick={() => setDeleteTarget(proveedor)} disabled={Boolean(deletingId)}>
                       {deletingId === proveedor.id ? <CircularProgress size={18} /> : <DeleteIcon fontSize="small" />}
                     </IconButton>
                   </TableCell>
@@ -195,12 +218,26 @@ export function ProveedoresView() {
             </TableBody>
           </Table>
         </TableContainer>
+        <TablePager
+          page={proveedoresPager.page}
+          pageSize={proveedoresPager.pageSize}
+          totalPages={proveedoresPager.totalPages}
+          totalRows={proveedoresPager.totalRows}
+          fromRow={proveedoresPager.fromRow}
+          toRow={proveedoresPager.toRow}
+          canPreviousPage={proveedoresPager.canPreviousPage}
+          canNextPage={proveedoresPager.canNextPage}
+          onPreviousPage={proveedoresPager.previousPage}
+          onNextPage={proveedoresPager.nextPage}
+          onPageSizeChange={proveedoresPager.setPageSize}
+          rowLabel="proveedores"
+        />
       </Paper>
 
       <Dialog open={open} onClose={saving ? undefined : handleClose} maxWidth="sm" fullWidth slotProps={{ paper: { sx: { borderRadius: 2 } } }}>
         <DialogTitle sx={{ fontWeight: 600, pb: 1 }}>{editMode ? 'Editar proveedor' : 'Nuevo proveedor'}</DialogTitle>
         <Divider />
-        <DialogContent sx={{ pt: 3 }}>
+        <DialogContent sx={dialogContentSx}>
           <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2.5 }}>
             <TextField label="Nombre de la empresa" value={nombre} onChange={(e) => setNombre(e.target.value)} required fullWidth />
             <TextField label="Nombre del responsable" value={contactoNombre} onChange={(e) => setContactoNombre(e.target.value)} fullWidth />
@@ -209,19 +246,34 @@ export function ProveedoresView() {
             <TextField label="Dirección" value={direccion} onChange={(e) => setDireccion(e.target.value)} fullWidth multiline minRows={2} />
           </Box>
         </DialogContent>
-        <DialogActions sx={{ p: 3, pt: 1 }}>
+        <DialogActions sx={{ ...dialogActionsSx, p: 3, pt: 1 }}>
           <Button onClick={handleClose} disabled={saving}>Cancelar</Button>
-          <Button
+          <AsyncButton
             onClick={handleSave}
             variant="contained"
-            startIcon={saving ? <CircularProgress size={18} color="inherit" /> : <SaveIcon />}
+            startIcon={<SaveIcon />}
             disableElevation
-            disabled={saving || !nombre.trim()}
+            disabled={saveDisabled}
+            loading={saving}
+            loadingText="Guardando..."
           >
-            {saving ? 'Guardando...' : 'Guardar'}
-          </Button>
+            Guardar
+          </AsyncButton>
         </DialogActions>
       </Dialog>
+      <ConfirmActionDialog
+        open={Boolean(deleteTarget)}
+        title="Eliminar proveedor"
+        message={`¿Eliminar el proveedor "${deleteTarget?.nombre ?? ''}"?`}
+        confirmText="Eliminar"
+        confirmColor="error"
+        loading={Boolean(deletingId)}
+        onCancel={() => setDeleteTarget(null)}
+        onConfirm={() => {
+          if (deleteTarget) return handleDelete(deleteTarget.id);
+        }}
+      />
+      <FeedbackSnackbar message={feedbackMessage} severity={feedbackSeverity} onClose={closeFeedback} />
     </Box>
   );
 }

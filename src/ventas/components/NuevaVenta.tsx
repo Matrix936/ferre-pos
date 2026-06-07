@@ -7,18 +7,18 @@ import {
   Box,
   Button,
   Chip,
-  CircularProgress,
+  Checkbox,
   DialogContentText,
   Dialog,
   DialogActions,
   DialogContent,
   DialogTitle,
+  FormControlLabel,
   List,
   ListItemButton,
   ListItemText,
   MenuItem,
   Paper,
-  Snackbar,
   Stack,
   Table,
   TableBody,
@@ -34,13 +34,23 @@ import {
   Delete as DeleteIcon,
   PauseCircleOutlined as PauseCircleOutlineIcon,
   Payments as PaymentsIcon,
+  ReceiptLong as ReceiptLongIcon,
   Search as SearchIcon,
   Undo as UndoIcon,
 } from '@mui/icons-material';
 import { useAuth } from '../../auth/context/AuthContext';
+import { useCatalogos } from '../../catalogos/context/CatalogosContext';
+import { useConfig } from '../../config/context/ConfigContext';
 import { Cliente, ProductoInventario, RegistrarVentaPayload } from '../../inventario/types';
+import { AsyncButton } from '../../shared/components/AsyncButton';
+import { FeedbackSeverity, FeedbackSnackbar } from '../../shared/components/FeedbackSnackbar';
+import { TablePager } from '../../shared/components/TablePager';
 import { useBarcodeScanner } from '../../shared/hooks/useBarcodeScanner';
 import { useDebouncedValue } from '../../shared/hooks/useDebouncedValue';
+import { useDialogHotkeys } from '../../shared/hooks/useDialogHotkeys';
+import { useLocalPagination } from '../../shared/hooks/useLocalPagination';
+import { dialogActionsSx, dialogContentSx } from '../../shared/ui/patterns';
+import { buildEscposLogoRaster } from '../utils/escposLogo';
 
 interface VentaRow {
   productoId: string;
@@ -52,6 +62,19 @@ interface VentaRow {
   precioDescontado?: number | null;
   nombrePromo?: string | null;
   promocionId?: string | null;
+  promoTipoDescuento?: string | null;
+  promoValor?: number | null;
+  costoPromedio?: number;
+  precioMostrador?: number;
+  precio1?: number;
+  precio2?: number;
+  precio3?: number;
+  precio4?: number;
+  mayoreoApartir?: number;
+  aGranel?: boolean;
+  noEnCatalogo?: boolean;
+  ventasNegativas?: boolean;
+  tipoPrecioVendido?: string;
 }
 
 interface TicketEnEspera {
@@ -68,12 +91,63 @@ interface CajaActualResumen {
   };
 }
 
+interface PerifericosConfig {
+  impresoraTickets: string;
+  impresoraEtiquetas: string;
+  updatedAt: string;
+}
+
+interface EmpresaConfigFiscal {
+  rfc: string;
+  razonSocial: string;
+  regimenFiscal: string;
+  registroPatronal?: string | null;
+  actualizadoAt: string;
+}
+
 const toCents = (value: number) => Math.round((Number.isFinite(value) ? value : 0) * 100);
 const fromCents = (value: number) => value / 100;
 const formatMoney = (value: number) => `$${fromCents(toCents(value)).toFixed(2)}`;
 const getPrecioOriginal = (row: VentaRow) => Number(row.precioOriginal || row.precioVenta || 0);
 const getPrecioFinal = (row: VentaRow) => Number(row.precioVenta || 0);
 const getDescuentoUnitario = (row: VentaRow) => Math.max(0, getPrecioOriginal(row) - getPrecioFinal(row));
+const isPrecioMayoreo = (row: VentaRow) => row.tipoPrecioVendido?.includes('MAYOREO') ?? false;
+const precioConPromo = (precio: number, tipo?: string | null, valor?: number | null) => {
+  if (!tipo || !valor || valor <= 0) return precio;
+  if (tipo === 'PORCENTAJE') return fromCents(toCents(precio * (1 - valor / 100)));
+  if (tipo === 'MONTO_FIJO') return fromCents(toCents(Math.max(0, precio - valor)));
+  return precio;
+};
+const aplicarPromoPreview = (row: VentaRow, precioBase: number, tipoBase: string) => {
+  const precioPromo = precioConPromo(precioBase, row.promoTipoDescuento, row.promoValor);
+  const costo = Number(row.costoPromedio || 0);
+  const promoValida = Boolean(row.promocionId && row.nombrePromo) && precioPromo < precioBase && precioPromo + 0.0001 >= costo;
+  if (!promoValida) {
+    return {
+      precioVenta: precioBase,
+      precioOriginal: tipoBase === 'MOSTRADOR' ? row.precioOriginal ?? null : row.precioMostrador ?? precioBase,
+      tipoPrecioVendido: tipoBase,
+    };
+  }
+  return {
+    precioVenta: precioPromo,
+    precioOriginal: precioBase,
+    tipoPrecioVendido: `${tipoBase}+PROMO`,
+  };
+};
+const resolvePrecioVentaRow = (row: VentaRow, cantidad: number) => {
+  const precioMostrador = row.precioMostrador ?? row.precioOriginal ?? Number(row.precioVenta || 0);
+  const mayoreo = Number(row.mayoreoApartir || 0);
+  if (mayoreo > 0 && cantidad >= mayoreo) {
+    const precioMayoreo = [row.precio1, row.precio2, row.precio3, row.precio4]
+      .map((value) => Number(value || 0))
+      .find((value) => value > 0 && value < precioMostrador);
+    if (precioMayoreo) {
+      return aplicarPromoPreview(row, precioMayoreo, 'MAYOREO');
+    }
+  }
+  return aplicarPromoPreview(row, precioMostrador, 'MOSTRADOR');
+};
 const isValidQuantity = (value: string) => {
   const trimmed = value.trim();
   if (!/^\d+(\.\d{0,3})?$/.test(trimmed)) return false;
@@ -150,21 +224,31 @@ function ButtonContentWithShortcut({ children, shortcut }: { children: ReactNode
 
 export function NuevaVenta() {
   const { user } = useAuth();
+  const { sucursales } = useCatalogos();
+  const { logo } = useConfig();
   const [carrito, setCarrito] = useState<VentaRow[]>([]);
   const [busqueda, setBusqueda] = useState('');
   const [opcionesBusqueda, setOpcionesBusqueda] = useState<ProductoInventario[]>([]);
   const [metodoPago, setMetodoPago] = useState('EFECTIVO');
   const [clientes, setClientes] = useState<Cliente[]>([]);
   const [clienteId, setClienteId] = useState('');
+  const [requiereFactura, setRequiereFactura] = useState(false);
+  const [clienteRapidoNombre, setClienteRapidoNombre] = useState('');
+  const [clienteRapidoTelefono, setClienteRapidoTelefono] = useState('');
+  const [clienteRapidoDomicilio, setClienteRapidoDomicilio] = useState('');
   const [openCobrar, setOpenCobrar] = useState(false);
   const [efectivoRecibido, setEfectivoRecibido] = useState('');
   const [snackbar, setSnackbar] = useState('');
+  const [snackbarSeverity, setSnackbarSeverity] = useState<FeedbackSeverity>('success');
   const [loading, setLoading] = useState(false);
+  const [openConfirmarVenta, setOpenConfirmarVenta] = useState(false);
+  const [recordarConfirmacionVenta, setRecordarConfirmacionVenta] = useState(false);
   const [ticketsEnEspera, setTicketsEnEspera] = useState<TicketEnEspera[]>([]);
   const [openEspera, setOpenEspera] = useState(false);
   const [referenciaEspera, setReferenciaEspera] = useState('');
   const [openRecuperar, setOpenRecuperar] = useState(false);
   const [cajaAbierta, setCajaAbierta] = useState(false);
+  const [checkingCaja, setCheckingCaja] = useState(true);
   const [openVentaRapida, setOpenVentaRapida] = useState(false);
   const [ventaRapidaDescripcion, setVentaRapidaDescripcion] = useState('');
   const [ventaRapidaCantidad, setVentaRapidaCantidad] = useState('1');
@@ -180,31 +264,29 @@ export function NuevaVenta() {
   const canUseVentaRapida = canUseCredito;
   const busquedaDebounced = useDebouncedValue(busqueda, 300);
 
-  const fetchProductos = async () => {
-    if (!sucursalId) return;
-    await invoke<ProductoInventario[]>('get_productos_por_sucursal', { sucursalId });
-  };
-
   const fetchCajaActual = async () => {
+    setCheckingCaja(true);
     if (!user?.id || !sucursalId) {
       setCajaAbierta(false);
+      setCheckingCaja(false);
       return;
     }
-    const data = await invoke<CajaActualResumen | null>('get_caja_actual', {
-      usuarioId: user.id,
-      sucursalId,
-    });
-    setCajaAbierta(Boolean(data && data.sesion.estado === 'ABIERTA'));
+    try {
+      const data = await invoke<CajaActualResumen | null>('get_caja_actual', {
+        usuarioId: user.id,
+        sucursalId,
+      });
+      setCajaAbierta(Boolean(data && data.sesion.estado === 'ABIERTA'));
+    } finally {
+      setCheckingCaja(false);
+    }
   };
-
-  useEffect(() => {
-    fetchProductos().catch((error) => console.error('Error productos:', error));
-  }, [sucursalId]);
 
   useEffect(() => {
     fetchCajaActual().catch((error) => {
       console.error('Error caja actual:', error);
       setCajaAbierta(false);
+      setCheckingCaja(false);
     });
   }, [user?.id, sucursalId]);
 
@@ -249,14 +331,19 @@ export function NuevaVenta() {
     () =>
       fromCents(carrito.reduce((acc, row) => {
         const cantidad = Number(row.cantidad || 0);
-        if (!row.nombrePromo) return acc;
+        if (getDescuentoUnitario(row) <= 0) return acc;
         return acc + toCents(getDescuentoUnitario(row) * cantidad);
       }, 0)),
     [carrito],
   );
 
-  const productosConPromocion = useMemo(
-    () => carrito.filter((row) => row.nombrePromo && getDescuentoUnitario(row) > 0).length,
+  const productosConDescuento = useMemo(
+    () => carrito.filter((row) => getDescuentoUnitario(row) > 0).length,
+    [carrito],
+  );
+  const carritoPager = useLocalPagination(carrito);
+  const totalPiezasCarrito = useMemo(
+    () => fromCents(carrito.reduce((acc, row) => acc + toCents(Number(row.cantidad || 0)), 0)),
     [carrito],
   );
 
@@ -268,6 +355,7 @@ export function NuevaVenta() {
   const efectivoFormatoInvalido = metodoPago === 'EFECTIVO' && !/^\d+(\.\d{0,2})?$/.test(efectivoRecibido.trim() || '0');
   const cobroBloqueado =
     loading ||
+    checkingCaja ||
     carrito.length === 0 ||
     !cajaAbierta ||
     carritoInvalido ||
@@ -279,26 +367,51 @@ export function NuevaVenta() {
     window.setTimeout(() => searchInputRef.current?.focus(), 0);
   };
 
+  const showToast = (message: string, severity: 'success' | 'info' | 'warning' | 'error' = 'success') => {
+    setSnackbarSeverity(severity);
+    setSnackbar(message);
+  };
+
   const addProducto = (producto: ProductoInventario) => {
     setCarrito((prev) => {
       const idx = prev.findIndex((item) => item.productoId === producto.id);
       if (idx >= 0) {
         setSelectedRowIndex(idx);
-        return prev.map((item, index) =>
-          index === idx
-            ? {
-                ...item,
-                descripcion: producto.descripcion,
-                marca: producto.marca,
-                cantidad: String(Number(item.cantidad || 0) + 1),
-                precioVenta: String(producto.precioVenta ?? item.precioVenta ?? 0),
-                precioOriginal: producto.precioOriginal ?? null,
-                precioDescontado: producto.precioDescontado ?? null,
-                nombrePromo: producto.nombrePromo ?? null,
-                promocionId: producto.promocionId ?? null,
-              }
-            : item,
-        );
+        return prev.map((item, index) => {
+          if (index !== idx) return item;
+          const cantidad = Number(item.cantidad || 0) + 1;
+          const baseRow: VentaRow = {
+            ...item,
+            descripcion: producto.descripcion,
+            marca: producto.marca,
+            cantidad: String(cantidad),
+            precioVenta: String(producto.precioVenta ?? item.precioVenta ?? 0),
+            precioOriginal: producto.precioOriginal ?? null,
+            precioDescontado: producto.precioDescontado ?? null,
+            nombrePromo: producto.nombrePromo ?? null,
+            promocionId: producto.promocionId ?? null,
+            promoTipoDescuento: producto.promoTipoDescuento ?? null,
+            promoValor: producto.promoValor ?? null,
+            costoPromedio: producto.costoPromedio ?? 0,
+            precioMostrador: producto.precioOriginal ?? producto.precioVenta ?? 0,
+            precio1: producto.precio1 ?? 0,
+            precio2: producto.precio2 ?? 0,
+            precio3: producto.precio3 ?? 0,
+            precio4: producto.precio4 ?? 0,
+            mayoreoApartir: producto.mayoreoApartir ?? 0,
+            aGranel: producto.aGranel ?? false,
+            noEnCatalogo: producto.noEnCatalogo ?? false,
+            ventasNegativas: producto.ventasNegativas ?? false,
+            tipoPrecioVendido: producto.nombrePromo ? 'MOSTRADOR+PROMO' : 'MOSTRADOR',
+          };
+          const resolved = resolvePrecioVentaRow(baseRow, cantidad);
+          return {
+            ...baseRow,
+            precioVenta: String(resolved.precioVenta),
+            precioOriginal: resolved.precioOriginal,
+            tipoPrecioVendido: resolved.tipoPrecioVendido,
+          };
+        });
       }
       setSelectedRowIndex(prev.length);
       return [
@@ -313,6 +426,19 @@ export function NuevaVenta() {
           precioDescontado: producto.precioDescontado ?? null,
           nombrePromo: producto.nombrePromo ?? null,
           promocionId: producto.promocionId ?? null,
+          promoTipoDescuento: producto.promoTipoDescuento ?? null,
+          promoValor: producto.promoValor ?? null,
+          costoPromedio: producto.costoPromedio ?? 0,
+          precioMostrador: producto.precioOriginal ?? producto.precioVenta ?? 0,
+          precio1: producto.precio1 ?? 0,
+          precio2: producto.precio2 ?? 0,
+          precio3: producto.precio3 ?? 0,
+          precio4: producto.precio4 ?? 0,
+          mayoreoApartir: producto.mayoreoApartir ?? 0,
+          aGranel: producto.aGranel ?? false,
+          noEnCatalogo: producto.noEnCatalogo ?? false,
+          ventasNegativas: producto.ventasNegativas ?? false,
+          tipoPrecioVendido: producto.nombrePromo ? 'MOSTRADOR+PROMO' : 'MOSTRADOR',
         },
       ];
     });
@@ -320,14 +446,24 @@ export function NuevaVenta() {
 
   const refreshCarritoPromociones = async () => {
     if (!sucursalId || carrito.length === 0) return;
-    const productosActualizados = await invoke<ProductoInventario[]>('get_productos_por_sucursal', { sucursalId });
-    const index = new Map(productosActualizados.map((producto) => [producto.id, producto]));
+    const productosActualizados = await Promise.all(
+      carrito
+        .filter((row) => row.productoId !== 'VENTA-DIVERSA')
+        .map(async (row) => {
+          const results = await invoke<ProductoInventario[]>('buscar_productos_por_sucursal', {
+            sucursalId,
+            query: row.productoId,
+          });
+          return results.find((producto) => producto.id === row.productoId) ?? null;
+        }),
+    );
+    const index = new Map(productosActualizados.filter(Boolean).map((producto) => [producto!.id, producto!]));
     setCarrito((prev) =>
       prev.map((row) => {
         if (row.productoId === 'VENTA-DIVERSA') return row;
         const producto = index.get(row.productoId);
         if (!producto) return row;
-        return {
+        const baseRow: VentaRow = {
           ...row,
           descripcion: producto.descripcion,
           marca: producto.marca,
@@ -336,15 +472,29 @@ export function NuevaVenta() {
           precioDescontado: producto.precioDescontado ?? null,
           nombrePromo: producto.nombrePromo ?? null,
           promocionId: producto.promocionId ?? null,
+          promoTipoDescuento: producto.promoTipoDescuento ?? null,
+          promoValor: producto.promoValor ?? null,
+          costoPromedio: producto.costoPromedio ?? 0,
+          precioMostrador: producto.precioOriginal ?? producto.precioVenta ?? 0,
+          precio1: producto.precio1 ?? 0,
+          precio2: producto.precio2 ?? 0,
+          precio3: producto.precio3 ?? 0,
+          precio4: producto.precio4 ?? 0,
+          mayoreoApartir: producto.mayoreoApartir ?? 0,
+          aGranel: producto.aGranel ?? false,
+          noEnCatalogo: producto.noEnCatalogo ?? false,
+          ventasNegativas: producto.ventasNegativas ?? false,
         };
+        const resolved = resolvePrecioVentaRow(baseRow, Number(baseRow.cantidad || 0));
+        return { ...baseRow, precioVenta: String(resolved.precioVenta), precioOriginal: resolved.precioOriginal, tipoPrecioVendido: resolved.tipoPrecioVendido };
       }),
     );
   };
 
   const prepararCobro = async () => {
-    if (loading || carrito.length === 0 || !cajaAbierta) return;
+    if (loading || checkingCaja || carrito.length === 0 || !cajaAbierta) return;
     if (carritoInvalido) {
-      setSnackbar('Revisa cantidades y precios antes de cobrar.');
+      showToast('Revisa cantidades y precios antes de cobrar.', 'warning');
       return;
     }
     try {
@@ -369,7 +519,7 @@ export function NuevaVenta() {
     async (code: string) => {
       if (!sucursalId) return;
       if (!cajaAbierta) {
-        setSnackbar('Abre caja antes de escanear productos.');
+        showToast('Abre caja antes de escanear productos.', 'warning');
         return;
       }
 
@@ -388,7 +538,7 @@ export function NuevaVenta() {
           ) ?? data[0];
 
         if (!producto) {
-          setSnackbar(`No se encontró el código ${code}.`);
+          showToast(`No se encontró el código ${code}.`, 'warning');
           return;
         }
 
@@ -397,7 +547,7 @@ export function NuevaVenta() {
         setOpcionesBusqueda([]);
       } catch (error) {
         console.error('Error al leer código de barras:', error);
-        setSnackbar(`Error al leer código de barras: ${error}`);
+        showToast(`Error al leer código de barras: ${error}`, 'error');
       }
     },
     [sucursalId, cajaAbierta],
@@ -440,7 +590,7 @@ export function NuevaVenta() {
         item.claveProducto.toLowerCase().includes(q),
     );
     if (!producto) {
-      setSnackbar('No se encontró el producto.');
+      showToast('No se encontró el producto.', 'warning');
       return;
     }
     addProductoFromSearch(producto);
@@ -449,7 +599,21 @@ export function NuevaVenta() {
   };
 
   const updateRow = (productoId: string, field: 'cantidad', value: string) => {
-    setCarrito((prev) => prev.map((row) => (row.productoId === productoId ? { ...row, [field]: value } : row)));
+    setCarrito((prev) =>
+      prev.map((row) => {
+        if (row.productoId !== productoId) return row;
+        const updated = { ...row, [field]: value };
+        const cantidad = Number(value || 0);
+        if (!Number.isFinite(cantidad) || cantidad <= 0) return updated;
+        const resolved = resolvePrecioVentaRow(updated, cantidad);
+        return {
+          ...updated,
+          precioVenta: String(resolved.precioVenta),
+          precioOriginal: resolved.precioOriginal,
+          tipoPrecioVendido: resolved.tipoPrecioVendido,
+        };
+      }),
+    );
   };
 
   const removeRow = (productoId: string) => {
@@ -463,6 +627,10 @@ export function NuevaVenta() {
     setMetodoPago('EFECTIVO');
     setEfectivoRecibido('');
     setClienteId('');
+    setRequiereFactura(false);
+    setClienteRapidoNombre('');
+    setClienteRapidoTelefono('');
+    setClienteRapidoDomicilio('');
     setSelectedRowIndex(null);
   };
 
@@ -471,16 +639,16 @@ export function NuevaVenta() {
     const cantidad = Number(ventaRapidaCantidad || 0);
     const precio = Number(ventaRapidaPrecio || 0);
     if (!ventaRapidaDescripcion.trim()) {
-      setSnackbar('Describe el artículo diverso.');
+      showToast('Describe el artículo diverso.', 'warning');
       return;
     }
     if (cantidad <= 0 || precio <= 0) {
-      setSnackbar('Cantidad y precio deben ser mayores a cero.');
+      showToast('Cantidad y precio deben ser mayores a cero.', 'warning');
       return;
     }
     const existing = carrito.find((row) => row.productoId === 'VENTA-DIVERSA');
     if (existing && Number(existing.precioVenta || 0) !== fromCents(toCents(precio))) {
-      setSnackbar('Solo puede haber un artículo diverso por ticket si cambia el precio.');
+      showToast('Solo puede haber un artículo diverso por ticket si cambia el precio.', 'warning');
       return;
     }
 
@@ -498,6 +666,8 @@ export function NuevaVenta() {
                   descripcion: row.descripcion || ventaRapidaDescripcion.trim(),
                   cantidad: String(Number(row.cantidad || 0) + cantidad),
                   precioVenta: String(precioNormalizado),
+                  precioOriginal: precioNormalizado,
+                  tipoPrecioVendido: 'DIVERSO',
                 }
               : row,
           );
@@ -511,6 +681,8 @@ export function NuevaVenta() {
             marca: producto.marca || 'Sin marca',
             cantidad: String(cantidad),
             precioVenta: String(precioNormalizado),
+            precioOriginal: precioNormalizado,
+            tipoPrecioVendido: 'DIVERSO',
           },
         ];
       });
@@ -518,9 +690,9 @@ export function NuevaVenta() {
       setVentaRapidaCantidad('1');
       setVentaRapidaPrecio('');
       setOpenVentaRapida(false);
-      setSnackbar('Artículo diverso agregado.');
+      showToast('Artículo diverso agregado.', 'success');
     } catch (error) {
-      setSnackbar(`Error al agregar artículo diverso: ${error}`);
+      showToast(`Error al agregar artículo diverso: ${error}`, 'error');
     }
   };
 
@@ -530,17 +702,17 @@ export function NuevaVenta() {
       return;
     }
     clearVenta();
-    setSnackbar('Venta limpia. Lista para capturar.');
+    showToast('Venta limpia. Lista para capturar.', 'info');
     focusSearch();
   };
 
   const handleGuardarEnEspera = () => {
     if (carrito.length === 0) {
-      setSnackbar('No hay productos para poner en espera.');
+      showToast('No hay productos para poner en espera.', 'warning');
       return;
     }
     if (!referenciaEspera.trim()) {
-      setSnackbar('Ingresa una referencia para el ticket en espera.');
+      showToast('Ingresa una referencia para el ticket en espera.', 'warning');
       return;
     }
 
@@ -555,41 +727,94 @@ export function NuevaVenta() {
     clearVenta();
     setOpenEspera(false);
     setReferenciaEspera('');
-    setSnackbar('Ticket puesto en espera.');
+    showToast('Ticket puesto en espera.', 'success');
+  };
+
+  const imprimirTicketVenta = async (venta: RegistrarVentaPayload) => {
+    const [config, empresaConfig] = await Promise.all([
+      invoke<PerifericosConfig>('get_perifericos_config'),
+      invoke<EmpresaConfigFiscal>('get_empresa_config').catch(() => null),
+    ]);
+    const printerName = config.impresoraTickets?.trim();
+    if (!printerName) {
+      throw new Error('No hay impresora de tickets configurada.');
+    }
+    const sucursal = sucursales.find((item) => item.id === venta.sucursalId);
+    const logoBytes = await buildEscposLogoRaster(logo, 42).catch(() => undefined);
+    await invoke('imprimir_ticket_y_abrir_caja', {
+      printerName,
+      paperWidth: 42,
+      abrirCajon: metodoPago === 'EFECTIVO',
+      ticket: {
+        folio: venta.id.slice(0, 8).toUpperCase(),
+        fecha: new Date(venta.fecha).toLocaleString(),
+        cajero: user?.nombre ?? '',
+        sucursal: sucursal?.nombre ?? sucursalId,
+        logoBytes,
+        empresaNombre: empresaConfig?.razonSocial,
+        rfc: empresaConfig?.rfc,
+        regimenFiscal: empresaConfig?.regimenFiscal,
+        codigoPostal: sucursal?.codigoPostal,
+        metodoPago,
+        estado: 'COMPLETADA',
+        productos: carrito.map((row) => {
+          const cantidad = Number(row.cantidad || 0);
+          const precio = Number(row.precioVenta || 0);
+          return {
+            descripcion: row.descripcion,
+            marca: row.marca,
+            cantidad,
+            precioUnitario: precio,
+            importe: fromCents(toCents(cantidad * precio)),
+          };
+        }),
+        subtotal: subtotalSinDescuento,
+        descuento: ahorroTotal,
+        total,
+        recibido: metodoPago === 'EFECTIVO' ? fromCents(toCents(Number(efectivoRecibido || 0))) : undefined,
+        cambio: metodoPago === 'EFECTIVO' ? fromCents(toCents(Math.max(cambio, 0))) : undefined,
+        mensaje: 'Gracias por su compra',
+      },
+    });
+    return printerName;
   };
 
   const handleRecuperarTicket = (ticket: TicketEnEspera) => {
     setCarrito(ticket.productos);
     setTicketsEnEspera((prev) => prev.filter((item) => item.id !== ticket.id));
     setOpenRecuperar(false);
-    setSnackbar('Ticket recuperado correctamente.');
+    showToast('Ticket recuperado correctamente.', 'success');
   };
 
-  const confirmarCobro = async () => {
+  const confirmarCobro = async (confirmacionForzada = false) => {
     if (loading) return;
     if (!user?.id || !sucursalId || carrito.length === 0) return;
     if (!cajaAbierta) {
-      setSnackbar('No puedes cobrar porque la caja está cerrada.');
+      showToast('No puedes cobrar porque la caja está cerrada.', 'warning');
       return;
     }
     if (carritoInvalido) {
-      setSnackbar('Revisa cantidades y precios antes de cobrar.');
+      showToast('Revisa cantidades y precios antes de cobrar.', 'warning');
       return;
     }
     if (efectivoFormatoInvalido) {
-      setSnackbar('El efectivo recibido debe tener máximo 2 decimales.');
+      showToast('El efectivo recibido debe tener máximo 2 decimales.', 'warning');
       return;
     }
     if (metodoPago === 'EFECTIVO' && cambio < 0) {
-      setSnackbar('El efectivo recibido es insuficiente.');
+      showToast('El efectivo recibido es insuficiente.', 'warning');
       return;
     }
     if (metodoPago === 'CREDITO' && !clienteId) {
-      setSnackbar('Selecciona un cliente para venta a crédito.');
+      showToast('Selecciona un cliente para venta a crédito.', 'warning');
       return;
     }
     if (creditoInsuficiente) {
-      setSnackbar('El crédito disponible del cliente no alcanza para esta venta.');
+      showToast('El crédito disponible del cliente no alcanza para esta venta.', 'warning');
+      return;
+    }
+    if (!confirmacionForzada && !recordarConfirmacionVenta) {
+      setOpenConfirmarVenta(true);
       return;
     }
 
@@ -604,28 +829,73 @@ export function NuevaVenta() {
         clienteId: metodoPago === 'CREDITO' ? clienteId : undefined,
         efectivoRecibido: metodoPago === 'EFECTIVO' ? fromCents(toCents(Number(efectivoRecibido || 0))) : undefined,
         cambioEntregado: metodoPago === 'EFECTIVO' ? fromCents(toCents(Math.max(cambio, 0))) : undefined,
+        clienteRapidoNombre: clienteRapidoNombre.trim() || undefined,
+        clienteRapidoTelefono: clienteRapidoTelefono.trim() || undefined,
+        clienteRapidoDomicilio: clienteRapidoDomicilio.trim() || undefined,
+        requiereFactura,
         detalles: carrito.map((row) => ({
           id: crypto.randomUUID(),
           productoId: row.productoId,
           cantidad: Number(row.cantidad || 0),
           precioVentaPactado: Number(row.precioVenta || 0),
+          tipoPrecioVendido: row.tipoPrecioVendido ?? (row.nombrePromo ? 'MOSTRADOR+PROMO' : 'MOSTRADOR'),
+          precioOriginal: getPrecioOriginal(row),
+          descuentoAplicado: getDescuentoUnitario(row),
         })),
       };
 
       await invoke('registrar_venta', { venta: payload });
+      try {
+        const printerName = await imprimirTicketVenta(payload);
+        showToast(`Venta registrada. Ticket enviado a ${printerName}.`, 'success');
+      } catch (printError) {
+        showToast(`Venta registrada, pero la impresora de tickets no está disponible. ${String(printError)}`, 'error');
+      }
       setOpenCobrar(false);
+      setOpenConfirmarVenta(false);
       clearVenta();
-      setSnackbar('Venta registrada correctamente.');
-      fetchProductos().catch((error) => console.error('Error productos:', error));
       fetchCajaActual().catch((error) => console.error('Error caja actual:', error));
       focusSearch();
     } catch (error) {
       console.error('Error al registrar venta:', error);
-      setSnackbar(`Error al registrar venta: ${error}`);
+      showToast(`Error al registrar venta: ${error}`, 'error');
     } finally {
       setLoading(false);
     }
   };
+
+  const esperaDisabled = !referenciaEspera.trim();
+  const ventaRapidaDisabled =
+    !ventaRapidaDescripcion.trim() || Number(ventaRapidaCantidad || 0) <= 0 || Number(ventaRapidaPrecio || 0) <= 0;
+  useDialogHotkeys({
+    open: openEspera,
+    disabled: esperaDisabled,
+    onConfirm: handleGuardarEnEspera,
+    onCancel: () => setOpenEspera(false),
+  });
+  useDialogHotkeys({
+    open: openVentaRapida,
+    disabled: ventaRapidaDisabled,
+    onConfirm: handleAgregarVentaRapida,
+    onCancel: () => setOpenVentaRapida(false),
+  });
+  useDialogHotkeys({
+    open: openCobrar,
+    disabled: cobroBloqueado || openConfirmarVenta,
+    cancelDisabled: loading,
+    onConfirm: () => void confirmarCobro(),
+    onCancel: () => setOpenCobrar(false),
+  });
+  useDialogHotkeys({
+    open: openConfirmarVenta,
+    disabled: loading,
+    cancelDisabled: loading,
+    onConfirm: () => {
+      setOpenConfirmarVenta(false);
+      void confirmarCobro(true);
+    },
+    onCancel: () => setOpenConfirmarVenta(false),
+  });
 
   useEffect(() => {
     if (openEspera) {
@@ -688,13 +958,13 @@ export function NuevaVenta() {
 
       if (key === 'F4') {
         event.preventDefault();
-        if (!loading && carrito.length > 0 && cajaAbierta) void prepararCobro();
+        if (!loading && !checkingCaja && carrito.length > 0 && cajaAbierta) void prepararCobro();
         return;
       }
 
       if (key === 'F12') {
         event.preventDefault();
-        if (!loading && carrito.length > 0 && cajaAbierta) void prepararCobro();
+        if (!loading && !checkingCaja && carrito.length > 0 && cajaAbierta) void prepararCobro();
         return;
       }
 
@@ -719,8 +989,13 @@ export function NuevaVenta() {
       if (key === 'F10') {
         event.preventDefault();
         if (loading) return;
+        if (openConfirmarVenta) {
+          setOpenConfirmarVenta(false);
+          void confirmarCobro(true);
+          return;
+        }
         if (openCobrar) {
-          confirmarCobro();
+          void confirmarCobro();
           return;
         }
         if (openEspera) {
@@ -735,10 +1010,10 @@ export function NuevaVenta() {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [carrito, selectedRowIndex, busqueda, clienteId, efectivoRecibido, openCobrar, openEspera, openVentaRapida, metodoPago, cambio, total, loading, cajaAbierta, canUseVentaRapida, ventaRapidaDescripcion, ventaRapidaCantidad, ventaRapidaPrecio, carritoInvalido, efectivoFormatoInvalido, creditoInsuficiente]);
+  }, [carrito, selectedRowIndex, busqueda, clienteId, efectivoRecibido, openConfirmarVenta, openCobrar, openEspera, openVentaRapida, metodoPago, cambio, total, loading, checkingCaja, cajaAbierta, canUseVentaRapida, ventaRapidaDescripcion, ventaRapidaCantidad, ventaRapidaPrecio, carritoInvalido, efectivoFormatoInvalido, creditoInsuficiente]);
 
   return (
-    <Box sx={{ maxWidth: 1280, mx: 'auto', mt: 2, height: 'calc(100vh - 112px)', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+    <Box sx={{ width: '100%', mt: 2, height: 'calc(100vh - 112px)', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
       <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 2, mb: 3, flexWrap: 'wrap', flexShrink: 0 }}>
         <Box>
           <Typography variant="h5" sx={{ fontWeight: 700 }}>
@@ -758,7 +1033,12 @@ export function NuevaVenta() {
       </Box>
 
       <Paper elevation={0} sx={{ p: 2, borderRadius: 2, border: '1px solid', borderColor: 'divider', mb: 2, flexShrink: 0 }}>
-        {!cajaAbierta && (
+        {checkingCaja && (
+          <Alert severity="info" sx={{ mb: 2 }}>
+            Verificando estado de caja...
+          </Alert>
+        )}
+        {!checkingCaja && !cajaAbierta && (
           <Alert severity="warning" sx={{ mb: 2 }}>
             Caja cerrada. Puedes preparar el carrito, pero abre caja antes de cobrar.
           </Alert>
@@ -859,11 +1139,13 @@ export function NuevaVenta() {
                 <TableCell sx={{ fontWeight: 600 }}>Precio</TableCell>
                 <TableCell sx={{ fontWeight: 600 }}>Descuento</TableCell>
                 <TableCell sx={{ fontWeight: 600 }}>Importe</TableCell>
-                <TableCell align="right" sx={{ fontWeight: 600 }}>Acciones</TableCell>
+                <TableCell sx={{ fontWeight: 600 }}>Acciones</TableCell>
               </TableRow>
             </TableHead>
             <TableBody>
-              {carrito.map((row, index) => (
+              {carritoPager.paginatedRows.map((row, pageIndex) => {
+                const index = carritoPager.startIndex + pageIndex;
+                return (
                 <TableRow
                   key={`${row.productoId}-${index}`}
                   hover
@@ -871,17 +1153,7 @@ export function NuevaVenta() {
                   onClick={() => setSelectedRowIndex(index)}
                 >
                   <TableCell>
-                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
-                      <Box component="span">{row.descripcion}</Box>
-                      {row.nombrePromo && (
-                        <Chip
-                          label={row.nombrePromo}
-                          size="small"
-                          color="success"
-                          sx={{ height: 22, borderRadius: '6px', fontWeight: 700 }}
-                        />
-                      )}
-                    </Box>
+                    <Box component="span">{row.descripcion}</Box>
                   </TableCell>
                   <TableCell>{row.marca || '-'}</TableCell>
                   <TableCell sx={{ width: 140 }}>
@@ -896,10 +1168,28 @@ export function NuevaVenta() {
                     />
                   </TableCell>
                   <TableCell sx={{ width: 180 }}>
-                    {row.nombrePromo && row.precioOriginal ? (
+                    {getDescuentoUnitario(row) > 0 ? (
                       <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.25 }}>
+                        <Stack direction="row" spacing={0.75} sx={{ alignItems: 'center', flexWrap: 'wrap' }}>
+                          {row.nombrePromo && (
+                            <Chip
+                              label={row.nombrePromo}
+                              size="small"
+                              color="success"
+                              sx={{ height: 22, borderRadius: '6px', fontWeight: 700 }}
+                            />
+                          )}
+                          {isPrecioMayoreo(row) && (
+                            <Chip
+                              label="Mayoreo"
+                              size="small"
+                              color="primary"
+                              sx={{ height: 22, borderRadius: '6px', fontWeight: 700 }}
+                            />
+                          )}
+                        </Stack>
                         <Typography variant="caption" sx={{ color: 'text.secondary', textDecoration: 'line-through' }}>
-                          {formatMoney(row.precioOriginal)}
+                          {formatMoney(getPrecioOriginal(row))}
                         </Typography>
                         <Typography variant="body2" sx={{ fontWeight: 800 }}>
                           {formatMoney(Number(row.precioVenta || 0))}
@@ -912,7 +1202,7 @@ export function NuevaVenta() {
                     )}
                   </TableCell>
                   <TableCell sx={{ width: 150 }}>
-                    {row.nombrePromo && getDescuentoUnitario(row) > 0 ? (
+                    {getDescuentoUnitario(row) > 0 ? (
                       <Stack spacing={0.25}>
                         <Typography variant="body2" sx={{ color: 'success.main', fontWeight: 800 }}>
                           -{formatMoney(getDescuentoUnitario(row) * Number(row.cantidad || 0))}
@@ -926,13 +1216,14 @@ export function NuevaVenta() {
                     )}
                   </TableCell>
                   <TableCell>{formatMoney(Number(row.cantidad || 0) * Number(row.precioVenta || 0))}</TableCell>
-                  <TableCell align="right">
+                  <TableCell>
                     <Button size="small" color="error" startIcon={<DeleteIcon />} onClick={() => removeRow(row.productoId)}>
                       Quitar
                     </Button>
                   </TableCell>
                 </TableRow>
-              ))}
+                );
+              })}
               {carrito.length === 0 && (
                 <TableRow>
                   <TableCell colSpan={7} align="center" sx={{ py: 4, color: 'text.secondary' }}>
@@ -943,6 +1234,20 @@ export function NuevaVenta() {
             </TableBody>
           </Table>
         </TableContainer>
+        <TablePager
+          page={carritoPager.page}
+          pageSize={carritoPager.pageSize}
+          totalPages={carritoPager.totalPages}
+          totalRows={carritoPager.totalRows}
+          fromRow={carritoPager.fromRow}
+          toRow={carritoPager.toRow}
+          canPreviousPage={carritoPager.canPreviousPage}
+          canNextPage={carritoPager.canNextPage}
+          onPreviousPage={carritoPager.previousPage}
+          onNextPage={carritoPager.nextPage}
+          onPageSizeChange={carritoPager.setPageSize}
+          summary={`${carrito.length} ${carrito.length === 1 ? 'artículo' : 'artículos'} (${totalPiezasCarrito.toFixed(3).replace(/\.?0+$/, '')} piezas en total)`}
+        />
       </Paper>
 
       <Paper
@@ -971,7 +1276,7 @@ export function NuevaVenta() {
                   {formatMoney(subtotalSinDescuento)}
                 </Typography>
                 <Chip
-                  label={`${productosConPromocion} ${productosConPromocion === 1 ? 'promo' : 'promos'}`}
+                  label={`${productosConDescuento} ${productosConDescuento === 1 ? 'descuento' : 'descuentos'}`}
                   color="success"
                   size="small"
                   sx={{ height: 22, borderRadius: '6px', fontWeight: 800 }}
@@ -1032,7 +1337,7 @@ export function NuevaVenta() {
               size="large"
               startIcon={<PaymentsIcon />}
               onClick={() => void prepararCobro()}
-              disabled={loading || carrito.length === 0 || !cajaAbierta || carritoInvalido}
+              disabled={loading || checkingCaja || carrito.length === 0 || !cajaAbierta || carritoInvalido}
             >
               <ButtonContentWithShortcut shortcut="F4">Cobrar</ButtonContentWithShortcut>
             </Button>
@@ -1042,7 +1347,7 @@ export function NuevaVenta() {
 
       <Dialog open={openEspera} onClose={() => setOpenEspera(false)} maxWidth="xs" fullWidth>
         <DialogTitle>Poner ticket en espera</DialogTitle>
-        <DialogContent sx={{ pt: 2, display: 'flex', flexDirection: 'column', gap: 2 }}>
+        <DialogContent sx={dialogContentSx}>
           <DialogContentText>
             Agrega una referencia rápida para identificar este ticket.
           </DialogContentText>
@@ -1055,9 +1360,9 @@ export function NuevaVenta() {
             autoFocus
           />
         </DialogContent>
-        <DialogActions sx={{ p: 2 }}>
+        <DialogActions sx={dialogActionsSx}>
           <Button onClick={() => setOpenEspera(false)}>Cancelar</Button>
-          <Button variant="contained" onClick={handleGuardarEnEspera}>
+          <Button variant="contained" onClick={handleGuardarEnEspera} disabled={esperaDisabled}>
             <ButtonContentWithShortcut shortcut="F10">Confirmar</ButtonContentWithShortcut>
           </Button>
         </DialogActions>
@@ -1088,7 +1393,7 @@ export function NuevaVenta() {
 
       <Dialog open={openVentaRapida} onClose={() => setOpenVentaRapida(false)} maxWidth="xs" fullWidth>
         <DialogTitle>Artículo diverso</DialogTitle>
-        <DialogContent sx={{ '&&': { pt: 2.5 }, display: 'flex', flexDirection: 'column', gap: 2 }}>
+        <DialogContent sx={dialogContentSx}>
           <Alert severity="info">
             Uso controlado para artículos sin código. Solo para personal autorizado.
           </Alert>
@@ -1114,12 +1419,12 @@ export function NuevaVenta() {
             slotProps={{ htmlInput: { min: 0.01, step: '0.01' } }}
           />
         </DialogContent>
-        <DialogActions sx={{ p: 2 }}>
+        <DialogActions sx={dialogActionsSx}>
           <Button onClick={() => setOpenVentaRapida(false)}>Cancelar</Button>
           <Button
             variant="contained"
             onClick={handleAgregarVentaRapida}
-            disabled={!ventaRapidaDescripcion.trim() || Number(ventaRapidaCantidad || 0) <= 0 || Number(ventaRapidaPrecio || 0) <= 0}
+            disabled={ventaRapidaDisabled}
           >
             Agregar
           </Button>
@@ -1128,7 +1433,7 @@ export function NuevaVenta() {
 
       <Dialog open={openCobrar} onClose={loading ? undefined : () => setOpenCobrar(false)} maxWidth="xs" fullWidth>
         <DialogTitle sx={{ pb: 1 }}>Cobrar venta</DialogTitle>
-        <DialogContent sx={{ '&&': { pt: 2.5 }, display: 'flex', flexDirection: 'column', gap: 2 }}>
+        <DialogContent sx={dialogContentSx}>
           <TextField select label="Método de pago" value={metodoPago} onChange={(e) => setMetodoPago(e.target.value)}>
             <MenuItem value="EFECTIVO">Efectivo</MenuItem>
             <MenuItem value="TARJETA">Tarjeta</MenuItem>
@@ -1160,6 +1465,47 @@ export function NuevaVenta() {
                 );
               })}
             </TextField>
+          )}
+          <FormControlLabel
+            control={<Checkbox checked={requiereFactura} onChange={(e) => setRequiereFactura(e.target.checked)} />}
+            label="El cliente requiere factura"
+          />
+          {requiereFactura && metodoPago !== 'CREDITO' && (
+            <Paper
+              elevation={0}
+              sx={{
+                p: 1.5,
+                borderRadius: 1.5,
+                border: '1px solid',
+                borderColor: 'divider',
+                display: 'grid',
+                gap: 1.5,
+              }}
+            >
+              <Typography variant="body2" sx={{ fontWeight: 700 }}>
+                Datos rápidos del cliente
+              </Typography>
+              <TextField
+                label="Nombre"
+                value={clienteRapidoNombre}
+                onChange={(e) => setClienteRapidoNombre(e.target.value)}
+                fullWidth
+              />
+              <TextField
+                label="Teléfono"
+                value={clienteRapidoTelefono}
+                onChange={(e) => setClienteRapidoTelefono(e.target.value)}
+                fullWidth
+              />
+              <TextField
+                label="Domicilio"
+                value={clienteRapidoDomicilio}
+                onChange={(e) => setClienteRapidoDomicilio(e.target.value)}
+                multiline
+                minRows={2}
+                fullWidth
+              />
+            </Paper>
           )}
           {ahorroTotal > 0 && (
             <Paper
@@ -1208,24 +1554,75 @@ export function NuevaVenta() {
           />
           <TextField label="Cambio" value={formatMoney(Math.max(cambio, 0))} disabled />
         </DialogContent>
-        <DialogActions sx={{ p: 2 }}>
+        <DialogActions sx={dialogActionsSx}>
           <Button onClick={() => setOpenCobrar(false)} disabled={loading}>Cancelar</Button>
-          <Button
+          <AsyncButton
             variant="contained"
-            onClick={confirmarCobro}
+            onClick={() => void confirmarCobro()}
             disabled={cobroBloqueado}
-            startIcon={loading ? <CircularProgress size={18} color="inherit" /> : undefined}
+            loading={loading}
+            loadingText="Cobrando..."
           >
-            {loading ? 'Cobrando...' : <ButtonContentWithShortcut shortcut="F10">Confirmar cobro</ButtonContentWithShortcut>}
-          </Button>
+            <ButtonContentWithShortcut shortcut="F10">Confirmar cobro</ButtonContentWithShortcut>
+          </AsyncButton>
         </DialogActions>
       </Dialog>
 
-      <Snackbar open={Boolean(snackbar)} autoHideDuration={3000} onClose={() => setSnackbar('')}>
-        <Alert onClose={() => setSnackbar('')} severity={snackbar.startsWith('Error') ? 'error' : 'success'} variant="filled">
-          {snackbar}
-        </Alert>
-      </Snackbar>
+      <Dialog open={openConfirmarVenta} onClose={loading ? undefined : () => setOpenConfirmarVenta(false)} maxWidth="xs" fullWidth>
+        <DialogTitle sx={{ display: 'flex', alignItems: 'center', gap: 1.25, pb: 1 }}>
+          <ReceiptLongIcon color="primary" />
+          Confirmar venta
+        </DialogTitle>
+        <DialogContent sx={dialogContentSx}>
+          <DialogContentText>
+            Antes de registrar la venta, confirma que el método de pago y el total sean correctos.
+          </DialogContentText>
+          <Paper
+            elevation={0}
+            sx={{
+              p: 1.5,
+              borderRadius: 1.5,
+              border: '1px solid',
+              borderColor: 'divider',
+              bgcolor: 'background.default',
+            }}
+          >
+            <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 2, mb: 0.75 }}>
+              <Typography variant="body2" color="text.secondary">Método</Typography>
+              <Typography variant="body2" sx={{ fontWeight: 700 }}>{metodoPago}</Typography>
+            </Box>
+            <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 2 }}>
+              <Typography variant="body2" color="text.secondary">Total</Typography>
+              <Typography variant="h6" sx={{ fontWeight: 800 }}>{formatMoney(total)}</Typography>
+            </Box>
+          </Paper>
+          <FormControlLabel
+            control={
+              <Checkbox
+                checked={recordarConfirmacionVenta}
+                onChange={(event) => setRecordarConfirmacionVenta(event.target.checked)}
+              />
+            }
+            label="Recordar mi elección durante esta sesión"
+          />
+        </DialogContent>
+        <DialogActions sx={dialogActionsSx}>
+          <Button onClick={() => setOpenConfirmarVenta(false)} disabled={loading}>Revisar</Button>
+          <AsyncButton
+            variant="contained"
+            onClick={() => {
+              setOpenConfirmarVenta(false);
+              void confirmarCobro(true);
+            }}
+            loading={loading}
+            loadingText="Registrando..."
+          >
+            <ButtonContentWithShortcut shortcut="F10">Proceder con la venta</ButtonContentWithShortcut>
+          </AsyncButton>
+        </DialogActions>
+      </Dialog>
+
+      <FeedbackSnackbar message={snackbar} severity={snackbarSeverity} onClose={() => setSnackbar('')} />
     </Box>
   );
 }

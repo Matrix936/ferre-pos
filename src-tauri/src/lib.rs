@@ -5,11 +5,11 @@ use rusqlite::types::{Value, ValueRef};
 use rusqlite::{params, params_from_iter, Connection, Error as SqliteError, OptionalExtension, Transaction};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs;
 use std::fs::File;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Mutex;
@@ -255,6 +255,28 @@ pub struct Producto {
     sat_clave_prod_serv: String,
     #[serde(default)]
     sat_clave_unidad: String,
+    #[serde(default)]
+    precio_1: f64,
+    #[serde(default)]
+    precio_2: f64,
+    #[serde(default)]
+    precio_3: f64,
+    #[serde(default)]
+    precio_4: f64,
+    #[serde(default)]
+    mayoreo_apartir: f64,
+    #[serde(default)]
+    a_granel: bool,
+    #[serde(default)]
+    no_en_catalogo: bool,
+    #[serde(default)]
+    ventas_negativas: bool,
+    #[serde(default)]
+    caducidad: Option<String>,
+    #[serde(default)]
+    fotos: String,
+    #[serde(default)]
+    descripcion_catalogo: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -267,6 +289,180 @@ pub struct InventarioSucursalInput {
     precio_venta: f64,
     #[serde(default)]
     costo_promedio: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct LegacyArticuloImportRow {
+    id: Option<i64>,
+    clave: Option<String>,
+    descripcion_articulo: Option<String>,
+    unidad: Option<String>,
+    codigo_barra: Option<String>,
+    existencia_stock: Option<f64>,
+    caducidad: Option<String>,
+    provedor: Option<i64>,
+    #[serde(default)]
+    proveedor_nombre: Option<String>,
+    categoria: Option<String>,
+    marca: Option<i64>,
+    #[serde(default)]
+    marca_nombre: Option<String>,
+    fotos: Option<String>,
+    descripcion_catalogo: Option<String>,
+    precio_compra: Option<f64>,
+    precio_venta: Option<f64>,
+    precio_1: Option<f64>,
+    precio_2: Option<f64>,
+    precio_3: Option<f64>,
+    precio_4: Option<f64>,
+    mayoreo_apartir: Option<f64>,
+    cant_min_stock: Option<f64>,
+    a_granel: Option<String>,
+    no_en_catalogo: Option<String>,
+    ventas_negativas: Option<String>,
+    created_at: Option<String>,
+    updated_at: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportarArticulosLegacyInput {
+    sucursal_id: String,
+    proveedor_default_id: String,
+    rows: Vec<LegacyArticuloImportRow>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportarArticulosLegacyResult {
+    total_leidos: usize,
+    productos_upsertados: usize,
+    inventario_upsertado: usize,
+    catalogos_actualizados: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportarDatosUniversalInput {
+    destino: String,
+    rows: Vec<HashMap<String, JsonValue>>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportarDatosUniversalResult {
+    destino: String,
+    total_leidos: usize,
+    registros_upsertados: usize,
+    omitidos: usize,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportarCsvProductosMapeadoInput {
+    file_path: String,
+    sucursal_id: String,
+    column_indexes: HashMap<String, usize>,
+    #[serde(default)]
+    delimiter: String,
+    #[serde(default)]
+    foreign_key_map: HashMap<String, HashMap<String, String>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalizarCsvImportacionInput {
+    file_path: String,
+    column_indexes: HashMap<String, usize>,
+    #[serde(default)]
+    delimiter: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct CsvImportIssue {
+    fila: usize,
+    motivo: String,
+    codigo: String,
+    descripcion: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalizarCsvImportacionResult {
+    total_filas: usize,
+    unique_values: HashMap<String, Vec<String>>,
+    preview_rows: Vec<HashMap<String, String>>,
+    warnings: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CsvArchivoSeleccionado {
+    file_path: String,
+    file_name: String,
+    headers: Vec<String>,
+    delimiter: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportarCsvProductosMapeadoResult {
+    total_leidos: usize,
+    productos_upsertados: usize,
+    inventario_upsertado: usize,
+    filas_omitidas: usize,
+    errores: Vec<CsvImportIssue>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProductoCatalogoPage {
+    rows: Vec<Producto>,
+    total: i64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProductoInventarioPage {
+    rows: Vec<ProductoConStock>,
+    total: i64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HistorialVentasPage {
+    rows: Vec<HistorialVenta>,
+    total: i64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FacturasEmitidasPage {
+    rows: Vec<FacturaEmitida>,
+    total: i64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HistorialTraspasosPage {
+    rows: Vec<HistorialTraspaso>,
+    total: i64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HistorialMermasPage {
+    rows: Vec<HistorialMerma>,
+    total: i64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProductosBajoStockPage {
+    rows: Vec<ProductoBajoStock>,
+    total: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -293,6 +489,32 @@ pub struct ProductoConStock {
     precio_descontado: Option<f64>,
     nombre_promo: Option<String>,
     promocion_id: Option<String>,
+    #[serde(default)]
+    promo_tipo_descuento: Option<String>,
+    #[serde(default)]
+    promo_valor: Option<f64>,
+    #[serde(default)]
+    precio_1: f64,
+    #[serde(default)]
+    precio_2: f64,
+    #[serde(default)]
+    precio_3: f64,
+    #[serde(default)]
+    precio_4: f64,
+    #[serde(default)]
+    mayoreo_apartir: f64,
+    #[serde(default)]
+    a_granel: bool,
+    #[serde(default)]
+    no_en_catalogo: bool,
+    #[serde(default)]
+    ventas_negativas: bool,
+    #[serde(default)]
+    caducidad: Option<String>,
+    #[serde(default)]
+    fotos: String,
+    #[serde(default)]
+    descripcion_catalogo: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -397,6 +619,12 @@ pub struct VentaDetalleInput {
     producto_id: String,
     cantidad: f64,
     precio_venta_pactado: f64,
+    #[serde(default)]
+    tipo_precio_vendido: Option<String>,
+    #[serde(default)]
+    precio_original: Option<f64>,
+    #[serde(default)]
+    descuento_aplicado: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -408,6 +636,14 @@ pub struct RegistrarVentaInput {
     fecha: String,
     metodo_pago: String,
     cliente_id: Option<String>,
+    #[serde(default)]
+    cliente_rapido_nombre: Option<String>,
+    #[serde(default)]
+    cliente_rapido_telefono: Option<String>,
+    #[serde(default)]
+    cliente_rapido_domicilio: Option<String>,
+    #[serde(default)]
+    requiere_factura: bool,
     efectivo_recibido: Option<f64>,
     cambio_entregado: Option<f64>,
     detalles: Vec<VentaDetalleInput>,
@@ -541,6 +777,8 @@ pub struct HistorialVentasFiltro {
     fecha_fin: Option<String>,
     sucursal_id: Option<String>,
     usuario_id: Option<String>,
+    folio: Option<String>,
+    estado: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -609,6 +847,7 @@ pub struct CerrarCajaInput {
 #[serde(rename_all = "camelCase")]
 pub struct TicketProductoInput {
     descripcion: String,
+    marca: Option<String>,
     cantidad: f64,
     precio_unitario: f64,
     importe: f64,
@@ -621,7 +860,13 @@ pub struct TicketPayloadInput {
     fecha: String,
     cajero: String,
     sucursal: String,
+    logo_bytes: Option<Vec<u8>>,
+    empresa_nombre: Option<String>,
+    rfc: Option<String>,
+    regimen_fiscal: Option<String>,
+    codigo_postal: Option<String>,
     metodo_pago: String,
+    estado: Option<String>,
     productos: Vec<TicketProductoInput>,
     subtotal: f64,
     descuento: f64,
@@ -631,12 +876,39 @@ pub struct TicketPayloadInput {
     mensaje: Option<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct PerifericosConfig {
+    impresora_tickets: String,
+    impresora_etiquetas: String,
+    updated_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PerifericosConfigInput {
+    impresora_tickets: String,
+    impresora_etiquetas: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SilentPrintInput {
+    printer_name: String,
+    contenido: String,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DashboardFiltroInput {
     sucursal_id: Option<String>,
     fecha_inicio: Option<String>,
     fecha_fin: Option<String>,
+    marca: Option<String>,
+    categoria: Option<String>,
+    proveedor_id: Option<String>,
+    metodo_pago: Option<String>,
+    usuario_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -668,6 +940,156 @@ pub struct ProductoMasVendido {
     descripcion: String,
     marca: String,
     unidades_vendidas: f64,
+}
+
+fn query_productos_bajo_stock(
+    conn: &Connection,
+    user: &Usuario,
+    sucursal_id: Option<String>,
+    page: i64,
+    page_size: i64,
+) -> AppResult<ProductosBajoStockPage> {
+    let sid = scoped_sucursal_for_read(user, sucursal_id);
+    let (page, page_size) = normalize_page_args(page, page_size);
+    let offset = page * page_size;
+    let mut where_sql = String::from(
+        "
+        WHERE i.stock_minimo > 0
+          AND i.stock <= i.stock_minimo
+          AND p.eliminado = 0
+          AND i.eliminado = 0
+          AND s.eliminado = 0
+        ",
+    );
+    let mut params_vec: Vec<String> = Vec::new();
+    if let Some(value) = sid {
+        where_sql.push_str(" AND i.sucursal_id = ?");
+        params_vec.push(value);
+    }
+
+    let count_sql = format!(
+        "
+        SELECT COUNT(*)
+        FROM inventario_sucursal i
+        INNER JOIN productos p ON p.id = i.producto_id
+        INNER JOIN sucursales s ON s.id = i.sucursal_id
+        {where_sql}
+        "
+    );
+    let total: i64 = conn
+        .query_row(&count_sql, params_from_iter(params_vec.iter()), |row| row.get(0))
+        .map_err(AppError::from)
+        .map_err(to_command_error)?;
+
+    let mut select_params = params_vec.clone();
+    select_params.push(page_size.to_string());
+    select_params.push(offset.to_string());
+    let select_sql = format!(
+        "
+        SELECT p.id, p.descripcion, p.marca, s.id, s.nombre, i.stock, i.stock_minimo
+        FROM inventario_sucursal i
+        INNER JOIN productos p ON p.id = i.producto_id
+        INNER JOIN sucursales s ON s.id = i.sucursal_id
+        {where_sql}
+        ORDER BY (i.stock - i.stock_minimo) ASC, p.descripcion
+        LIMIT ? OFFSET ?
+        "
+    );
+    let mut stmt = conn
+        .prepare(&select_sql)
+        .map_err(AppError::from)
+        .map_err(to_command_error)?;
+    let iter = stmt
+        .query_map(params_from_iter(select_params.iter()), |row| {
+            Ok(ProductoBajoStock {
+                producto_id: row.get(0)?,
+                descripcion: row.get(1)?,
+                marca: row.get(2)?,
+                sucursal_id: row.get(3)?,
+                sucursal_nombre: row.get(4)?,
+                stock: row.get(5)?,
+                stock_minimo: row.get(6)?,
+            })
+        })
+        .map_err(AppError::from)
+        .map_err(to_command_error)?;
+
+    let mut rows = Vec::new();
+    for item in iter {
+        rows.push(item.map_err(AppError::from).map_err(to_command_error)?);
+    }
+
+    Ok(ProductosBajoStockPage { rows, total })
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ProductoRentabilidad {
+    producto_id: String,
+    descripcion: String,
+    marca: String,
+    unidades: f64,
+    venta_total: f64,
+    costo_total: f64,
+    utilidad: f64,
+    margen_porcentaje: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct RentabilidadResumen {
+    venta_total: f64,
+    costo_total: f64,
+    utilidad_bruta: f64,
+    margen_porcentaje: f64,
+    productos: Vec<ProductoRentabilidad>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct MetodoPagoResumen {
+    metodo_pago: String,
+    total: f64,
+    transacciones: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct IndicadorVentasResumen {
+    total_vendido: f64,
+    transacciones: i64,
+    ticket_promedio: f64,
+    ventas_canceladas: i64,
+    ventas_credito: f64,
+    ventas_contado: f64,
+    metodos: Vec<MetodoPagoResumen>,
+    productos_mas_vendidos: Vec<ProductoMasVendido>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct IndicadorInventarioResumen {
+    productos_en_inventario: i64,
+    valor_inventario: f64,
+    stock_total: f64,
+    stock_bajo: i64,
+    sin_stock: i64,
+    sobre_stock: i64,
+    bajo_stock: Vec<ProductoBajoStock>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct IndicadorFinancieroResumen {
+    ingresos_caja: f64,
+    egresos_caja: f64,
+    ventas_efectivo: f64,
+    ventas_tarjeta: f64,
+    ventas_transferencia: f64,
+    ventas_credito: f64,
+    compras: f64,
+    cuentas_por_cobrar: f64,
+    flujo_neto_estimado: f64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -811,9 +1233,21 @@ pub struct SyncUploadResult {
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SyncTableStatus {
+    tabla: String,
+    pendientes: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SyncStatus {
     pendientes: i64,
     ventas_pendientes: i64,
+    tablas_pendientes: Vec<SyncTableStatus>,
+    ultimo_intento_at: Option<String>,
+    ultimo_exito_at: Option<String>,
+    ultimo_error_at: Option<String>,
+    ultimo_error: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -1171,6 +1605,162 @@ fn normalize_upper_trim(value: &str) -> String {
     value.trim().to_uppercase()
 }
 
+fn normalize_title_trim(value: &str) -> String {
+    normalize_spaces(value).to_uppercase()
+}
+
+fn normalize_spaces(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn normalize_email_trim(value: &str) -> String {
+    value.trim().to_lowercase()
+}
+
+fn normalize_plain_trim(value: &str) -> String {
+    normalize_spaces(value)
+}
+
+fn legacy_catalog_id(prefix: &str, raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for ch in raw.trim().chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_uppercase());
+        } else if ch == ' ' || ch == '-' || ch == '_' || ch == '/' {
+            out.push('_');
+        }
+    }
+    while out.contains("__") {
+        out = out.replace("__", "_");
+    }
+    let out = out.trim_matches('_');
+    if out.is_empty() {
+        format!("{prefix}-GEN")
+    } else {
+        format!("{prefix}-{out}")
+    }
+}
+
+fn optional_normalized_name(value: Option<&String>) -> Option<String> {
+    value
+        .map(|v| normalize_title_trim(v))
+        .filter(|v| !v.is_empty())
+}
+
+fn find_catalog_by_legacy_id(
+    tx: &Transaction<'_>,
+    table: &str,
+    prefixes: &[&str],
+    legacy_id: i64,
+) -> Result<Option<(String, String)>, AppError> {
+    for prefix in prefixes {
+        let candidate_id = format!("{prefix}-{legacy_id}");
+        let found = tx
+            .query_row(
+                &format!("SELECT id, TRIM(COALESCE(nombre, '')) FROM {table} WHERE id = ?1 AND eliminado = 0"),
+                [&candidate_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        if let Some((id, name)) = found {
+            let normalized_name = normalize_title_trim(&name);
+            if !normalized_name.is_empty() {
+                return Ok(Some((id, normalized_name)));
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn find_proveedor_id_by_legacy_id(
+    tx: &Transaction<'_>,
+    prefixes: &[&str],
+    legacy_id: i64,
+) -> Result<Option<String>, AppError> {
+    for prefix in prefixes {
+        let candidate_id = format!("{prefix}-{legacy_id}");
+        let found = tx
+            .query_row(
+                "SELECT id FROM proveedores WHERE id = ?1 AND eliminado = 0",
+                [&candidate_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        if found.is_some() {
+            return Ok(found);
+        }
+    }
+    Ok(None)
+}
+
+fn legacy_truthy(value: Option<&String>) -> i64 {
+    let normalized = value
+        .map(|v| normalize_upper_trim(v))
+        .unwrap_or_default()
+        .replace('Í', "I");
+    matches!(
+        normalized.as_str(),
+        "1" | "SI" | "S" | "TRUE" | "VERDADERO" | "YES" | "Y" | "X"
+    ) as i64
+}
+
+fn normalize_import_key(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(|ch| ch.to_lowercase())
+        .collect()
+}
+
+fn json_value_text(row: &HashMap<String, JsonValue>, aliases: &[&str]) -> String {
+    for alias in aliases {
+        if let Some(value) = row.get(*alias) {
+            let text = match value {
+                JsonValue::String(text) => text.trim().to_string(),
+                JsonValue::Number(number) => number.to_string(),
+                JsonValue::Bool(flag) => flag.to_string(),
+                _ => String::new(),
+            };
+            if !text.is_empty() {
+                return text;
+            }
+        }
+    }
+    for alias in aliases {
+        let normalized_alias = normalize_import_key(alias);
+        for (key, value) in row {
+            if normalize_import_key(key) == normalized_alias {
+                let text = match value {
+                    JsonValue::String(text) => text.trim().to_string(),
+                    JsonValue::Number(number) => number.to_string(),
+                    JsonValue::Bool(flag) => flag.to_string(),
+                    _ => String::new(),
+                };
+                if !text.is_empty() {
+                    return text;
+                }
+            }
+        }
+    }
+    String::new()
+}
+
+fn json_value_number(row: &HashMap<String, JsonValue>, aliases: &[&str]) -> f64 {
+    let text = json_value_text(row, aliases);
+    if text.is_empty() {
+        return 0.0;
+    }
+    let mut clean = text.replace('$', "").replace(' ', "");
+    let last_comma = clean.rfind(',');
+    let last_dot = clean.rfind('.');
+    if last_comma > last_dot {
+        clean = clean.replace('.', "").replace(',', ".");
+    } else {
+        clean = clean.replace(',', "");
+    }
+    clean.parse::<f64>().unwrap_or(0.0)
+}
+
 fn validate_exact_len(value: &str, expected: usize, message: &str) -> Result<(), AppError> {
     if value.chars().count() != expected {
         return Err(AppError::Validation(message.to_string()));
@@ -1236,11 +1826,28 @@ fn validate_producto_sat_claves(producto: &Producto) -> Result<(), AppError> {
 }
 
 fn sanitize_producto(mut producto: Producto) -> Producto {
-    producto.codigo_barras = producto.codigo_barras.trim().to_string();
+    producto.codigo_barras = normalize_upper_trim(&producto.codigo_barras);
     producto.codigo_proveedor = normalize_upper_trim(&producto.codigo_proveedor);
+    producto.proveedor_id = producto.proveedor_id.trim().to_string();
     producto.clave_producto = normalize_upper_trim(&producto.clave_producto);
+    producto.descripcion = normalize_title_trim(&producto.descripcion);
+    producto.marca = normalize_title_trim(&producto.marca);
+    producto.categoria = normalize_title_trim(&producto.categoria);
+    producto.unidad = normalize_title_trim(&producto.unidad);
     producto.sat_clave_prod_serv = normalize_upper_trim(&producto.sat_clave_prod_serv);
     producto.sat_clave_unidad = normalize_upper_trim(&producto.sat_clave_unidad);
+    producto.precio_1 = round_money(producto.precio_1.max(0.0));
+    producto.precio_2 = round_money(producto.precio_2.max(0.0));
+    producto.precio_3 = round_money(producto.precio_3.max(0.0));
+    producto.precio_4 = round_money(producto.precio_4.max(0.0));
+    producto.mayoreo_apartir = producto.mayoreo_apartir.max(0.0);
+    producto.fotos = normalize_plain_trim(&producto.fotos);
+    producto.descripcion_catalogo = normalize_title_trim(&producto.descripcion_catalogo);
+    producto.caducidad = producto
+        .caducidad
+        .as_deref()
+        .map(normalize_plain_trim)
+        .filter(|value| !value.is_empty());
     producto
 }
 
@@ -1411,6 +2018,9 @@ fn consolidar_detalles_venta(detalles: &[VentaDetalleInput]) -> Result<Vec<Venta
                 producto_id,
                 cantidad: detalle.cantidad,
                 precio_venta_pactado: detalle.precio_venta_pactado,
+                tipo_precio_vendido: detalle.tipo_precio_vendido.clone(),
+                precio_original: detalle.precio_original,
+                descuento_aplicado: detalle.descuento_aplicado,
             });
         }
     }
@@ -1836,16 +2446,6 @@ fn ensure_can_manage_usuario(
         }
     }
 
-    if !is_superadmin(actor) {
-        let target_user = target.ok_or_else(|| "No se encontró el usuario indicado.".to_string())?;
-        if target_user.sucursal_id != actor.sucursal_id {
-            return Err("Operación inválida: Solo puedes administrar usuarios de tu sucursal.".to_string());
-        }
-        if target_user.role != "USUARIO" {
-            return Err("Operación inválida: Un administrador solo puede modificar usuarios operativos.".to_string());
-        }
-    }
-
     if let Some(new_user) = nuevo_usuario {
         if !is_superadmin(actor) {
             if new_user.role != "USUARIO" || new_user.sucursal_id != actor.sucursal_id {
@@ -1861,6 +2461,19 @@ fn ensure_can_manage_usuario(
     } else if let Some(target_user) = target {
         if target_user.role == "SUPERADMIN" && count_active_superadmins(conn)? <= 1 {
             return Err("Operación inválida: El sistema no puede quedarse sin un Superadmin activo.".to_string());
+        }
+    }
+
+    if !is_superadmin(actor) {
+        if let Some(target_user) = target {
+            if target_user.sucursal_id != actor.sucursal_id {
+                return Err("Operación inválida: Solo puedes administrar usuarios de tu sucursal.".to_string());
+            }
+            if target_user.role != "USUARIO" {
+                return Err("Operación inválida: Un administrador solo puede modificar usuarios operativos.".to_string());
+            }
+        } else if nuevo_usuario.is_none() {
+            return Err("Operación inválida: No se encontró el usuario indicado.".to_string());
         }
     }
 
@@ -1913,6 +2526,21 @@ fn init_db(conn: &Connection) -> Result<(), AppError> {
             url TEXT NOT NULL DEFAULT '',
             anon_key TEXT NOT NULL DEFAULT '',
             is_connected INTEGER NOT NULL DEFAULT 0 CHECK(is_connected IN (0, 1))
+        );
+
+        CREATE TABLE IF NOT EXISTS sync_runtime_status (
+            id INTEGER PRIMARY KEY CHECK(id = 1),
+            ultimo_intento_at TEXT NULL,
+            ultimo_exito_at TEXT NULL,
+            ultimo_error_at TEXT NULL,
+            ultimo_error TEXT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS perifericos_config (
+            id INTEGER PRIMARY KEY CHECK(id = 1),
+            impresora_tickets TEXT NOT NULL DEFAULT '',
+            impresora_etiquetas TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
 
         CREATE TABLE IF NOT EXISTS notificaciones (
@@ -1978,6 +2606,17 @@ fn init_db(conn: &Connection) -> Result<(), AppError> {
             precio_venta REAL NOT NULL DEFAULT 0,
             sat_clave_prod_serv TEXT NOT NULL DEFAULT '',
             sat_clave_unidad TEXT NOT NULL DEFAULT '',
+            precio_1 REAL NOT NULL DEFAULT 0,
+            precio_2 REAL NOT NULL DEFAULT 0,
+            precio_3 REAL NOT NULL DEFAULT 0,
+            precio_4 REAL NOT NULL DEFAULT 0,
+            mayoreo_apartir REAL NOT NULL DEFAULT 0,
+            a_granel INTEGER NOT NULL DEFAULT 0 CHECK(a_granel IN (0, 1)),
+            no_en_catalogo INTEGER NOT NULL DEFAULT 0 CHECK(no_en_catalogo IN (0, 1)),
+            ventas_negativas INTEGER NOT NULL DEFAULT 0 CHECK(ventas_negativas IN (0, 1)),
+            caducidad TEXT NULL,
+            fotos TEXT NOT NULL DEFAULT '',
+            descripcion_catalogo TEXT NOT NULL DEFAULT '',
             FOREIGN KEY (proveedor_id) REFERENCES proveedores(id) ON UPDATE CASCADE ON DELETE RESTRICT
         );
 
@@ -2051,6 +2690,10 @@ fn init_db(conn: &Connection) -> Result<(), AppError> {
             efectivo_recibido REAL NULL,
             cambio_entregado REAL NULL,
             cliente_id TEXT NULL,
+            cliente_rapido_nombre TEXT NULL,
+            cliente_rapido_telefono TEXT NULL,
+            cliente_rapido_domicilio TEXT NULL,
+            requiere_factura INTEGER NOT NULL DEFAULT 0 CHECK(requiere_factura IN (0, 1)),
             usuario_autorizo_cancelacion_id TEXT NULL,
             motivo_cancelacion TEXT NULL,
             fecha_cancelacion TEXT NULL,
@@ -2068,6 +2711,9 @@ fn init_db(conn: &Connection) -> Result<(), AppError> {
             cantidad REAL NOT NULL DEFAULT 0,
             precio_venta_pactado REAL NOT NULL DEFAULT 0,
             costo_unitario_pactado REAL NOT NULL DEFAULT 0,
+            tipo_precio_vendido TEXT NOT NULL DEFAULT 'MOSTRADOR',
+            precio_original REAL NOT NULL DEFAULT 0,
+            descuento_aplicado REAL NOT NULL DEFAULT 0,
             FOREIGN KEY (venta_id) REFERENCES ventas(id) ON UPDATE CASCADE ON DELETE CASCADE,
             FOREIGN KEY (producto_id) REFERENCES productos(id) ON UPDATE CASCADE ON DELETE RESTRICT
         );
@@ -2240,11 +2886,56 @@ fn init_db(conn: &Connection) -> Result<(), AppError> {
     migrate_ventas_add_cancelacion_auditoria(conn)?;
     migrate_facturacion_cfdi40(conn)?;
     migrate_supabase_config(conn)?;
+    migrate_sync_runtime_status(conn)?;
+    migrate_perifericos_config(conn)?;
     migrate_notificaciones(conn)?;
     migrate_marcas_unidades(conn)?;
     migrate_inventario_empresarial(conn)?;
     migrate_promociones(conn)?;
+    migrate_legacy_business_fields(conn)?;
     migrate_add_sincronizacion_fields(conn)?;
+    migrate_performance_indexes(conn)?;
+    Ok(())
+}
+
+fn add_column_if_missing(conn: &Connection, table: &str, column: &str, definition: &str) -> Result<(), AppError> {
+    if !table_has_column(conn, table, column)? {
+        conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"), [])?;
+    }
+    Ok(())
+}
+
+fn migrate_legacy_business_fields(conn: &Connection) -> Result<(), AppError> {
+    for (column, definition) in [
+        ("precio_1", "REAL NOT NULL DEFAULT 0"),
+        ("precio_2", "REAL NOT NULL DEFAULT 0"),
+        ("precio_3", "REAL NOT NULL DEFAULT 0"),
+        ("precio_4", "REAL NOT NULL DEFAULT 0"),
+        ("mayoreo_apartir", "REAL NOT NULL DEFAULT 0"),
+        ("a_granel", "INTEGER NOT NULL DEFAULT 0"),
+        ("no_en_catalogo", "INTEGER NOT NULL DEFAULT 0"),
+        ("ventas_negativas", "INTEGER NOT NULL DEFAULT 0"),
+        ("caducidad", "TEXT NULL"),
+        ("fotos", "TEXT NOT NULL DEFAULT ''"),
+        ("descripcion_catalogo", "TEXT NOT NULL DEFAULT ''"),
+    ] {
+        add_column_if_missing(conn, "productos", column, definition)?;
+    }
+    for (column, definition) in [
+        ("cliente_rapido_nombre", "TEXT NULL"),
+        ("cliente_rapido_telefono", "TEXT NULL"),
+        ("cliente_rapido_domicilio", "TEXT NULL"),
+        ("requiere_factura", "INTEGER NOT NULL DEFAULT 0"),
+    ] {
+        add_column_if_missing(conn, "ventas", column, definition)?;
+    }
+    for (column, definition) in [
+        ("tipo_precio_vendido", "TEXT NOT NULL DEFAULT 'MOSTRADOR'"),
+        ("precio_original", "REAL NOT NULL DEFAULT 0"),
+        ("descuento_aplicado", "REAL NOT NULL DEFAULT 0"),
+    ] {
+        add_column_if_missing(conn, "detalle_ventas", column, definition)?;
+    }
     Ok(())
 }
 
@@ -2636,6 +3327,37 @@ fn create_sync_dirty_triggers(conn: &Connection) -> Result<(), AppError> {
     Ok(())
 }
 
+fn migrate_performance_indexes(conn: &Connection) -> Result<(), AppError> {
+    conn.execute_batch(
+        "
+        CREATE INDEX IF NOT EXISTS idx_ventas_estado_fecha ON ventas(estado, fecha);
+        CREATE INDEX IF NOT EXISTS idx_ventas_estado_sucursal_fecha ON ventas(estado, sucursal_id, fecha);
+        CREATE INDEX IF NOT EXISTS idx_ventas_estado_metodo_fecha ON ventas(estado, metodo_pago, fecha);
+        CREATE INDEX IF NOT EXISTS idx_ventas_estado_usuario_fecha ON ventas(estado, usuario_id, fecha);
+        CREATE INDEX IF NOT EXISTS idx_detalle_ventas_producto_venta ON detalle_ventas(producto_id, venta_id);
+
+        CREATE INDEX IF NOT EXISTS idx_inventario_bajo_stock_scope
+            ON inventario_sucursal(sucursal_id, eliminado, stock_minimo, stock);
+        CREATE INDEX IF NOT EXISTS idx_inventario_producto_sucursal_eliminado
+            ON inventario_sucursal(producto_id, sucursal_id, eliminado);
+
+        CREATE INDEX IF NOT EXISTS idx_traspasos_estado_fecha ON traspasos(estado, fecha);
+        CREATE INDEX IF NOT EXISTS idx_traspasos_origen_estado_fecha ON traspasos(sucursal_origen_id, estado, fecha);
+        CREATE INDEX IF NOT EXISTS idx_traspasos_destino_estado_fecha ON traspasos(sucursal_destino_id, estado, fecha);
+
+        CREATE INDEX IF NOT EXISTS idx_mermas_sucursal_fecha ON mermas_ajustes(sucursal_id, fecha);
+        CREATE INDEX IF NOT EXISTS idx_mermas_producto_fecha ON mermas_ajustes(producto_id, fecha);
+
+        CREATE INDEX IF NOT EXISTS idx_facturas_emitidas_fecha ON facturas_emitidas(fecha_emision);
+        CREATE INDEX IF NOT EXISTS idx_facturas_emitidas_venta_fecha ON facturas_emitidas(venta_id, fecha_emision);
+
+        CREATE INDEX IF NOT EXISTS idx_caja_movimientos_sesion_tipo_fecha ON caja_movimientos(sesion_id, tipo, fecha);
+        CREATE INDEX IF NOT EXISTS idx_compras_fecha ON compras(fecha);
+        ",
+    )?;
+    Ok(())
+}
+
 fn migrate_supabase_config(conn: &Connection) -> Result<(), AppError> {
     conn.execute_batch(
         "
@@ -2644,6 +3366,36 @@ fn migrate_supabase_config(conn: &Connection) -> Result<(), AppError> {
             url TEXT NOT NULL DEFAULT '',
             anon_key TEXT NOT NULL DEFAULT '',
             is_connected INTEGER NOT NULL DEFAULT 0 CHECK(is_connected IN (0, 1))
+        );
+        ",
+    )?;
+    Ok(())
+}
+
+fn migrate_sync_runtime_status(conn: &Connection) -> Result<(), AppError> {
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS sync_runtime_status (
+            id INTEGER PRIMARY KEY CHECK(id = 1),
+            ultimo_intento_at TEXT NULL,
+            ultimo_exito_at TEXT NULL,
+            ultimo_error_at TEXT NULL,
+            ultimo_error TEXT NULL
+        );
+        INSERT OR IGNORE INTO sync_runtime_status (id) VALUES (1);
+        ",
+    )?;
+    Ok(())
+}
+
+fn migrate_perifericos_config(conn: &Connection) -> Result<(), AppError> {
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS perifericos_config (
+            id INTEGER PRIMARY KEY CHECK(id = 1),
+            impresora_tickets TEXT NOT NULL DEFAULT '',
+            impresora_etiquetas TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
         ",
     )?;
@@ -3315,7 +4067,7 @@ fn get_proveedores(
     require_admin_or_superadmin(&state_sesion)?;
     let conn = get_conn(&state_db).map_err(to_command_error)?;
     let mut stmt = conn
-        .prepare("SELECT id, nombre, contacto_nombre, telefono, email, direccion FROM proveedores WHERE eliminado = 0 ORDER BY nombre")
+        .prepare("SELECT id, TRIM(COALESCE(nombre, '')), TRIM(COALESCE(contacto_nombre, '')), TRIM(COALESCE(telefono, '')), TRIM(COALESCE(email, '')), TRIM(COALESCE(direccion, '')) FROM proveedores WHERE eliminado = 0 ORDER BY TRIM(nombre)")
         .map_err(AppError::from)
         .map_err(to_command_error)?;
 
@@ -3349,11 +4101,11 @@ fn create_proveedor(
     require_admin_or_superadmin(&state_sesion)?;
     let proveedor = Proveedor {
         id: proveedor.id.trim().to_string(),
-        nombre: proveedor.nombre.trim().to_string(),
-        contacto_nombre: proveedor.contacto_nombre.trim().to_string(),
-        telefono: proveedor.telefono.trim().to_string(),
-        email: proveedor.email.trim().to_string(),
-        direccion: proveedor.direccion.trim().to_string(),
+        nombre: normalize_title_trim(&proveedor.nombre),
+        contacto_nombre: normalize_title_trim(&proveedor.contacto_nombre),
+        telefono: normalize_plain_trim(&proveedor.telefono),
+        email: normalize_email_trim(&proveedor.email),
+        direccion: normalize_title_trim(&proveedor.direccion),
     };
     validate_proveedor(&proveedor).map_err(to_command_error)?;
     let conn = get_conn(&state_db).map_err(to_command_error)?;
@@ -3390,11 +4142,11 @@ fn update_proveedor(
     require_admin_or_superadmin(&state_sesion)?;
     let proveedor = Proveedor {
         id: id.trim().to_string(),
-        nombre: proveedor.nombre.trim().to_string(),
-        contacto_nombre: proveedor.contacto_nombre.trim().to_string(),
-        telefono: proveedor.telefono.trim().to_string(),
-        email: proveedor.email.trim().to_string(),
-        direccion: proveedor.direccion.trim().to_string(),
+        nombre: normalize_title_trim(&proveedor.nombre),
+        contacto_nombre: normalize_title_trim(&proveedor.contacto_nombre),
+        telefono: normalize_plain_trim(&proveedor.telefono),
+        email: normalize_email_trim(&proveedor.email),
+        direccion: normalize_title_trim(&proveedor.direccion),
     };
     validate_proveedor(&proveedor).map_err(to_command_error)?;
     let conn = get_conn(&state_db).map_err(to_command_error)?;
@@ -3473,7 +4225,7 @@ fn get_marcas(
     require_admin_or_superadmin(&state_sesion)?;
     let conn = get_conn(&state_db).map_err(to_command_error)?;
     let mut stmt = conn
-        .prepare("SELECT id, nombre FROM marcas WHERE eliminado = 0 ORDER BY nombre")
+        .prepare("SELECT id, TRIM(COALESCE(nombre, '')) FROM marcas WHERE eliminado = 0 ORDER BY TRIM(nombre)")
         .map_err(AppError::from)
         .map_err(to_command_error)?;
     let iter = stmt
@@ -3494,7 +4246,7 @@ fn create_marca(
     marca: Marca,
 ) -> AppResult<()> {
     require_admin_or_superadmin(&state_sesion)?;
-    let marca = Marca { id: marca.id.trim().to_string(), nombre: marca.nombre.trim().to_string() };
+    let marca = Marca { id: marca.id.trim().to_string(), nombre: normalize_title_trim(&marca.nombre) };
     validate_marca(&marca).map_err(to_command_error)?;
     let conn = get_conn(&state_db).map_err(to_command_error)?;
     ensure_unique_catalog_name(&conn, "marcas", "marca", None, &marca.nombre)
@@ -3516,7 +4268,7 @@ fn update_marca(
     marca: Marca,
 ) -> AppResult<()> {
     require_admin_or_superadmin(&state_sesion)?;
-    let marca = Marca { id: id.trim().to_string(), nombre: marca.nombre.trim().to_string() };
+    let marca = Marca { id: id.trim().to_string(), nombre: normalize_title_trim(&marca.nombre) };
     validate_marca(&marca).map_err(to_command_error)?;
     let conn = get_conn(&state_db).map_err(to_command_error)?;
     ensure_unique_catalog_name(&conn, "marcas", "marca", Some(&id), &marca.nombre)
@@ -3576,7 +4328,7 @@ fn get_categorias(
     require_admin_or_superadmin(&state_sesion)?;
     let conn = get_conn(&state_db).map_err(to_command_error)?;
     let mut stmt = conn
-        .prepare("SELECT id, nombre FROM categorias WHERE eliminado = 0 ORDER BY nombre")
+        .prepare("SELECT id, TRIM(COALESCE(nombre, '')) FROM categorias WHERE eliminado = 0 ORDER BY TRIM(nombre)")
         .map_err(AppError::from)
         .map_err(to_command_error)?;
     let iter = stmt
@@ -3597,7 +4349,7 @@ fn create_categoria(
     categoria: Categoria,
 ) -> AppResult<()> {
     require_admin_or_superadmin(&state_sesion)?;
-    let categoria = Categoria { id: categoria.id.trim().to_string(), nombre: categoria.nombre.trim().to_string() };
+    let categoria = Categoria { id: categoria.id.trim().to_string(), nombre: normalize_title_trim(&categoria.nombre) };
     validate_categoria(&categoria).map_err(to_command_error)?;
     let conn = get_conn(&state_db).map_err(to_command_error)?;
     ensure_unique_catalog_name(&conn, "categorias", "categoría", None, &categoria.nombre)
@@ -3619,7 +4371,7 @@ fn update_categoria(
     categoria: Categoria,
 ) -> AppResult<()> {
     require_admin_or_superadmin(&state_sesion)?;
-    let categoria = Categoria { id: id.trim().to_string(), nombre: categoria.nombre.trim().to_string() };
+    let categoria = Categoria { id: id.trim().to_string(), nombre: normalize_title_trim(&categoria.nombre) };
     validate_categoria(&categoria).map_err(to_command_error)?;
     let conn = get_conn(&state_db).map_err(to_command_error)?;
     ensure_unique_catalog_name(&conn, "categorias", "categoría", Some(&id), &categoria.nombre)
@@ -3679,7 +4431,7 @@ fn get_unidades(
     require_admin_or_superadmin(&state_sesion)?;
     let conn = get_conn(&state_db).map_err(to_command_error)?;
     let mut stmt = conn
-        .prepare("SELECT id, nombre, clave_sat FROM unidades WHERE eliminado = 0 ORDER BY nombre")
+        .prepare("SELECT id, TRIM(COALESCE(nombre, '')), TRIM(COALESCE(clave_sat, '')) FROM unidades WHERE eliminado = 0 ORDER BY TRIM(nombre)")
         .map_err(AppError::from)
         .map_err(to_command_error)?;
     let iter = stmt
@@ -3708,7 +4460,7 @@ fn create_unidad(
     require_admin_or_superadmin(&state_sesion)?;
     let unidad = UnidadMedida {
         id: unidad.id.trim().to_string(),
-        nombre: unidad.nombre.trim().to_string(),
+        nombre: normalize_title_trim(&unidad.nombre),
         clave_sat: normalize_upper_trim(&unidad.clave_sat),
     };
     validate_unidad(&unidad).map_err(to_command_error)?;
@@ -3734,7 +4486,7 @@ fn update_unidad(
     require_admin_or_superadmin(&state_sesion)?;
     let unidad = UnidadMedida {
         id: id.trim().to_string(),
-        nombre: unidad.nombre.trim().to_string(),
+        nombre: normalize_title_trim(&unidad.nombre),
         clave_sat: normalize_upper_trim(&unidad.clave_sat),
     };
     validate_unidad(&unidad).map_err(to_command_error)?;
@@ -3803,7 +4555,7 @@ fn get_clientes(
     require_admin_or_superadmin(&state_sesion)?;
     let conn = get_conn(&state_db).map_err(to_command_error)?;
     let mut stmt = conn
-        .prepare("SELECT id, nombre, telefono, direccion, limite_credito, saldo_deudor FROM clientes WHERE eliminado = 0 ORDER BY nombre")
+        .prepare("SELECT id, TRIM(COALESCE(nombre, '')), TRIM(COALESCE(telefono, '')), TRIM(COALESCE(direccion, '')), limite_credito, saldo_deudor FROM clientes WHERE eliminado = 0 ORDER BY TRIM(nombre)")
         .map_err(AppError::from)
         .map_err(to_command_error)?;
 
@@ -3837,9 +4589,9 @@ fn create_cliente(
     require_admin_or_superadmin(&state_sesion)?;
     let cliente = Cliente {
         id: cliente.id.trim().to_string(),
-        nombre: cliente.nombre.trim().to_string(),
-        telefono: cliente.telefono.trim().to_string(),
-        direccion: cliente.direccion.trim().to_string(),
+        nombre: normalize_title_trim(&cliente.nombre),
+        telefono: normalize_plain_trim(&cliente.telefono),
+        direccion: normalize_title_trim(&cliente.direccion),
         limite_credito: normalize_money(cliente.limite_credito, "El límite de crédito", true)
             .map_err(to_command_error)?,
         saldo_deudor: 0.0,
@@ -3876,9 +4628,9 @@ fn update_cliente(
     require_admin_or_superadmin(&state_sesion)?;
     let cliente = Cliente {
         id: id.trim().to_string(),
-        nombre: cliente.nombre.trim().to_string(),
-        telefono: cliente.telefono.trim().to_string(),
-        direccion: cliente.direccion.trim().to_string(),
+        nombre: normalize_title_trim(&cliente.nombre),
+        telefono: normalize_plain_trim(&cliente.telefono),
+        direccion: normalize_title_trim(&cliente.direccion),
         limite_credito: normalize_money(cliente.limite_credito, "El límite de crédito", true)
             .map_err(to_command_error)?,
         saldo_deudor: cliente.saldo_deudor,
@@ -4180,6 +4932,24 @@ fn discounted_price(precio: f64, tipo_descuento: &str, valor: f64) -> f64 {
     round_money(result.max(0.0))
 }
 
+fn precio_base_por_cantidad(product: &ProductoConStock, cantidad: f64) -> (f64, String) {
+    let mostrador = round_money(product.precio_venta);
+    if product.mayoreo_apartir > 0.0 && cantidad >= product.mayoreo_apartir {
+        for (precio, tipo) in [
+            (product.precio_1, "MAYOREO_1"),
+            (product.precio_2, "MAYOREO_2"),
+            (product.precio_3, "MAYOREO_3"),
+            (product.precio_4, "MAYOREO_4"),
+        ] {
+            let precio = round_money(precio);
+            if precio > 0.0 && precio < mostrador {
+                return (precio, tipo.to_string());
+            }
+        }
+    }
+    (mostrador, "MOSTRADOR".to_string())
+}
+
 fn find_active_promotion(
     conn: &Connection,
     producto_id: &str,
@@ -4261,6 +5031,8 @@ fn apply_active_promotion(conn: &Connection, product: &mut ProductoConStock) -> 
         product.precio_descontado = Some(discounted);
         product.nombre_promo = Some(promo.nombre);
         product.promocion_id = Some(promo.id);
+        product.promo_tipo_descuento = Some(promo.tipo_descuento);
+        product.promo_valor = Some(promo.valor);
         product.precio_venta = discounted;
     }
     Ok(())
@@ -4281,22 +5053,33 @@ fn get_productos_por_sucursal(
             "
             SELECT
                 p.id,
-                p.codigo_barras,
-                p.codigo_proveedor,
-                p.proveedor_id,
-                p.clave_producto,
-                p.descripcion,
-                p.marca,
-                p.categoria,
-                p.unidad,
+                TRIM(COALESCE(p.codigo_barras, '')),
+                TRIM(COALESCE(p.codigo_proveedor, '')),
+                TRIM(COALESCE(p.proveedor_id, '')),
+                TRIM(COALESCE(p.clave_producto, '')),
+                TRIM(COALESCE(p.descripcion, '')),
+                TRIM(COALESCE(p.marca, '')),
+                TRIM(COALESCE(p.categoria, '')),
+                TRIM(COALESCE(p.unidad, '')),
                 COALESCE(NULLIF(i.costo_promedio, 0), NULLIF(p.costo_promedio, 0), p.precio_costo) AS precio_costo_local,
                 COALESCE(NULLIF(i.costo_promedio, 0), NULLIF(p.costo_promedio, 0), p.precio_costo) AS costo_promedio,
                 COALESCE(NULLIF(i.precio_venta, 0), p.precio_venta) AS precio_venta_local,
-                p.sat_clave_prod_serv,
-                p.sat_clave_unidad,
+                TRIM(COALESCE(p.sat_clave_prod_serv, '')),
+                TRIM(COALESCE(p.sat_clave_unidad, '')),
                 i.sucursal_id,
                 i.stock,
-                i.stock_minimo
+                i.stock_minimo,
+                COALESCE(p.precio_1, 0),
+                COALESCE(p.precio_2, 0),
+                COALESCE(p.precio_3, 0),
+                COALESCE(p.precio_4, 0),
+                COALESCE(p.mayoreo_apartir, 0),
+                COALESCE(p.a_granel, 0),
+                COALESCE(p.no_en_catalogo, 0),
+                COALESCE(p.ventas_negativas, 0),
+                p.caducidad,
+                TRIM(COALESCE(p.fotos, '')),
+                TRIM(COALESCE(p.descripcion_catalogo, ''))
             FROM productos p
             INNER JOIN inventario_sucursal i ON i.producto_id = p.id
             WHERE i.sucursal_id = ?1
@@ -4332,6 +5115,19 @@ fn get_productos_por_sucursal(
                 precio_descontado: None,
                 nombre_promo: None,
                 promocion_id: None,
+                promo_tipo_descuento: None,
+                promo_valor: None,
+                precio_1: row.get(17)?,
+                precio_2: row.get(18)?,
+                precio_3: row.get(19)?,
+                precio_4: row.get(20)?,
+                mayoreo_apartir: row.get(21)?,
+                a_granel: row.get::<_, i64>(22)? == 1,
+                no_en_catalogo: row.get::<_, i64>(23)? == 1,
+                ventas_negativas: row.get::<_, i64>(24)? == 1,
+                caducidad: row.get(25)?,
+                fotos: row.get(26)?,
+                descripcion_catalogo: row.get(27)?,
             })
         })
         .map_err(AppError::from)
@@ -4370,19 +5166,19 @@ fn buscar_productos_para_compra(
             "
             SELECT
                 p.id,
-                p.codigo_barras,
-                p.codigo_proveedor,
-                p.proveedor_id,
-                p.clave_producto,
-                p.descripcion,
-                p.marca,
-                p.categoria,
-                p.unidad,
+                TRIM(COALESCE(p.codigo_barras, '')),
+                TRIM(COALESCE(p.codigo_proveedor, '')),
+                TRIM(COALESCE(p.proveedor_id, '')),
+                TRIM(COALESCE(p.clave_producto, '')),
+                TRIM(COALESCE(p.descripcion, '')),
+                TRIM(COALESCE(p.marca, '')),
+                TRIM(COALESCE(p.categoria, '')),
+                TRIM(COALESCE(p.unidad, '')),
                 COALESCE(NULLIF(i.costo_promedio, 0), NULLIF(p.costo_promedio, 0), p.precio_costo) AS precio_costo_local,
                 COALESCE(NULLIF(i.costo_promedio, 0), NULLIF(p.costo_promedio, 0), p.precio_costo) AS costo_promedio,
                 COALESCE(NULLIF(i.precio_venta, 0), p.precio_venta) AS precio_venta_local,
-                p.sat_clave_prod_serv,
-                p.sat_clave_unidad,
+                TRIM(COALESCE(p.sat_clave_prod_serv, '')),
+                TRIM(COALESCE(p.sat_clave_unidad, '')),
                 COALESCE(i.sucursal_id, ?1) AS sucursal_id,
                 COALESCE(i.stock, 0) AS stock,
                 COALESCE(i.stock_minimo, 0) AS stock_minimo
@@ -4391,9 +5187,11 @@ fn buscar_productos_para_compra(
             WHERE p.eliminado = 0
               AND (
                 p.codigo_barras = ?2
+                OR p.id = ?2
                 OR p.codigo_proveedor = ?2
                 OR p.clave_producto = ?2
                 OR p.codigo_barras LIKE ?3 COLLATE NOCASE
+                OR p.id LIKE ?3 COLLATE NOCASE
                 OR p.codigo_proveedor LIKE ?3 COLLATE NOCASE
                 OR p.clave_producto LIKE ?3 COLLATE NOCASE
                 OR p.descripcion LIKE ?3 COLLATE NOCASE
@@ -4403,14 +5201,16 @@ fn buscar_productos_para_compra(
             ORDER BY
                 CASE
                     WHEN p.codigo_barras = ?2 THEN 0
-                    WHEN p.codigo_proveedor = ?2 THEN 1
-                    WHEN p.clave_producto = ?2 THEN 2
-                    WHEN p.codigo_barras LIKE ?3 COLLATE NOCASE THEN 3
-                    WHEN p.codigo_proveedor LIKE ?3 COLLATE NOCASE THEN 4
-                    WHEN p.clave_producto LIKE ?3 COLLATE NOCASE THEN 5
-                    WHEN p.descripcion LIKE ?3 COLLATE NOCASE THEN 6
-                    WHEN p.marca LIKE ?3 COLLATE NOCASE THEN 7
-                    ELSE 8
+                    WHEN p.id = ?2 THEN 1
+                    WHEN p.codigo_proveedor = ?2 THEN 2
+                    WHEN p.clave_producto = ?2 THEN 3
+                    WHEN p.codigo_barras LIKE ?3 COLLATE NOCASE THEN 4
+                    WHEN p.id LIKE ?3 COLLATE NOCASE THEN 5
+                    WHEN p.codigo_proveedor LIKE ?3 COLLATE NOCASE THEN 6
+                    WHEN p.clave_producto LIKE ?3 COLLATE NOCASE THEN 7
+                    WHEN p.descripcion LIKE ?3 COLLATE NOCASE THEN 8
+                    WHEN p.marca LIKE ?3 COLLATE NOCASE THEN 9
+                    ELSE 10
                 END,
                 p.descripcion COLLATE NOCASE
             LIMIT 10
@@ -4443,6 +5243,19 @@ fn buscar_productos_para_compra(
                 precio_descontado: None,
                 nombre_promo: None,
                 promocion_id: None,
+                promo_tipo_descuento: None,
+                promo_valor: None,
+                precio_1: 0.0,
+                precio_2: 0.0,
+                precio_3: 0.0,
+                precio_4: 0.0,
+                mayoreo_apartir: 0.0,
+                a_granel: false,
+                no_en_catalogo: false,
+                ventas_negativas: false,
+                caducidad: None,
+                fotos: String::new(),
+                descripcion_catalogo: String::new(),
             })
         })
         .map_err(AppError::from)
@@ -4479,22 +5292,33 @@ fn buscar_productos_por_sucursal(
             "
             SELECT
                 p.id,
-                p.codigo_barras,
-                p.codigo_proveedor,
-                p.proveedor_id,
-                p.clave_producto,
-                p.descripcion,
-                p.marca,
-                p.categoria,
-                p.unidad,
+                TRIM(COALESCE(p.codigo_barras, '')),
+                TRIM(COALESCE(p.codigo_proveedor, '')),
+                TRIM(COALESCE(p.proveedor_id, '')),
+                TRIM(COALESCE(p.clave_producto, '')),
+                TRIM(COALESCE(p.descripcion, '')),
+                TRIM(COALESCE(p.marca, '')),
+                TRIM(COALESCE(p.categoria, '')),
+                TRIM(COALESCE(p.unidad, '')),
                 COALESCE(NULLIF(i.costo_promedio, 0), NULLIF(p.costo_promedio, 0), p.precio_costo) AS precio_costo_local,
                 COALESCE(NULLIF(i.costo_promedio, 0), NULLIF(p.costo_promedio, 0), p.precio_costo) AS costo_promedio,
                 COALESCE(NULLIF(i.precio_venta, 0), p.precio_venta) AS precio_venta_local,
-                p.sat_clave_prod_serv,
-                p.sat_clave_unidad,
+                TRIM(COALESCE(p.sat_clave_prod_serv, '')),
+                TRIM(COALESCE(p.sat_clave_unidad, '')),
                 i.sucursal_id,
                 i.stock,
-                i.stock_minimo
+                i.stock_minimo,
+                COALESCE(p.precio_1, 0),
+                COALESCE(p.precio_2, 0),
+                COALESCE(p.precio_3, 0),
+                COALESCE(p.precio_4, 0),
+                COALESCE(p.mayoreo_apartir, 0),
+                COALESCE(p.a_granel, 0),
+                COALESCE(p.no_en_catalogo, 0),
+                COALESCE(p.ventas_negativas, 0),
+                p.caducidad,
+                TRIM(COALESCE(p.fotos, '')),
+                TRIM(COALESCE(p.descripcion_catalogo, ''))
             FROM productos p
             INNER JOIN inventario_sucursal i ON i.producto_id = p.id
             WHERE i.sucursal_id = ?1
@@ -4554,6 +5378,19 @@ fn buscar_productos_por_sucursal(
                 precio_descontado: None,
                 nombre_promo: None,
                 promocion_id: None,
+                promo_tipo_descuento: None,
+                promo_valor: None,
+                precio_1: row.get(17)?,
+                precio_2: row.get(18)?,
+                precio_3: row.get(19)?,
+                precio_4: row.get(20)?,
+                mayoreo_apartir: row.get(21)?,
+                a_granel: row.get::<_, i64>(22)? == 1,
+                no_en_catalogo: row.get::<_, i64>(23)? == 1,
+                ventas_negativas: row.get::<_, i64>(24)? == 1,
+                caducidad: row.get(25)?,
+                fotos: row.get(26)?,
+                descripcion_catalogo: row.get(27)?,
             })
         })
         .map_err(AppError::from)
@@ -4567,6 +5404,217 @@ fn buscar_productos_por_sucursal(
     }
 
     Ok(productos)
+}
+
+#[tauri::command]
+fn get_productos_por_sucursal_page(
+    state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
+    sucursal_id: String,
+    query: String,
+    page: i64,
+    page_size: i64,
+) -> AppResult<ProductoInventarioPage> {
+    let actor = current_session_user(&state_sesion)?;
+    ensure_can_read_sucursal(&actor, &sucursal_id)?;
+
+    let conn = get_conn(&state_db).map_err(to_command_error)?;
+    let (page, page_size) = normalize_page_args(page, page_size);
+    let offset = page * page_size;
+    let exact_query = query.trim().to_string();
+    let prefix_pattern = format!("{}%", exact_query);
+    let contains_pattern = format!("%{}%", exact_query);
+
+    let total: i64 = if exact_query.is_empty() {
+        conn.query_row(
+            "
+            SELECT COUNT(*)
+            FROM productos p
+            INNER JOIN inventario_sucursal i ON i.producto_id = p.id
+            WHERE i.sucursal_id = ?1
+              AND p.eliminado = 0
+              AND i.eliminado = 0
+            ",
+            [&sucursal_id],
+            |row| row.get(0),
+        )
+        .map_err(AppError::from)
+        .map_err(to_command_error)?
+    } else {
+        conn.query_row(
+            "
+            SELECT COUNT(*)
+            FROM productos p
+            INNER JOIN inventario_sucursal i ON i.producto_id = p.id
+            WHERE i.sucursal_id = ?1
+              AND p.eliminado = 0
+              AND i.eliminado = 0
+              AND (
+                p.codigo_barras = ?2
+                OR p.id = ?2
+                OR p.codigo_proveedor = ?2
+                OR p.clave_producto = ?2
+                OR p.codigo_barras LIKE ?3 COLLATE NOCASE
+                OR p.id LIKE ?3 COLLATE NOCASE
+                OR p.codigo_proveedor LIKE ?3 COLLATE NOCASE
+                OR p.clave_producto LIKE ?3 COLLATE NOCASE
+                OR p.descripcion LIKE ?3 COLLATE NOCASE
+                OR p.marca LIKE ?3 COLLATE NOCASE
+                OR p.categoria LIKE ?3 COLLATE NOCASE
+                OR p.unidad LIKE ?3 COLLATE NOCASE
+                OR p.descripcion LIKE ?4 COLLATE NOCASE
+              )
+            ",
+            params![sucursal_id, exact_query, prefix_pattern, contains_pattern],
+            |row| row.get(0),
+        )
+        .map_err(AppError::from)
+        .map_err(to_command_error)?
+    };
+
+    let sql = if exact_query.is_empty() {
+        "
+        SELECT
+            p.id,
+            TRIM(COALESCE(p.codigo_barras, '')),
+            TRIM(COALESCE(p.codigo_proveedor, '')),
+            TRIM(COALESCE(p.proveedor_id, '')),
+            TRIM(COALESCE(p.clave_producto, '')),
+            TRIM(COALESCE(p.descripcion, '')),
+            TRIM(COALESCE(p.marca, '')),
+            TRIM(COALESCE(p.categoria, '')),
+            TRIM(COALESCE(p.unidad, '')),
+            COALESCE(NULLIF(i.costo_promedio, 0), NULLIF(p.costo_promedio, 0), p.precio_costo) AS precio_costo_local,
+            COALESCE(NULLIF(i.costo_promedio, 0), NULLIF(p.costo_promedio, 0), p.precio_costo) AS costo_promedio,
+            COALESCE(NULLIF(i.precio_venta, 0), p.precio_venta) AS precio_venta_local,
+            TRIM(COALESCE(p.sat_clave_prod_serv, '')),
+            TRIM(COALESCE(p.sat_clave_unidad, '')),
+            i.sucursal_id,
+            i.stock,
+            i.stock_minimo
+        FROM productos p
+        INNER JOIN inventario_sucursal i ON i.producto_id = p.id
+        WHERE i.sucursal_id = ?1
+          AND p.eliminado = 0
+          AND i.eliminado = 0
+        ORDER BY p.descripcion COLLATE NOCASE
+        LIMIT ?2 OFFSET ?3
+        "
+    } else {
+        "
+        SELECT
+            p.id,
+            TRIM(COALESCE(p.codigo_barras, '')),
+            TRIM(COALESCE(p.codigo_proveedor, '')),
+            TRIM(COALESCE(p.proveedor_id, '')),
+            TRIM(COALESCE(p.clave_producto, '')),
+            TRIM(COALESCE(p.descripcion, '')),
+            TRIM(COALESCE(p.marca, '')),
+            TRIM(COALESCE(p.categoria, '')),
+            TRIM(COALESCE(p.unidad, '')),
+            COALESCE(NULLIF(i.costo_promedio, 0), NULLIF(p.costo_promedio, 0), p.precio_costo) AS precio_costo_local,
+            COALESCE(NULLIF(i.costo_promedio, 0), NULLIF(p.costo_promedio, 0), p.precio_costo) AS costo_promedio,
+            COALESCE(NULLIF(i.precio_venta, 0), p.precio_venta) AS precio_venta_local,
+            TRIM(COALESCE(p.sat_clave_prod_serv, '')),
+            TRIM(COALESCE(p.sat_clave_unidad, '')),
+            i.sucursal_id,
+            i.stock,
+            i.stock_minimo
+        FROM productos p
+        INNER JOIN inventario_sucursal i ON i.producto_id = p.id
+        WHERE i.sucursal_id = ?1
+          AND p.eliminado = 0
+          AND i.eliminado = 0
+          AND (
+            p.codigo_barras = ?2
+            OR p.codigo_proveedor = ?2
+            OR p.clave_producto = ?2
+            OR p.codigo_barras LIKE ?3 COLLATE NOCASE
+            OR p.codigo_proveedor LIKE ?3 COLLATE NOCASE
+            OR p.clave_producto LIKE ?3 COLLATE NOCASE
+            OR p.descripcion LIKE ?3 COLLATE NOCASE
+            OR p.marca LIKE ?3 COLLATE NOCASE
+            OR p.categoria LIKE ?3 COLLATE NOCASE
+            OR p.unidad LIKE ?3 COLLATE NOCASE
+            OR p.descripcion LIKE ?4 COLLATE NOCASE
+          )
+        ORDER BY
+            CASE
+                    WHEN p.codigo_barras = ?2 THEN 0
+                    WHEN p.id = ?2 THEN 1
+                    WHEN p.codigo_proveedor = ?2 THEN 2
+                    WHEN p.clave_producto = ?2 THEN 3
+                    WHEN p.codigo_barras LIKE ?3 COLLATE NOCASE THEN 4
+                    WHEN p.id LIKE ?3 COLLATE NOCASE THEN 5
+                    WHEN p.codigo_proveedor LIKE ?3 COLLATE NOCASE THEN 6
+                    WHEN p.clave_producto LIKE ?3 COLLATE NOCASE THEN 7
+                    WHEN p.descripcion LIKE ?3 COLLATE NOCASE THEN 8
+                    WHEN p.marca LIKE ?3 COLLATE NOCASE THEN 9
+                    ELSE 10
+            END,
+            p.descripcion COLLATE NOCASE
+        LIMIT ?5 OFFSET ?6
+        "
+    };
+
+    let mut stmt = conn.prepare(sql).map_err(AppError::from).map_err(to_command_error)?;
+    let mapper = |row: &rusqlite::Row<'_>| {
+        Ok(ProductoConStock {
+            id: row.get(0)?,
+            codigo_barras: row.get(1)?,
+            codigo_proveedor: row.get(2)?,
+            proveedor_id: row.get(3)?,
+            clave_producto: row.get(4)?,
+            descripcion: row.get(5)?,
+            marca: row.get(6)?,
+            categoria: row.get(7)?,
+            unidad: row.get(8)?,
+            precio_costo: row.get(9)?,
+            costo_promedio: row.get(10)?,
+            precio_venta: row.get(11)?,
+            sat_clave_prod_serv: row.get(12)?,
+            sat_clave_unidad: row.get(13)?,
+            sucursal_id: row.get(14)?,
+            stock: row.get(15)?,
+            stock_minimo: row.get(16)?,
+            precio_original: None,
+            precio_descontado: None,
+            nombre_promo: None,
+            promocion_id: None,
+            promo_tipo_descuento: None,
+            promo_valor: None,
+            precio_1: 0.0,
+            precio_2: 0.0,
+            precio_3: 0.0,
+            precio_4: 0.0,
+            mayoreo_apartir: 0.0,
+            a_granel: false,
+            no_en_catalogo: false,
+            ventas_negativas: false,
+            caducidad: None,
+            fotos: String::new(),
+            descripcion_catalogo: String::new(),
+        })
+    };
+    let iter = if exact_query.is_empty() {
+        stmt.query_map(params![sucursal_id, page_size, offset], mapper)
+    } else {
+        stmt.query_map(
+            params![sucursal_id, exact_query, prefix_pattern, contains_pattern, page_size, offset],
+            mapper,
+        )
+    }
+    .map_err(AppError::from)
+    .map_err(to_command_error)?;
+
+    let mut rows = Vec::new();
+    for item in iter {
+        let mut product = item.map_err(AppError::from).map_err(to_command_error)?;
+        apply_active_promotion(&conn, &mut product).map_err(to_command_error)?;
+        rows.push(product);
+    }
+
+    Ok(ProductoInventarioPage { rows, total })
 }
 
 #[tauri::command]
@@ -4656,6 +5704,19 @@ fn asegurar_producto_venta_diversa(
         precio_descontado: None,
         nombre_promo: None,
         promocion_id: None,
+        promo_tipo_descuento: None,
+        promo_valor: None,
+        precio_1: 0.0,
+        precio_2: 0.0,
+        precio_3: 0.0,
+        precio_4: 0.0,
+        mayoreo_apartir: 0.0,
+        a_granel: true,
+        no_en_catalogo: false,
+        ventas_negativas: true,
+        caducidad: None,
+        fotos: String::new(),
+        descripcion_catalogo: String::new(),
     })
 }
 
@@ -5130,17 +6191,1193 @@ fn eliminar_promocion(
 }
 
 #[tauri::command]
+fn importar_datos_universal_visual(
+    state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
+    payload: ImportarDatosUniversalInput,
+) -> AppResult<ImportarDatosUniversalResult> {
+    require_admin_or_superadmin(&state_sesion)?;
+    if payload.rows.is_empty() {
+        return Err("No hay filas para importar.".to_string());
+    }
+
+    let destino = normalize_upper_trim(&payload.destino);
+    let mut conn = get_conn(&state_db).map_err(to_command_error)?;
+    let tx = conn.transaction().map_err(AppError::from).map_err(to_command_error)?;
+    let mut registros_upsertados = 0usize;
+    let mut omitidos = 0usize;
+
+    for (index, row) in payload.rows.iter().enumerate() {
+        match destino.as_str() {
+            "CLIENTES" => {
+                let nombre = json_value_text(row, &["nombre", "cliente", "razonSocial", "razon_social"]);
+                if nombre.trim().is_empty() {
+                    omitidos += 1;
+                    continue;
+                }
+                let id_raw = json_value_text(row, &["id", "clienteId", "cliente_id", "clave"]);
+                let id = if id_raw.trim().is_empty() {
+                    legacy_catalog_id("IMPORT-CLI", &format!("{}-{}", nombre, index + 1))
+                } else {
+                    legacy_catalog_id("IMPORT-CLI", &id_raw)
+                };
+                let telefono = normalize_plain_trim(&json_value_text(row, &["telefono", "tel", "celular", "phone"]));
+                let direccion = normalize_title_trim(&json_value_text(row, &["direccion", "domicilio", "address"]));
+                let limite_credito = json_value_number(row, &["limiteCredito", "limite_credito", "credito"]);
+                let saldo_deudor = json_value_number(row, &["saldoDeudor", "saldo_deudor", "saldo"]);
+                tx.execute(
+                    "
+                    INSERT INTO clientes (id, nombre, telefono, direccion, limite_credito, saldo_deudor, sincronizado, updated_at, eliminado)
+                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, datetime('now'), 0)
+                    ON CONFLICT(id) DO UPDATE SET
+                        nombre = excluded.nombre,
+                        telefono = excluded.telefono,
+                        direccion = excluded.direccion,
+                        limite_credito = excluded.limite_credito,
+                        saldo_deudor = excluded.saldo_deudor,
+                        eliminado = 0,
+                        sincronizado = 0,
+                        updated_at = datetime('now')
+                    ",
+                    params![id, normalize_title_trim(&nombre), telefono, direccion, limite_credito.max(0.0), saldo_deudor.max(0.0)],
+                )
+                .map_err(|error| map_write_error(error, "cliente"))
+                .map_err(to_command_error)?;
+                registros_upsertados += 1;
+            }
+            "PROVEEDORES" => {
+                let nombre = json_value_text(row, &["nombre", "proveedor", "razonSocial", "razon_social"]);
+                if nombre.trim().is_empty() {
+                    omitidos += 1;
+                    continue;
+                }
+                let id_raw = json_value_text(row, &["id", "proveedorId", "proveedor_id", "clave"]);
+                let id = if id_raw.trim().is_empty() {
+                    legacy_catalog_id("IMPORT-PROV", &format!("{}-{}", nombre, index + 1))
+                } else {
+                    legacy_catalog_id("IMPORT-PROV", &id_raw)
+                };
+                let contacto = normalize_title_trim(&json_value_text(row, &["contactoNombre", "contacto_nombre", "contacto", "encargado"]));
+                let telefono = normalize_plain_trim(&json_value_text(row, &["telefono", "tel", "celular", "phone"]));
+                let email = normalize_email_trim(&json_value_text(row, &["email", "correo", "mail"]));
+                let direccion = normalize_title_trim(&json_value_text(row, &["direccion", "domicilio", "address"]));
+                tx.execute(
+                    "
+                    INSERT INTO proveedores (id, nombre, contacto_nombre, telefono, email, direccion, sincronizado, updated_at, eliminado)
+                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, datetime('now'), 0)
+                    ON CONFLICT(id) DO UPDATE SET
+                        nombre = excluded.nombre,
+                        contacto_nombre = excluded.contacto_nombre,
+                        telefono = excluded.telefono,
+                        email = excluded.email,
+                        direccion = excluded.direccion,
+                        eliminado = 0,
+                        sincronizado = 0,
+                        updated_at = datetime('now')
+                    ",
+                    params![id, normalize_title_trim(&nombre), contacto, telefono, email, direccion],
+                )
+                .map_err(|error| map_write_error(error, "proveedor"))
+                .map_err(to_command_error)?;
+                registros_upsertados += 1;
+            }
+            "MARCAS" | "CATEGORIAS" => {
+                let nombre = json_value_text(row, &["nombre", "marca", "categoria", "descripcion"]);
+                if nombre.trim().is_empty() {
+                    omitidos += 1;
+                    continue;
+                }
+                let table = if destino == "MARCAS" { "marcas" } else { "categorias" };
+                let prefix = if destino == "MARCAS" { "IMPORT-MARCA" } else { "IMPORT-CAT" };
+                let id_raw = json_value_text(row, &["id", "clave"]);
+                let id = if id_raw.trim().is_empty() {
+                    legacy_catalog_id(prefix, &nombre)
+                } else {
+                    legacy_catalog_id(prefix, &id_raw)
+                };
+                tx.execute(
+                    &format!(
+                        "
+                        INSERT INTO {table} (id, nombre, sincronizado, updated_at, eliminado)
+                        VALUES (?1, ?2, 0, datetime('now'), 0)
+                        ON CONFLICT(id) DO UPDATE SET
+                            nombre = excluded.nombre,
+                            eliminado = 0,
+                            sincronizado = 0,
+                            updated_at = datetime('now')
+                        "
+                    ),
+                    params![id, normalize_title_trim(&nombre)],
+                )
+                .map_err(|error| map_write_error(error, table))
+                .map_err(to_command_error)?;
+                registros_upsertados += 1;
+            }
+            "UNIDADES" => {
+                let nombre = json_value_text(row, &["nombre", "unidad", "descripcion"]);
+                if nombre.trim().is_empty() {
+                    omitidos += 1;
+                    continue;
+                }
+                let id_raw = json_value_text(row, &["id", "clave"]);
+                let id = if id_raw.trim().is_empty() {
+                    legacy_catalog_id("IMPORT-UNI", &nombre)
+                } else {
+                    legacy_catalog_id("IMPORT-UNI", &id_raw)
+                };
+                let clave_sat = normalize_upper_trim(&json_value_text(row, &["claveSat", "clave_sat", "satClaveUnidad", "sat_clave_unidad"]));
+                let clave_sat = if clave_sat.len() == 3 { clave_sat } else { "H87".to_string() };
+                tx.execute(
+                    "
+                    INSERT INTO unidades (id, nombre, clave_sat, sincronizado, updated_at, eliminado)
+                    VALUES (?1, ?2, ?3, 0, datetime('now'), 0)
+                    ON CONFLICT(id) DO UPDATE SET
+                        nombre = excluded.nombre,
+                        clave_sat = excluded.clave_sat,
+                        eliminado = 0,
+                        sincronizado = 0,
+                        updated_at = datetime('now')
+                    ",
+                    params![id, normalize_title_trim(&nombre), clave_sat],
+                )
+                .map_err(|error| map_write_error(error, "unidad"))
+                .map_err(to_command_error)?;
+                registros_upsertados += 1;
+            }
+            _ => {
+                return Err("Destino no soportado por el importador universal.".to_string());
+            }
+        }
+    }
+
+    tx.commit().map_err(AppError::from).map_err(to_command_error)?;
+    Ok(ImportarDatosUniversalResult {
+        destino,
+        total_leidos: payload.rows.len(),
+        registros_upsertados,
+        omitidos,
+    })
+}
+
+fn csv_value(record: &csv::StringRecord, column_indexes: &HashMap<String, usize>, field: &str) -> String {
+    column_indexes
+        .get(field)
+        .and_then(|index| record.get(*index))
+        .map(normalize_plain_trim)
+        .unwrap_or_default()
+}
+
+fn csv_money_value(record: &csv::StringRecord, column_indexes: &HashMap<String, usize>, field: &str) -> f64 {
+    let raw = csv_value(record, column_indexes, field);
+    if raw.is_empty() {
+        return 0.0;
+    }
+    let clean = if raw.rfind(',') > raw.rfind('.') {
+        raw.replace('.', "").replace(',', ".")
+    } else {
+        raw.replace(',', "")
+    }
+    .replace('$', "")
+    .trim()
+    .to_string();
+    clean.parse::<f64>().unwrap_or(0.0).max(0.0)
+}
+
+fn csv_relation_value(
+    record: &csv::StringRecord,
+    column_indexes: &HashMap<String, usize>,
+    relation_maps: &HashMap<String, HashMap<String, String>>,
+    field: &str,
+) -> String {
+    let raw = csv_value(record, column_indexes, field);
+    relation_maps
+        .get(field)
+        .and_then(|map| map.get(&raw))
+        .cloned()
+        .unwrap_or(raw)
+}
+
+fn sniff_csv_delimiter(file_path: &str) -> u8 {
+    let mut buffer = String::new();
+    if let Ok(mut file) = File::open(file_path) {
+        let mut bytes = vec![0u8; 8192];
+        if let Ok(size) = file.read(&mut bytes) {
+            buffer = String::from_utf8_lossy(&bytes[..size]).to_string();
+        }
+    }
+    let first_line = buffer
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or_default();
+    let comma = first_line.matches(',').count();
+    let semicolon = first_line.matches(';').count();
+    let tab = first_line.matches('\t').count();
+    if semicolon >= comma && semicolon >= tab && semicolon > 0 {
+        b';'
+    } else if tab >= comma && tab >= semicolon && tab > 0 {
+        b'\t'
+    } else {
+        b','
+    }
+}
+
+fn resolve_csv_delimiter(file_path: &str, delimiter: &str) -> u8 {
+    match delimiter.trim().to_uppercase().as_str() {
+        "PUNTO_COMA" | "SEMICOLON" | ";" => b';',
+        "TAB" | "TABULADOR" => b'\t',
+        "COMA" | "COMMA" | "," => b',',
+        _ => sniff_csv_delimiter(file_path),
+    }
+}
+
+fn delimiter_label(delimiter: u8) -> String {
+    match delimiter {
+        b';' => "PUNTO_COMA".to_string(),
+        b'\t' => "TAB".to_string(),
+        _ => "COMA".to_string(),
+    }
+}
+
+fn ensure_import_catalog(tx: &Transaction<'_>, table: &str, prefix: &str, name: &str) -> Result<String, AppError> {
+    let clean_name = normalize_title_trim(name);
+    let final_name = if clean_name.is_empty() {
+        match table {
+            "marcas" => "SIN MARCA".to_string(),
+            "categorias" => "GENERAL".to_string(),
+            "unidades" => "PIEZA".to_string(),
+            _ => "GENERAL".to_string(),
+        }
+    } else {
+        clean_name
+    };
+    let existing = tx
+        .query_row(
+            &format!("SELECT id FROM {table} WHERE nombre = ?1 COLLATE NOCASE AND eliminado = 0 LIMIT 1"),
+            [&final_name],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    if let Some(id) = existing {
+        return Ok(id);
+    }
+    let id = legacy_catalog_id(prefix, &final_name);
+    tx.execute(
+        &format!(
+            "
+            INSERT INTO {table} (id, nombre, sincronizado, updated_at, eliminado)
+            VALUES (?1, ?2, 0, datetime('now'), 0)
+            ON CONFLICT(id) DO UPDATE SET
+                nombre = excluded.nombre,
+                eliminado = 0,
+                sincronizado = 0,
+                updated_at = datetime('now')
+            "
+        ),
+        params![id, final_name],
+    )?;
+    Ok(id)
+}
+
+#[tauri::command]
+fn seleccionar_archivo_csv_importacion() -> AppResult<Option<CsvArchivoSeleccionado>> {
+    let Some(path) = rfd::FileDialog::new()
+        .set_title("Seleccionar CSV para importar")
+        .add_filter("CSV", &["csv"])
+        .pick_file()
+    else {
+        return Ok(None);
+    };
+
+    let file_path = path.to_string_lossy().to_string();
+    let file_name = path
+        .file_name()
+        .map(|value| value.to_string_lossy().to_string())
+        .unwrap_or_else(|| "archivo.csv".to_string());
+    let delimiter = sniff_csv_delimiter(&file_path);
+    let mut reader = csv::ReaderBuilder::new()
+        .flexible(true)
+        .delimiter(delimiter)
+        .from_path(&file_path)
+        .map_err(|error| format!("No se pudo leer encabezados del CSV seleccionado: {error}"))?;
+    let headers = reader
+        .headers()
+        .map_err(|error| format!("No se detectaron encabezados válidos en el CSV: {error}"))?
+        .iter()
+        .map(|header| header.trim().to_string())
+        .collect::<Vec<_>>();
+
+    if headers.is_empty() {
+        return Err("El CSV seleccionado no tiene encabezados.".to_string());
+    }
+
+    Ok(Some(CsvArchivoSeleccionado {
+        file_path,
+        file_name,
+        headers,
+        delimiter: delimiter_label(delimiter),
+    }))
+}
+
+#[tauri::command]
+fn analizar_csv_importacion(payload: AnalizarCsvImportacionInput) -> AppResult<AnalizarCsvImportacionResult> {
+    let file_path = payload.file_path.trim().to_string();
+    if file_path.is_empty() {
+        return Err("Falta la ruta local del CSV para analizarlo por streaming.".to_string());
+    }
+
+    let relation_fields = ["proveedorId", "marca", "categoria", "unidad"];
+    let delimiter = resolve_csv_delimiter(&file_path, &payload.delimiter);
+    let mut reader = csv::ReaderBuilder::new()
+        .flexible(true)
+        .delimiter(delimiter)
+        .from_path(&file_path)
+        .map_err(|error| format!("No se pudo abrir el CSV para análisis: {error}"))?;
+
+    let mut total_filas = 0usize;
+    let mut preview_rows = Vec::new();
+    let mut warnings = Vec::new();
+    let mut unique_sets: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut unique_values: HashMap<String, Vec<String>> = HashMap::new();
+    for field in relation_fields {
+        unique_sets.insert(field.to_string(), HashSet::new());
+        unique_values.insert(field.to_string(), Vec::new());
+    }
+
+    for record_result in reader.records() {
+        let record = match record_result {
+            Ok(record) => record,
+            Err(error) => {
+                warnings.push(format!("Fila {} no se pudo leer: {}", total_filas + 2, error));
+                continue;
+            }
+        };
+        total_filas += 1;
+
+        if preview_rows.len() < 20 {
+            let mut row = HashMap::new();
+            for (field, index) in &payload.column_indexes {
+                row.insert(field.clone(), record.get(*index).unwrap_or_default().to_string());
+            }
+            preview_rows.push(row);
+        }
+
+        for field in relation_fields {
+            if !payload.column_indexes.contains_key(field) {
+                continue;
+            }
+            let value = csv_value(&record, &payload.column_indexes, field);
+            if value.is_empty() {
+                continue;
+            }
+            let set = unique_sets.entry(field.to_string()).or_default();
+            if set.insert(value.clone()) {
+                let values = unique_values.entry(field.to_string()).or_default();
+                if values.len() < 500 {
+                    values.push(value);
+                }
+            }
+        }
+    }
+
+    for field in relation_fields {
+        let total_unique = unique_sets.get(field).map(|set| set.len()).unwrap_or(0);
+        let shown = unique_values.get(field).map(|values| values.len()).unwrap_or(0);
+        if total_unique > shown {
+            warnings.push(format!(
+                "{field}: se detectaron {total_unique} valores únicos; se muestran {shown}. Divide el archivo o depura catálogos para una homologación más segura."
+            ));
+        }
+    }
+
+    Ok(AnalizarCsvImportacionResult {
+        total_filas,
+        unique_values,
+        preview_rows,
+        warnings,
+    })
+}
+
+#[tauri::command]
+fn importar_csv_productos_mapeado(
+    state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
+    payload: ImportarCsvProductosMapeadoInput,
+) -> AppResult<ImportarCsvProductosMapeadoResult> {
+    let actor = require_admin_or_superadmin(&state_sesion)?;
+    let file_path = payload.file_path.trim().to_string();
+    let sucursal_id = payload.sucursal_id.trim().to_string();
+    ensure_can_read_sucursal(&actor, &sucursal_id)?;
+
+    if file_path.is_empty() {
+        return Err("Selecciona un archivo CSV válido para importar.".to_string());
+    }
+    for required in ["codigo", "descripcion", "precioVenta", "proveedorId"] {
+        if !payload.column_indexes.contains_key(required) {
+            return Err(format!("Falta mapear el campo obligatorio: {required}."));
+        }
+    }
+
+    let delimiter = resolve_csv_delimiter(&file_path, &payload.delimiter);
+    let mut reader = csv::ReaderBuilder::new()
+        .flexible(true)
+        .delimiter(delimiter)
+        .from_path(&file_path)
+        .map_err(|error| format!("No se pudo abrir el CSV: {error}"))?;
+
+    let mut conn = get_conn(&state_db).map_err(to_command_error)?;
+    let tx = conn.transaction().map_err(AppError::from).map_err(to_command_error)?;
+
+    let sucursal_exists: i64 = tx
+        .query_row(
+            "SELECT COUNT(*) FROM sucursales WHERE id = ?1 AND eliminado = 0",
+            [&sucursal_id],
+            |row| row.get(0),
+        )
+        .map_err(AppError::from)
+        .map_err(to_command_error)?;
+    if sucursal_exists == 0 {
+        return Err("La sucursal seleccionada no existe o está eliminada.".to_string());
+    }
+
+    let mut total_leidos = 0usize;
+    let mut productos_upsertados = 0usize;
+    let mut inventario_upsertado = 0usize;
+    let mut filas_omitidas = 0usize;
+    let mut errores = Vec::new();
+
+    for record_result in reader.records() {
+        total_leidos += 1;
+        let fila = total_leidos + 1;
+        let record = match record_result {
+            Ok(record) => record,
+            Err(_) => {
+                filas_omitidas += 1;
+                if errores.len() < 50 {
+                    errores.push(CsvImportIssue {
+                        fila,
+                        motivo: "No se pudo leer la fila CSV.".to_string(),
+                        codigo: String::new(),
+                        descripcion: String::new(),
+                    });
+                }
+                continue;
+            }
+        };
+
+        let codigo = normalize_upper_trim(&csv_value(&record, &payload.column_indexes, "codigo"));
+        let descripcion = normalize_title_trim(&csv_value(&record, &payload.column_indexes, "descripcion"));
+        if codigo.is_empty() || descripcion.is_empty() {
+            filas_omitidas += 1;
+            if errores.len() < 50 {
+                errores.push(CsvImportIssue {
+                    fila,
+                    motivo: "Falta código o descripción.".to_string(),
+                    codigo,
+                    descripcion,
+                });
+            }
+            continue;
+        }
+
+        let proveedor_id = csv_relation_value(&record, &payload.column_indexes, &payload.foreign_key_map, "proveedorId");
+        let proveedor_id = if proveedor_id.trim().is_empty() || proveedor_id.eq_ignore_ascii_case("null") {
+            filas_omitidas += 1;
+            if errores.len() < 50 {
+                errores.push(CsvImportIssue {
+                    fila,
+                    motivo: "Proveedor vacío o sin homologar.".to_string(),
+                    codigo,
+                    descripcion,
+                });
+            }
+            continue;
+        } else {
+            proveedor_id.trim().to_string()
+        };
+        let proveedor_exists: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM proveedores WHERE id = ?1 AND eliminado = 0",
+                [&proveedor_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        if proveedor_exists == 0 {
+            filas_omitidas += 1;
+            if errores.len() < 50 {
+                errores.push(CsvImportIssue {
+                    fila,
+                    motivo: format!("El proveedor homologado no existe o está eliminado: {proveedor_id}."),
+                    codigo,
+                    descripcion,
+                });
+            }
+            continue;
+        }
+
+        let marca = csv_relation_value(&record, &payload.column_indexes, &payload.foreign_key_map, "marca");
+        let categoria = csv_relation_value(&record, &payload.column_indexes, &payload.foreign_key_map, "categoria");
+        let unidad = csv_relation_value(&record, &payload.column_indexes, &payload.foreign_key_map, "unidad");
+        let marca_nombre = normalize_title_trim(&marca);
+        let categoria_nombre = normalize_title_trim(&categoria);
+        let unidad_nombre = normalize_title_trim(&unidad);
+
+        ensure_import_catalog(&tx, "marcas", "IMPORT-MARCA", &marca_nombre).map_err(to_command_error)?;
+        ensure_import_catalog(&tx, "categorias", "IMPORT-CAT", &categoria_nombre).map_err(to_command_error)?;
+        let unidad_id = ensure_import_catalog(&tx, "unidades", "IMPORT-UNI", &unidad_nombre).map_err(to_command_error)?;
+        let unidad_sat: String = tx
+            .query_row("SELECT clave_sat FROM unidades WHERE id = ?1 AND eliminado = 0", [&unidad_id], |row| row.get(0))
+            .unwrap_or_else(|_| "H87".to_string());
+
+        let precio_costo = round_money(csv_money_value(&record, &payload.column_indexes, "precioCosto"));
+        let precio_venta = round_money(csv_money_value(&record, &payload.column_indexes, "precioVenta"));
+        if precio_venta <= 0.0 {
+            filas_omitidas += 1;
+            if errores.len() < 50 {
+                errores.push(CsvImportIssue {
+                    fila,
+                    motivo: "Precio de venta inválido o en cero.".to_string(),
+                    codigo,
+                    descripcion,
+                });
+            }
+            continue;
+        }
+        let stock = csv_money_value(&record, &payload.column_indexes, "stock");
+        let stock_minimo = csv_money_value(&record, &payload.column_indexes, "stockMinimo");
+        let codigo_barras = normalize_upper_trim(&csv_value(&record, &payload.column_indexes, "codigoBarras"));
+        let producto_id = legacy_catalog_id("CSV-PROD", &codigo);
+
+        tx.execute(
+            "
+            INSERT INTO productos (
+                id, codigo_barras, codigo_proveedor, proveedor_id, clave_producto, descripcion,
+                marca, categoria, unidad, precio_costo, costo_promedio, precio_venta,
+                sat_clave_prod_serv, sat_clave_unidad, sincronizado, updated_at, eliminado
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10, ?11, '01010101', ?12, 0, datetime('now'), 0)
+            ON CONFLICT(id) DO UPDATE SET
+                codigo_barras = excluded.codigo_barras,
+                codigo_proveedor = excluded.codigo_proveedor,
+                proveedor_id = excluded.proveedor_id,
+                clave_producto = excluded.clave_producto,
+                descripcion = excluded.descripcion,
+                marca = excluded.marca,
+                categoria = excluded.categoria,
+                unidad = excluded.unidad,
+                precio_costo = excluded.precio_costo,
+                costo_promedio = excluded.costo_promedio,
+                precio_venta = excluded.precio_venta,
+                sat_clave_unidad = excluded.sat_clave_unidad,
+                eliminado = 0,
+                sincronizado = 0,
+                updated_at = datetime('now')
+            ",
+            params![
+                producto_id,
+                if codigo_barras.is_empty() { None::<String> } else { Some(codigo_barras) },
+                codigo,
+                proveedor_id,
+                codigo,
+                descripcion,
+                if marca_nombre.is_empty() { "SIN MARCA".to_string() } else { marca_nombre },
+                if categoria_nombre.is_empty() { "GENERAL".to_string() } else { categoria_nombre },
+                if unidad_nombre.is_empty() { "PIEZA".to_string() } else { unidad_nombre },
+                precio_costo,
+                precio_venta,
+                if unidad_sat.len() == 3 { unidad_sat } else { "H87".to_string() },
+            ],
+        )
+        .map_err(|error| map_write_error(error, "producto"))
+        .map_err(to_command_error)?;
+        productos_upsertados += 1;
+
+        tx.execute(
+            "
+            INSERT INTO inventario_sucursal (
+                producto_id, sucursal_id, stock, stock_minimo, costo_promedio, precio_venta, sincronizado, updated_at, eliminado
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, datetime('now'), 0)
+            ON CONFLICT(producto_id, sucursal_id) DO UPDATE SET
+                stock = excluded.stock,
+                stock_minimo = excluded.stock_minimo,
+                costo_promedio = excluded.costo_promedio,
+                precio_venta = excluded.precio_venta,
+                eliminado = 0,
+                sincronizado = 0,
+                updated_at = datetime('now')
+            ",
+            params![producto_id, sucursal_id, stock, stock_minimo, precio_costo, precio_venta],
+        )
+        .map_err(|error| map_write_error(error, "inventario"))
+        .map_err(to_command_error)?;
+        inventario_upsertado += 1;
+    }
+
+    tx.commit().map_err(AppError::from).map_err(to_command_error)?;
+    Ok(ImportarCsvProductosMapeadoResult {
+        total_leidos,
+        productos_upsertados,
+        inventario_upsertado,
+        filas_omitidas,
+        errores,
+    })
+}
+
+#[tauri::command]
+fn importar_articulos_legacy_visual(
+    state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
+    payload: ImportarArticulosLegacyInput,
+) -> AppResult<ImportarArticulosLegacyResult> {
+    let actor = require_admin_or_superadmin(&state_sesion)?;
+    let sucursal_id = payload.sucursal_id.trim().to_string();
+    ensure_can_read_sucursal(&actor, &sucursal_id)?;
+    if payload.rows.is_empty() {
+        return Err("No hay filas para importar.".to_string());
+    }
+
+    let mut proveedor_default_id = payload.proveedor_default_id.trim().to_string();
+    if proveedor_default_id.is_empty() {
+        proveedor_default_id = "PROV-SIN-ASIGNAR".to_string();
+    }
+
+    let mut conn = get_conn(&state_db).map_err(to_command_error)?;
+    let tx = conn.transaction().map_err(AppError::from).map_err(to_command_error)?;
+
+    let sucursal_exists: i64 = tx
+        .query_row(
+            "SELECT COUNT(*) FROM sucursales WHERE id = ?1 AND eliminado = 0",
+            [&sucursal_id],
+            |row| row.get(0),
+        )
+        .map_err(AppError::from)
+        .map_err(to_command_error)?;
+    if sucursal_exists == 0 {
+        return Err("La sucursal seleccionada no existe o está eliminada.".to_string());
+    }
+
+    tx.execute(
+        "
+        INSERT INTO proveedores (id, nombre, contacto_nombre, telefono, email, direccion, sincronizado, updated_at, eliminado)
+        VALUES (?1, 'PROVEEDOR SIN ASIGNAR', '', '', '', '', 0, datetime('now'), 0)
+        ON CONFLICT(id) DO UPDATE SET
+            nombre = excluded.nombre,
+            eliminado = 0,
+            sincronizado = 0,
+            updated_at = datetime('now')
+        ",
+        [&proveedor_default_id],
+    )
+    .map_err(|error| map_write_error(error, "proveedor"))
+    .map_err(to_command_error)?;
+
+    tx.execute(
+        "
+        CREATE TABLE IF NOT EXISTS productos_legacy_meta (
+            producto_id TEXT PRIMARY KEY,
+            legacy_id INTEGER,
+            caducidad TEXT,
+            fotos TEXT,
+            descripcion_catalogo TEXT,
+            mayoreo_apartir REAL,
+            a_granel TEXT,
+            no_en_catalogo TEXT,
+            ventas_negativas TEXT,
+            created_at_legacy TEXT,
+            updated_at_legacy TEXT,
+            sincronizado INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            eliminado INTEGER NOT NULL DEFAULT 0 CHECK(eliminado IN (0, 1)),
+            FOREIGN KEY (producto_id) REFERENCES productos(id) ON UPDATE CASCADE ON DELETE CASCADE
+        )
+        ",
+        [],
+    )
+    .map_err(AppError::from)
+    .map_err(to_command_error)?;
+
+    let mut productos_upsertados = 0usize;
+    let mut inventario_upsertado = 0usize;
+    let mut catalogos_actualizados = 0usize;
+
+    for (index, row) in payload.rows.iter().enumerate() {
+        let descripcion = row
+            .descripcion_articulo
+            .as_ref()
+            .map(|v| normalize_title_trim(v))
+            .unwrap_or_default();
+        if descripcion.is_empty() {
+            continue;
+        }
+
+        let producto_id = if let Some(legacy_id) = row.id {
+            format!("LEGACY-ART-{legacy_id}")
+        } else if let Some(clave) = &row.clave {
+            let clean = clave.trim();
+            if clean.is_empty() {
+                format!("LEGACY-ART-AUTO-{}", index + 1)
+            } else {
+                legacy_catalog_id("LEGACY-ART", clean)
+            }
+        } else {
+            format!("LEGACY-ART-AUTO-{}", index + 1)
+        };
+
+        let proveedor_id = if let Some(proveedor_nombre) = optional_normalized_name(row.proveedor_nombre.as_ref()) {
+            let prov_id = row
+                .provedor
+                .map(|proveedor_legacy| format!("LEGACY-PROV-{proveedor_legacy}"))
+                .unwrap_or_else(|| legacy_catalog_id("LEGACY-PROV", &proveedor_nombre));
+            tx.execute(
+                "
+                INSERT INTO proveedores (id, nombre, contacto_nombre, telefono, email, direccion, sincronizado, updated_at, eliminado)
+                VALUES (?1, ?2, '', '', '', '', 0, datetime('now'), 0)
+                ON CONFLICT(id) DO UPDATE SET
+                    nombre = excluded.nombre,
+                    eliminado = 0,
+                    sincronizado = 0,
+                    updated_at = datetime('now')
+                ",
+                params![prov_id, proveedor_nombre],
+            )
+            .map_err(|error| map_write_error(error, "proveedor"))
+            .map_err(to_command_error)?;
+            catalogos_actualizados += 1;
+            prov_id
+        } else if let Some(proveedor_legacy) = row.provedor {
+            if let Some(existing_id) = find_proveedor_id_by_legacy_id(
+                &tx,
+                &["IMPORT-PROV", "LEGACY-PROV", "PROV", "PROVEEDOR"],
+                proveedor_legacy,
+            )
+            .map_err(to_command_error)?
+            {
+                existing_id
+            } else {
+                let prov_id = format!("LEGACY-PROV-{proveedor_legacy}");
+                tx.execute(
+                    "
+                    INSERT INTO proveedores (id, nombre, contacto_nombre, telefono, email, direccion, sincronizado, updated_at, eliminado)
+                    VALUES (?1, ?2, '', '', '', '', 0, datetime('now'), 0)
+                    ON CONFLICT(id) DO UPDATE SET
+                        nombre = excluded.nombre,
+                        eliminado = 0,
+                        sincronizado = 0,
+                        updated_at = datetime('now')
+                    ",
+                    params![prov_id, format!("PROVEEDOR LEGACY #{proveedor_legacy}")],
+                )
+                .map_err(|error| map_write_error(error, "proveedor"))
+                .map_err(to_command_error)?;
+                catalogos_actualizados += 1;
+                prov_id
+            }
+        } else {
+            proveedor_default_id.clone()
+        };
+
+        let marca_resuelta = if let Some(marca_nombre) = optional_normalized_name(row.marca_nombre.as_ref()) {
+            let marca_id = row
+                .marca
+                .map(|marca_legacy| format!("LEGACY-MARCA-{marca_legacy}"))
+                .unwrap_or_else(|| legacy_catalog_id("LEGACY-MARCA", &marca_nombre));
+            (marca_id, marca_nombre)
+        } else if let Some(marca_legacy) = row.marca {
+            find_catalog_by_legacy_id(
+                &tx,
+                "marcas",
+                &["IMPORT-MARCA", "LEGACY-MARCA", "MARCA"],
+                marca_legacy,
+            )
+            .map_err(to_command_error)?
+            .unwrap_or_else(|| ("LEGACY-MARCA-SIN_MARCA".to_string(), "SIN MARCA".to_string()))
+        } else {
+            ("LEGACY-MARCA-SIN_MARCA".to_string(), "SIN MARCA".to_string())
+        };
+        let (marca_id, marca_nombre) = marca_resuelta;
+        tx.execute(
+            "
+            INSERT INTO marcas (id, nombre, sincronizado, updated_at, eliminado)
+            VALUES (?1, ?2, 0, datetime('now'), 0)
+            ON CONFLICT(id) DO UPDATE SET
+                nombre = excluded.nombre,
+                eliminado = 0,
+                sincronizado = 0,
+                updated_at = datetime('now')
+            ",
+            params![marca_id, marca_nombre],
+        )
+        .map_err(|error| map_write_error(error, "marca"))
+        .map_err(to_command_error)?;
+
+        let categoria_nombre = row
+            .categoria
+            .as_ref()
+            .map(|v| normalize_title_trim(v))
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| "GENERAL".to_string());
+        let categoria_id = legacy_catalog_id("LEGACY-CAT", &categoria_nombre);
+        tx.execute(
+            "
+            INSERT INTO categorias (id, nombre, sincronizado, updated_at, eliminado)
+            VALUES (?1, ?2, 0, datetime('now'), 0)
+            ON CONFLICT(id) DO UPDATE SET
+                nombre = excluded.nombre,
+                eliminado = 0,
+                sincronizado = 0,
+                updated_at = datetime('now')
+            ",
+            params![categoria_id, categoria_nombre],
+        )
+        .map_err(|error| map_write_error(error, "categoría"))
+        .map_err(to_command_error)?;
+
+        let unidad_nombre = row
+            .unidad
+            .as_ref()
+            .map(|v| normalize_title_trim(v))
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| "PIEZA".to_string());
+        let unidad_id = legacy_catalog_id("LEGACY-UNI", &unidad_nombre);
+        tx.execute(
+            "
+            INSERT INTO unidades (id, nombre, clave_sat, sincronizado, updated_at, eliminado)
+            VALUES (?1, ?2, 'H87', 0, datetime('now'), 0)
+            ON CONFLICT(id) DO UPDATE SET
+                nombre = excluded.nombre,
+                eliminado = 0,
+                sincronizado = 0,
+                updated_at = datetime('now')
+            ",
+            params![unidad_id, unidad_nombre],
+        )
+        .map_err(|error| map_write_error(error, "unidad"))
+        .map_err(to_command_error)?;
+
+        catalogos_actualizados += 3;
+
+        let precio_costo = round_money(row.precio_compra.unwrap_or(0.0).max(0.0));
+        let precio_venta = round_money(
+            row.precio_venta
+                .filter(|v| *v > 0.0)
+                .or(row.precio_1.filter(|v| *v > 0.0))
+                .or(row.precio_2.filter(|v| *v > 0.0))
+                .or(row.precio_3.filter(|v| *v > 0.0))
+                .or(row.precio_4.filter(|v| *v > 0.0))
+                .unwrap_or(0.0),
+        );
+        let codigo_proveedor = row
+            .clave
+            .as_ref()
+            .map(|v| normalize_upper_trim(v))
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| format!("LEGACY-COD-{}", index + 1));
+        let clave_producto = codigo_proveedor.clone();
+
+        tx.execute(
+            "
+            INSERT INTO productos (
+                id, codigo_barras, codigo_proveedor, proveedor_id, clave_producto, descripcion,
+                marca, categoria, unidad, precio_costo, costo_promedio, precio_venta,
+                sat_clave_prod_serv, sat_clave_unidad, precio_1, precio_2, precio_3, precio_4,
+                mayoreo_apartir, a_granel, no_en_catalogo, ventas_negativas, caducidad, fotos,
+                descripcion_catalogo, sincronizado, updated_at, eliminado
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, '01010101', 'H87',
+                    ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, 0, datetime('now'), 0)
+            ON CONFLICT(id) DO UPDATE SET
+                codigo_barras = excluded.codigo_barras,
+                codigo_proveedor = excluded.codigo_proveedor,
+                proveedor_id = excluded.proveedor_id,
+                clave_producto = excluded.clave_producto,
+                descripcion = excluded.descripcion,
+                marca = excluded.marca,
+                categoria = excluded.categoria,
+                unidad = excluded.unidad,
+                precio_costo = excluded.precio_costo,
+                costo_promedio = excluded.costo_promedio,
+                precio_venta = excluded.precio_venta,
+                sat_clave_prod_serv = excluded.sat_clave_prod_serv,
+                sat_clave_unidad = excluded.sat_clave_unidad,
+                precio_1 = excluded.precio_1,
+                precio_2 = excluded.precio_2,
+                precio_3 = excluded.precio_3,
+                precio_4 = excluded.precio_4,
+                mayoreo_apartir = excluded.mayoreo_apartir,
+                a_granel = excluded.a_granel,
+                no_en_catalogo = excluded.no_en_catalogo,
+                ventas_negativas = excluded.ventas_negativas,
+                caducidad = excluded.caducidad,
+                fotos = excluded.fotos,
+                descripcion_catalogo = excluded.descripcion_catalogo,
+                eliminado = 0,
+                sincronizado = 0,
+                updated_at = datetime('now')
+            ",
+            params![
+                producto_id,
+                row.codigo_barra
+                    .as_ref()
+                    .map(|v| normalize_upper_trim(v))
+                    .filter(|v| !v.is_empty()),
+                codigo_proveedor,
+                proveedor_id,
+                clave_producto,
+                descripcion,
+                marca_nombre,
+                categoria_nombre,
+                unidad_nombre,
+                precio_costo,
+                precio_costo,
+                precio_venta,
+                row.precio_1.unwrap_or(0.0).max(0.0),
+                row.precio_2.unwrap_or(0.0).max(0.0),
+                row.precio_3.unwrap_or(0.0).max(0.0),
+                row.precio_4.unwrap_or(0.0).max(0.0),
+                row.mayoreo_apartir.unwrap_or(0.0).max(0.0),
+                legacy_truthy(row.a_granel.as_ref()),
+                legacy_truthy(row.no_en_catalogo.as_ref()),
+                legacy_truthy(row.ventas_negativas.as_ref()),
+                row.caducidad.as_ref().map(|v| normalize_plain_trim(v)).filter(|v| !v.is_empty()),
+                row.fotos.as_ref().map(|v| normalize_plain_trim(v)).filter(|v| !v.is_empty()),
+                row.descripcion_catalogo.as_ref().map(|v| normalize_title_trim(v)).filter(|v| !v.is_empty())
+            ],
+        )
+        .map_err(|error| map_write_error(error, "producto"))
+        .map_err(to_command_error)?;
+        productos_upsertados += 1;
+
+        tx.execute(
+            "
+            INSERT INTO inventario_sucursal (
+                producto_id, sucursal_id, stock, stock_minimo, costo_promedio, precio_venta, sincronizado, updated_at, eliminado
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, datetime('now'), 0)
+            ON CONFLICT(producto_id, sucursal_id) DO UPDATE SET
+                stock = excluded.stock,
+                stock_minimo = excluded.stock_minimo,
+                costo_promedio = excluded.costo_promedio,
+                precio_venta = excluded.precio_venta,
+                eliminado = 0,
+                sincronizado = 0,
+                updated_at = datetime('now')
+            ",
+            params![
+                producto_id,
+                sucursal_id,
+                row.existencia_stock.unwrap_or(0.0).max(0.0),
+                row.cant_min_stock.unwrap_or(0.0).max(0.0),
+                precio_costo,
+                precio_venta
+            ],
+        )
+        .map_err(|error| map_write_error(error, "inventario"))
+        .map_err(to_command_error)?;
+        inventario_upsertado += 1;
+
+        tx.execute(
+            "
+            INSERT INTO productos_legacy_meta (
+                producto_id, legacy_id, caducidad, fotos, descripcion_catalogo, mayoreo_apartir,
+                a_granel, no_en_catalogo, ventas_negativas, created_at_legacy, updated_at_legacy,
+                sincronizado, updated_at, eliminado
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 0, datetime('now'), 0)
+            ON CONFLICT(producto_id) DO UPDATE SET
+                legacy_id = excluded.legacy_id,
+                caducidad = excluded.caducidad,
+                fotos = excluded.fotos,
+                descripcion_catalogo = excluded.descripcion_catalogo,
+                mayoreo_apartir = excluded.mayoreo_apartir,
+                a_granel = excluded.a_granel,
+                no_en_catalogo = excluded.no_en_catalogo,
+                ventas_negativas = excluded.ventas_negativas,
+                created_at_legacy = excluded.created_at_legacy,
+                updated_at_legacy = excluded.updated_at_legacy,
+                sincronizado = 0,
+                updated_at = datetime('now'),
+                eliminado = 0
+            ",
+            params![
+                producto_id,
+                row.id,
+                row.caducidad.as_ref().map(|v| v.trim().to_string()),
+                row.fotos.as_ref().map(|v| normalize_plain_trim(v)),
+                row.descripcion_catalogo.as_ref().map(|v| normalize_title_trim(v)),
+                row.mayoreo_apartir,
+                row.a_granel.as_ref().map(|v| normalize_title_trim(v)),
+                row.no_en_catalogo.as_ref().map(|v| normalize_title_trim(v)),
+                row.ventas_negativas.as_ref().map(|v| normalize_title_trim(v)),
+                row.created_at.as_ref().map(|v| normalize_plain_trim(v)),
+                row.updated_at.as_ref().map(|v| normalize_plain_trim(v))
+            ],
+        )
+        .map_err(AppError::from)
+        .map_err(to_command_error)?;
+    }
+
+    tx.commit().map_err(AppError::from).map_err(to_command_error)?;
+    Ok(ImportarArticulosLegacyResult {
+        total_leidos: payload.rows.len(),
+        productos_upsertados,
+        inventario_upsertado,
+        catalogos_actualizados,
+    })
+}
+
+fn normalize_page_args(page: i64, page_size: i64) -> (i64, i64) {
+    let safe_page_size = page_size.clamp(10, 100);
+    let safe_page = page.max(0);
+    (safe_page, safe_page_size)
+}
+
+#[tauri::command]
+fn get_productos_catalogo_page(
+    state_db: tauri::State<DbState>,
+    query: String,
+    page: i64,
+    page_size: i64,
+) -> AppResult<ProductoCatalogoPage> {
+    let conn = get_conn(&state_db).map_err(to_command_error)?;
+    let (page, page_size) = normalize_page_args(page, page_size);
+    let offset = page * page_size;
+    let query = query.trim().to_string();
+    let pattern = format!("%{}%", query);
+
+    let total: i64 = if query.is_empty() {
+        conn.query_row("SELECT COUNT(*) FROM productos WHERE eliminado = 0", [], |row| row.get(0))
+            .map_err(AppError::from)
+            .map_err(to_command_error)?
+    } else {
+        conn.query_row(
+            "
+            SELECT COUNT(*)
+            FROM productos
+            WHERE eliminado = 0
+              AND (
+                codigo_barras LIKE ?1 COLLATE NOCASE
+                OR codigo_proveedor LIKE ?1 COLLATE NOCASE
+                OR clave_producto LIKE ?1 COLLATE NOCASE
+                OR descripcion LIKE ?1 COLLATE NOCASE
+                OR marca LIKE ?1 COLLATE NOCASE
+                OR categoria LIKE ?1 COLLATE NOCASE
+                OR unidad LIKE ?1 COLLATE NOCASE
+              )
+            ",
+            [&pattern],
+            |row| row.get(0),
+        )
+        .map_err(AppError::from)
+        .map_err(to_command_error)?
+    };
+
+    let sql = if query.is_empty() {
+        "
+        SELECT id, TRIM(COALESCE(codigo_barras, '')), TRIM(COALESCE(codigo_proveedor, '')),
+               TRIM(COALESCE(proveedor_id, '')), TRIM(COALESCE(clave_producto, '')),
+               TRIM(COALESCE(descripcion, '')), TRIM(COALESCE(marca, '')),
+               TRIM(COALESCE(categoria, '')), TRIM(COALESCE(unidad, '')),
+               precio_costo, costo_promedio, precio_venta,
+               TRIM(COALESCE(sat_clave_prod_serv, '')), TRIM(COALESCE(sat_clave_unidad, '')),
+               COALESCE(precio_1, 0), COALESCE(precio_2, 0), COALESCE(precio_3, 0), COALESCE(precio_4, 0),
+               COALESCE(mayoreo_apartir, 0), COALESCE(a_granel, 0), COALESCE(no_en_catalogo, 0),
+               COALESCE(ventas_negativas, 0), caducidad, TRIM(COALESCE(fotos, '')),
+               TRIM(COALESCE(descripcion_catalogo, ''))
+        FROM productos
+        WHERE eliminado = 0
+        ORDER BY TRIM(descripcion)
+        LIMIT ?1 OFFSET ?2
+        "
+    } else {
+        "
+        SELECT id, TRIM(COALESCE(codigo_barras, '')), TRIM(COALESCE(codigo_proveedor, '')),
+               TRIM(COALESCE(proveedor_id, '')), TRIM(COALESCE(clave_producto, '')),
+               TRIM(COALESCE(descripcion, '')), TRIM(COALESCE(marca, '')),
+               TRIM(COALESCE(categoria, '')), TRIM(COALESCE(unidad, '')),
+               precio_costo, costo_promedio, precio_venta,
+               TRIM(COALESCE(sat_clave_prod_serv, '')), TRIM(COALESCE(sat_clave_unidad, '')),
+               COALESCE(precio_1, 0), COALESCE(precio_2, 0), COALESCE(precio_3, 0), COALESCE(precio_4, 0),
+               COALESCE(mayoreo_apartir, 0), COALESCE(a_granel, 0), COALESCE(no_en_catalogo, 0),
+               COALESCE(ventas_negativas, 0), caducidad, TRIM(COALESCE(fotos, '')),
+               TRIM(COALESCE(descripcion_catalogo, ''))
+        FROM productos
+        WHERE eliminado = 0
+          AND (
+            codigo_barras LIKE ?1 COLLATE NOCASE
+            OR codigo_proveedor LIKE ?1 COLLATE NOCASE
+            OR clave_producto LIKE ?1 COLLATE NOCASE
+            OR descripcion LIKE ?1 COLLATE NOCASE
+            OR marca LIKE ?1 COLLATE NOCASE
+            OR categoria LIKE ?1 COLLATE NOCASE
+            OR unidad LIKE ?1 COLLATE NOCASE
+          )
+        ORDER BY TRIM(descripcion)
+        LIMIT ?2 OFFSET ?3
+        "
+    };
+    let mut stmt = conn.prepare(sql).map_err(AppError::from).map_err(to_command_error)?;
+    let mapper = |row: &rusqlite::Row<'_>| {
+        Ok(Producto {
+            id: row.get(0)?,
+            codigo_barras: row.get(1)?,
+            codigo_proveedor: row.get(2)?,
+            proveedor_id: row.get(3)?,
+            clave_producto: row.get(4)?,
+            descripcion: row.get(5)?,
+            marca: row.get(6)?,
+            categoria: row.get(7)?,
+            unidad: row.get(8)?,
+            precio_costo: row.get(9)?,
+            costo_promedio: row.get(10)?,
+            precio_venta: row.get(11)?,
+            sat_clave_prod_serv: row.get(12)?,
+            sat_clave_unidad: row.get(13)?,
+            precio_1: row.get(14)?,
+            precio_2: row.get(15)?,
+            precio_3: row.get(16)?,
+            precio_4: row.get(17)?,
+            mayoreo_apartir: row.get(18)?,
+            a_granel: row.get::<_, i64>(19)? == 1,
+            no_en_catalogo: row.get::<_, i64>(20)? == 1,
+            ventas_negativas: row.get::<_, i64>(21)? == 1,
+            caducidad: row.get(22)?,
+            fotos: row.get(23)?,
+            descripcion_catalogo: row.get(24)?,
+        })
+    };
+    let iter = if query.is_empty() {
+        stmt.query_map(params![page_size, offset], mapper)
+    } else {
+        stmt.query_map(params![pattern, page_size, offset], mapper)
+    }
+    .map_err(AppError::from)
+    .map_err(to_command_error)?;
+    let mut rows = Vec::new();
+    for item in iter {
+        rows.push(item.map_err(AppError::from).map_err(to_command_error)?);
+    }
+    Ok(ProductoCatalogoPage { rows, total })
+}
+
+#[tauri::command]
 fn get_productos_catalogo(state_db: tauri::State<DbState>) -> AppResult<Vec<Producto>> {
     let conn = get_conn(&state_db).map_err(to_command_error)?;
     let mut stmt = conn
         .prepare(
             "
-            SELECT id, codigo_barras, codigo_proveedor, proveedor_id, clave_producto, descripcion,
-                   marca, categoria, unidad, precio_costo, costo_promedio, precio_venta,
-                   sat_clave_prod_serv, sat_clave_unidad
+            SELECT id, TRIM(COALESCE(codigo_barras, '')), TRIM(COALESCE(codigo_proveedor, '')),
+                   TRIM(COALESCE(proveedor_id, '')), TRIM(COALESCE(clave_producto, '')),
+                   TRIM(COALESCE(descripcion, '')), TRIM(COALESCE(marca, '')),
+                   TRIM(COALESCE(categoria, '')), TRIM(COALESCE(unidad, '')),
+                   precio_costo, costo_promedio, precio_venta,
+                   TRIM(COALESCE(sat_clave_prod_serv, '')), TRIM(COALESCE(sat_clave_unidad, '')),
+                   COALESCE(precio_1, 0), COALESCE(precio_2, 0), COALESCE(precio_3, 0), COALESCE(precio_4, 0),
+                   COALESCE(mayoreo_apartir, 0), COALESCE(a_granel, 0), COALESCE(no_en_catalogo, 0),
+                   COALESCE(ventas_negativas, 0), caducidad, TRIM(COALESCE(fotos, '')),
+                   TRIM(COALESCE(descripcion_catalogo, ''))
             FROM productos
             WHERE eliminado = 0
-            ORDER BY descripcion
+            ORDER BY TRIM(descripcion)
             ",
         )
         .map_err(AppError::from)
@@ -5163,6 +7400,17 @@ fn get_productos_catalogo(state_db: tauri::State<DbState>) -> AppResult<Vec<Prod
                 precio_venta: row.get(11)?,
                 sat_clave_prod_serv: row.get(12)?,
                 sat_clave_unidad: row.get(13)?,
+                precio_1: row.get(14)?,
+                precio_2: row.get(15)?,
+                precio_3: row.get(16)?,
+                precio_4: row.get(17)?,
+                mayoreo_apartir: row.get(18)?,
+                a_granel: row.get::<_, i64>(19)? == 1,
+                no_en_catalogo: row.get::<_, i64>(20)? == 1,
+                ventas_negativas: row.get::<_, i64>(21)? == 1,
+                caducidad: row.get(22)?,
+                fotos: row.get(23)?,
+                descripcion_catalogo: row.get(24)?,
             })
         })
         .map_err(AppError::from)
@@ -5201,8 +7449,10 @@ fn create_producto_catalogo(
         INSERT INTO productos (
             id, codigo_barras, codigo_proveedor, proveedor_id, clave_producto, descripcion,
             marca, categoria, unidad, precio_costo, costo_promedio, precio_venta,
-            sat_clave_prod_serv, sat_clave_unidad, sincronizado, updated_at, eliminado
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, 0, 0, ?10, ?11, 0, datetime('now'), 0)
+            sat_clave_prod_serv, sat_clave_unidad, precio_1, precio_2, precio_3, precio_4,
+            mayoreo_apartir, a_granel, no_en_catalogo, ventas_negativas, caducidad, fotos,
+            descripcion_catalogo, sincronizado, updated_at, eliminado
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, 0, 0, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, 0, datetime('now'), 0)
         ",
         params![
             producto.id,
@@ -5219,7 +7469,18 @@ fn create_producto_catalogo(
             categoria,
             unidad,
             producto.sat_clave_prod_serv,
-            producto.sat_clave_unidad
+            producto.sat_clave_unidad,
+            producto.precio_1,
+            producto.precio_2,
+            producto.precio_3,
+            producto.precio_4,
+            producto.mayoreo_apartir,
+            if producto.a_granel { 1 } else { 0 },
+            if producto.no_en_catalogo { 1 } else { 0 },
+            if producto.ventas_negativas { 1 } else { 0 },
+            producto.caducidad,
+            producto.fotos,
+            producto.descripcion_catalogo
         ],
     )
     .map_err(|error| map_write_error(error, "producto"))
@@ -5266,9 +7527,20 @@ fn update_producto_catalogo(
                 unidad = ?8,
                 sat_clave_prod_serv = ?9,
                 sat_clave_unidad = ?10,
+                precio_1 = ?11,
+                precio_2 = ?12,
+                precio_3 = ?13,
+                precio_4 = ?14,
+                mayoreo_apartir = ?15,
+                a_granel = ?16,
+                no_en_catalogo = ?17,
+                ventas_negativas = ?18,
+                caducidad = ?19,
+                fotos = ?20,
+                descripcion_catalogo = ?21,
                 sincronizado = 0,
                 updated_at = datetime('now')
-            WHERE id = ?11 AND eliminado = 0
+            WHERE id = ?22 AND eliminado = 0
             ",
             params![
                 if producto.codigo_barras.trim().is_empty() {
@@ -5285,6 +7557,17 @@ fn update_producto_catalogo(
                 unidad,
                 producto.sat_clave_prod_serv,
                 producto.sat_clave_unidad,
+                producto.precio_1,
+                producto.precio_2,
+                producto.precio_3,
+                producto.precio_4,
+                producto.mayoreo_apartir,
+                if producto.a_granel { 1 } else { 0 },
+                if producto.no_en_catalogo { 1 } else { 0 },
+                if producto.ventas_negativas { 1 } else { 0 },
+                producto.caducidad,
+                producto.fotos,
+                producto.descripcion_catalogo,
                 producto_id
             ],
         )
@@ -5470,8 +7753,10 @@ fn create_producto(
         INSERT INTO productos (
             id, codigo_barras, codigo_proveedor, proveedor_id, clave_producto, descripcion,
             marca, categoria, unidad, precio_costo, costo_promedio, precio_venta,
-            sat_clave_prod_serv, sat_clave_unidad, sincronizado, updated_at, eliminado
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, 0, datetime('now'), 0)
+            sat_clave_prod_serv, sat_clave_unidad, precio_1, precio_2, precio_3, precio_4,
+            mayoreo_apartir, a_granel, no_en_catalogo, ventas_negativas, caducidad, fotos,
+            descripcion_catalogo, sincronizado, updated_at, eliminado
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, 0, datetime('now'), 0)
         ",
         params![
             producto.id,
@@ -5491,7 +7776,18 @@ fn create_producto(
             if producto.costo_promedio > 0.0 { producto.costo_promedio } else { producto.precio_costo },
             producto.precio_venta,
             producto.sat_clave_prod_serv,
-            producto.sat_clave_unidad
+            producto.sat_clave_unidad,
+            producto.precio_1,
+            producto.precio_2,
+            producto.precio_3,
+            producto.precio_4,
+            producto.mayoreo_apartir,
+            if producto.a_granel { 1 } else { 0 },
+            if producto.no_en_catalogo { 1 } else { 0 },
+            if producto.ventas_negativas { 1 } else { 0 },
+            producto.caducidad,
+            producto.fotos,
+            producto.descripcion_catalogo
         ],
     )
     .map_err(|error| map_write_error(error, "producto"))
@@ -5569,9 +7865,20 @@ fn update_producto(
             precio_venta = ?11,
             sat_clave_prod_serv = ?12,
             sat_clave_unidad = ?13,
+            precio_1 = ?14,
+            precio_2 = ?15,
+            precio_3 = ?16,
+            precio_4 = ?17,
+            mayoreo_apartir = ?18,
+            a_granel = ?19,
+            no_en_catalogo = ?20,
+            ventas_negativas = ?21,
+            caducidad = ?22,
+            fotos = ?23,
+            descripcion_catalogo = ?24,
             sincronizado = 0,
             updated_at = datetime('now')
-        WHERE id = ?14 AND eliminado = 0
+        WHERE id = ?25 AND eliminado = 0
         ",
         params![
             if producto.codigo_barras.trim().is_empty() {
@@ -5591,6 +7898,17 @@ fn update_producto(
             producto.precio_venta,
             producto.sat_clave_prod_serv,
             producto.sat_clave_unidad,
+            producto.precio_1,
+            producto.precio_2,
+            producto.precio_3,
+            producto.precio_4,
+            producto.mayoreo_apartir,
+            if producto.a_granel { 1 } else { 0 },
+            if producto.no_en_catalogo { 1 } else { 0 },
+            if producto.ventas_negativas { 1 } else { 0 },
+            producto.caducidad,
+            producto.fotos,
+            producto.descripcion_catalogo,
             producto_id
         ],
     )
@@ -5788,11 +8106,12 @@ fn registrar_compra(
         tx.execute(
             "
             UPDATE productos
-            SET precio_costo = ?1,
-                costo_promedio = ?2,
+            SET precio_costo = CASE WHEN precio_costo <= 0 THEN ?1 ELSE precio_costo END,
+                costo_promedio = CASE WHEN costo_promedio <= 0 THEN ?2 ELSE costo_promedio END,
                 sincronizado = 0,
                 updated_at = datetime('now')
             WHERE id = ?3
+              AND (precio_costo <= 0 OR costo_promedio <= 0)
             ",
             params![precio_costo_pactado, nuevo_costo_promedio, detalle.producto_id],
         )
@@ -6166,8 +8485,39 @@ fn cerrar_caja(
     })
 }
 
+fn cp850_byte(ch: char) -> u8 {
+    match ch {
+        'á' => 0xA0,
+        'é' => 0x82,
+        'í' => 0xA1,
+        'ó' => 0xA2,
+        'ú' => 0xA3,
+        'Á' => 0xB5,
+        'É' => 0x90,
+        'Í' => 0xD6,
+        'Ó' => 0xE0,
+        'Ú' => 0xE9,
+        'ñ' => 0xA4,
+        'Ñ' => 0xA5,
+        'ü' => 0x81,
+        'Ü' => 0x9A,
+        '¿' => 0xA8,
+        '¡' => 0xAD,
+        '°' => 0xF8,
+        'ç' => 0x87,
+        'Ç' => 0x80,
+        '$' => b'$',
+        ch if ch.is_ascii() => ch as u8,
+        _ => b' ',
+    }
+}
+
+fn encode_cp850(text: &str) -> Vec<u8> {
+    text.chars().map(cp850_byte).collect()
+}
+
 fn escpos_text_line(buffer: &mut Vec<u8>, text: &str) {
-    buffer.extend_from_slice(text.as_bytes());
+    buffer.extend_from_slice(&encode_cp850(text));
     buffer.push(b'\n');
 }
 
@@ -6193,6 +8543,15 @@ fn ticket_two_columns(left: &str, right: &str, width: usize) -> String {
     format!("{left}{}{right}", " ".repeat(spaces))
 }
 
+fn optional_ticket_text(value: &Option<String>, fallback: &str) -> String {
+    value
+        .as_ref()
+        .map(|item| item.trim())
+        .filter(|item| !item.is_empty())
+        .unwrap_or(fallback)
+        .to_string()
+}
+
 fn build_ticket_escpos(ticket: &TicketPayloadInput, paper_width: usize, abrir_cajon: bool) -> Result<Vec<u8>, String> {
     let width = match paper_width {
         32 | 42 | 48 => paper_width,
@@ -6211,22 +8570,65 @@ fn build_ticket_escpos(ticket: &TicketPayloadInput, paper_width: usize, abrir_ca
     }
     // Initialize printer.
     buffer.extend_from_slice(&[0x1B, 0x40]);
+    // CP850 gives reliable accents/ñ on most ESC/POS printers configured for Latin America.
+    buffer.extend_from_slice(&[0x1B, 0x74, 0x02]);
+    // Double-strike improves apparent density on many thermal heads.
+    buffer.extend_from_slice(&[0x1B, 0x47, 0x01]);
+    buffer.extend_from_slice(&[0x1B, 0x21, 0x00]);
+    let _subtotal_recibido = ticket.subtotal;
+    let subtotal_iva_incluido = round_money(ticket.total / 1.16);
+    let iva_incluido = round_money(ticket.total - subtotal_iva_incluido);
+    let metodo_pago = ticket.metodo_pago.trim().to_uppercase();
+
     // Centered header.
     buffer.extend_from_slice(&[0x1B, 0x61, 0x01]);
-    escpos_text_line(&mut buffer, "FERRE-POS");
+    if let Some(logo_bytes) = &ticket.logo_bytes {
+        if !logo_bytes.is_empty() {
+            buffer.extend_from_slice(logo_bytes);
+            buffer.push(b'\n');
+        }
+    }
+    escpos_text_line(
+        &mut buffer,
+        &fit_text(&optional_ticket_text(&ticket.empresa_nombre, "FERRE-POS"), width),
+    );
+    escpos_text_line(
+        &mut buffer,
+        &fit_text(&format!("RFC: {}", optional_ticket_text(&ticket.rfc, "SIN RFC CONFIGURADO")), width),
+    );
+    escpos_text_line(
+        &mut buffer,
+        &fit_text(
+            &format!(
+                "Regimen Fiscal: {}",
+                optional_ticket_text(&ticket.regimen_fiscal, "N/D")
+            ),
+            width,
+        ),
+    );
+    escpos_text_line(
+        &mut buffer,
+        &fit_text(&format!("C.P.: {}", optional_ticket_text(&ticket.codigo_postal, "N/D")), width),
+    );
     escpos_text_line(&mut buffer, &fit_text(&ticket.sucursal, width));
-    escpos_text_line(&mut buffer, &fit_text(&format!("Ticket {}", ticket.folio), width));
+    escpos_text_line(&mut buffer, &fit_text(&format!("FOLIO: {}", ticket.folio), width));
     escpos_text_line(&mut buffer, &separator);
 
     // Left-aligned body.
     buffer.extend_from_slice(&[0x1B, 0x61, 0x00]);
     escpos_text_line(&mut buffer, &ticket_two_columns("Fecha", &ticket.fecha, width));
     escpos_text_line(&mut buffer, &ticket_two_columns("Cajero", &ticket.cajero, width));
-    escpos_text_line(&mut buffer, &ticket_two_columns("Pago", &ticket.metodo_pago, width));
+    escpos_text_line(&mut buffer, &ticket_two_columns("Pago", &metodo_pago, width));
+    if let Some(estado) = ticket.estado.as_ref().map(|value| value.trim()).filter(|value| !value.is_empty()) {
+        escpos_text_line(&mut buffer, &ticket_two_columns("Estado", estado, width));
+    }
     escpos_text_line(&mut buffer, &separator);
 
     for producto in &ticket.productos {
         escpos_text_line(&mut buffer, &fit_text(&producto.descripcion, width));
+        if let Some(marca) = producto.marca.as_ref().map(|value| value.trim()).filter(|value| !value.is_empty()) {
+            escpos_text_line(&mut buffer, &fit_text(marca, width));
+        }
         let cantidad_precio = format!("{:.3} x {}", producto.cantidad, money_text(producto.precio_unitario));
         escpos_text_line(
             &mut buffer,
@@ -6235,24 +8637,45 @@ fn build_ticket_escpos(ticket: &TicketPayloadInput, paper_width: usize, abrir_ca
     }
 
     escpos_text_line(&mut buffer, &separator);
-    escpos_text_line(&mut buffer, &ticket_two_columns("Subtotal", &money_text(ticket.subtotal), width));
+    escpos_text_line(
+        &mut buffer,
+        &ticket_two_columns("Subtotal", &money_text(subtotal_iva_incluido), width),
+    );
     if ticket.descuento > 0.0 {
         escpos_text_line(&mut buffer, &ticket_two_columns("Descuento", &format!("-{}", money_text(ticket.descuento)), width));
     }
+    escpos_text_line(&mut buffer, &ticket_two_columns("IVA 16%", &money_text(iva_incluido), width));
     escpos_text_line(&mut buffer, &ticket_two_columns("TOTAL", &money_text(ticket.total), width));
     if let Some(recibido) = ticket.recibido {
-        escpos_text_line(&mut buffer, &ticket_two_columns("Recibido", &money_text(recibido), width));
+        escpos_text_line(&mut buffer, &ticket_two_columns("Efectivo recibido", &money_text(recibido), width));
     }
     if let Some(cambio) = ticket.cambio {
         escpos_text_line(&mut buffer, &ticket_two_columns("Cambio", &money_text(cambio), width));
     }
 
-    if let Some(mensaje) = ticket.mensaje.as_ref().map(|value| value.trim()).filter(|value| !value.is_empty()) {
-        escpos_text_line(&mut buffer, &separator);
+    escpos_text_line(&mut buffer, &separator);
+    if metodo_pago == "CREDITO" {
+        escpos_text_line(&mut buffer, "AVISO DE CREDITO: Este comprobante");
+        escpos_text_line(&mut buffer, "expira a los 30 dias naturales de su");
+        escpos_text_line(&mut buffer, "expedicion. Pasada la fecha limite de");
+        escpos_text_line(&mut buffer, "pago, se aplicara una penalizacion de");
+        escpos_text_line(&mut buffer, "interes moratorio mensual sobre saldo.");
+        escpos_text_line(&mut buffer, "");
         buffer.extend_from_slice(&[0x1B, 0x61, 0x01]);
-        escpos_text_line(&mut buffer, &fit_text(mensaje, width));
+        escpos_text_line(&mut buffer, "__________________________________");
+        escpos_text_line(&mut buffer, "       Firma de Conformidad");
         buffer.extend_from_slice(&[0x1B, 0x61, 0x00]);
+        escpos_text_line(&mut buffer, "");
     }
+
+    buffer.extend_from_slice(&[0x1B, 0x61, 0x01]);
+    escpos_text_line(&mut buffer, &fit_text("Este ticket forma parte de la venta", width));
+    escpos_text_line(&mut buffer, &fit_text("global del dia.", width));
+
+    if let Some(mensaje) = ticket.mensaje.as_ref().map(|value| value.trim()).filter(|value| !value.is_empty()) {
+        escpos_text_line(&mut buffer, &fit_text(mensaje, width));
+    }
+    buffer.extend_from_slice(&[0x1B, 0x61, 0x00]);
 
     buffer.extend_from_slice(b"\n\n\n");
     // Corte parcial: GS V B 0.
@@ -6261,10 +8684,209 @@ fn build_ticket_escpos(ticket: &TicketPayloadInput, paper_width: usize, abrir_ca
     Ok(buffer)
 }
 
+fn escape_powershell_single(value: &str) -> String {
+    value.replace('\'', "''")
+}
+
+fn run_command_output(command: &mut Command) -> Result<String, String> {
+    let output = command
+        .output()
+        .map_err(|error| format!("No se pudo consultar el sistema de impresión: {error}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            "El sistema rechazó la consulta de impresoras.".to_string()
+        } else {
+            stderr
+        });
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+fn system_printers() -> Result<Vec<String>, String> {
+    #[cfg(target_os = "windows")]
+    let raw = run_command_output(
+        Command::new("powershell")
+            .args(["-NoProfile", "-Command", "Get-Printer | Select-Object -ExpandProperty Name"]),
+    )
+    .or_else(|_| {
+        run_command_output(Command::new("wmic").args(["printer", "get", "name"]))
+    })?;
+
+    #[cfg(not(target_os = "windows"))]
+    let raw = run_command_output(Command::new("lpstat").arg("-a"))?;
+
+    let mut printers: Vec<String> = raw
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.eq_ignore_ascii_case("Name"))
+        .map(|line| {
+            #[cfg(not(target_os = "windows"))]
+            {
+                line.split_whitespace().next().unwrap_or(line).to_string()
+            }
+            #[cfg(target_os = "windows")]
+            {
+                line.to_string()
+            }
+        })
+        .collect();
+    printers.sort();
+    printers.dedup();
+    Ok(printers)
+}
+
+#[cfg(target_os = "windows")]
+fn wide_null(value: &str) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+    std::ffi::OsStr::new(value)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
+}
+
+#[cfg(target_os = "windows")]
+#[repr(C)]
+struct DocInfo1W {
+    p_doc_name: *mut u16,
+    p_output_file: *mut u16,
+    p_datatype: *mut u16,
+}
+
+#[cfg(target_os = "windows")]
+#[link(name = "Winspool")]
+extern "system" {
+    fn OpenPrinterW(
+        p_printer_name: *mut u16,
+        ph_printer: *mut *mut std::ffi::c_void,
+        p_default: *mut std::ffi::c_void,
+    ) -> i32;
+    fn ClosePrinter(h_printer: *mut std::ffi::c_void) -> i32;
+    fn StartDocPrinterW(
+        h_printer: *mut std::ffi::c_void,
+        level: u32,
+        p_doc_info: *mut std::ffi::c_void,
+    ) -> u32;
+    fn EndDocPrinter(h_printer: *mut std::ffi::c_void) -> i32;
+    fn StartPagePrinter(h_printer: *mut std::ffi::c_void) -> i32;
+    fn EndPagePrinter(h_printer: *mut std::ffi::c_void) -> i32;
+    fn WritePrinter(
+        h_printer: *mut std::ffi::c_void,
+        p_buf: *mut std::ffi::c_void,
+        cb_buf: u32,
+        pc_written: *mut u32,
+    ) -> i32;
+}
+
+#[cfg(target_os = "windows")]
+fn send_raw_to_windows_printer(printer_name: &str, data: &[u8]) -> Result<(), String> {
+    if data.is_empty() {
+        return Err("No hay contenido RAW para imprimir.".to_string());
+    }
+
+    let mut printer = wide_null(printer_name);
+    let mut doc_name = wide_null("Ferre-POS Ticket");
+    let mut datatype = wide_null("RAW");
+    let mut handle: *mut std::ffi::c_void = std::ptr::null_mut();
+
+    unsafe {
+        if OpenPrinterW(printer.as_mut_ptr(), &mut handle, std::ptr::null_mut()) == 0 || handle.is_null() {
+            return Err(format!(
+                "La impresora {printer_name} no está conectada o no se encuentra disponible."
+            ));
+        }
+
+        let mut doc_info = DocInfo1W {
+            p_doc_name: doc_name.as_mut_ptr(),
+            p_output_file: std::ptr::null_mut(),
+            p_datatype: datatype.as_mut_ptr(),
+        };
+
+        let doc_started = StartDocPrinterW(handle, 1, &mut doc_info as *mut _ as *mut std::ffi::c_void);
+        if doc_started == 0 {
+            ClosePrinter(handle);
+            return Err("Windows rechazó el documento RAW de impresión.".to_string());
+        }
+
+        if StartPagePrinter(handle) == 0 {
+            EndDocPrinter(handle);
+            ClosePrinter(handle);
+            return Err("Windows no pudo iniciar la página RAW de impresión.".to_string());
+        }
+
+        let mut written = 0u32;
+        let ok = WritePrinter(
+            handle,
+            data.as_ptr() as *mut std::ffi::c_void,
+            data.len() as u32,
+            &mut written,
+        );
+        EndPagePrinter(handle);
+        EndDocPrinter(handle);
+        ClosePrinter(handle);
+
+        if ok == 0 || written != data.len() as u32 {
+            return Err("Windows no pudo enviar todos los bytes RAW a la impresora.".to_string());
+        }
+    }
+
+    Ok(())
+}
+
 fn send_raw_to_printer(printer_name: &str, data: &[u8]) -> Result<(), String> {
     let printer_name = printer_name.trim();
     if printer_name.is_empty() {
         return Err("Debes indicar el nombre o ruta de la impresora.".to_string());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        send_raw_to_windows_printer(printer_name, data)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let millis = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_else(|_| Duration::from_secs(0))
+            .as_millis();
+        let mut path = std::env::temp_dir();
+        path.push(format!("ferre_pos_ticket_{millis}.bin"));
+        {
+            let mut file = File::create(&path).map_err(|error| format!("No se pudo crear el archivo temporal del ticket: {error}"))?;
+            file.write_all(data)
+                .map_err(|error| format!("No se pudo escribir el ticket temporal: {error}"))?;
+        }
+
+        let output = Command::new("lp")
+            .args(["-d", printer_name, "-o", "raw"])
+            .arg(&path)
+            .output();
+
+        let _ = fs::remove_file(&path);
+
+        let output = output.map_err(|error| format!("No se pudo invocar el spooler de impresión: {error}"))?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            Err(format!(
+                "La impresora rechazó el ticket. {}{}",
+                stdout,
+                if stderr.is_empty() { String::new() } else { format!(" {stderr}") }
+            ))
+        }
+    }
+}
+
+fn send_text_to_system_printer(printer_name: &str, contenido: &str) -> Result<(), String> {
+    let printer_name = printer_name.trim();
+    if printer_name.is_empty() {
+        return Err("Debes indicar el nombre de la impresora.".to_string());
+    }
+    if contenido.trim().is_empty() {
+        return Err("No hay contenido para imprimir.".to_string());
     }
 
     let millis = SystemTime::now()
@@ -6272,23 +8894,29 @@ fn send_raw_to_printer(printer_name: &str, data: &[u8]) -> Result<(), String> {
         .unwrap_or_else(|_| Duration::from_secs(0))
         .as_millis();
     let mut path = std::env::temp_dir();
-    path.push(format!("ferre_pos_ticket_{millis}.bin"));
+    path.push(format!("ferre_pos_print_{millis}.txt"));
     {
-        let mut file = File::create(&path).map_err(|error| format!("No se pudo crear el archivo temporal del ticket: {error}"))?;
-        file.write_all(data)
-            .map_err(|error| format!("No se pudo escribir el ticket temporal: {error}"))?;
+        let mut file = File::create(&path).map_err(|error| format!("No se pudo crear el archivo temporal de impresión: {error}"))?;
+        file.write_all(contenido.as_bytes())
+            .map_err(|error| format!("No se pudo escribir el archivo temporal de impresión: {error}"))?;
     }
 
     #[cfg(target_os = "windows")]
-    let output = Command::new("cmd")
-        .args(["/C", "copy", "/B"])
-        .arg(&path)
-        .arg(printer_name)
+    let output = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-Command",
+            &format!(
+                "Get-Content -Raw -LiteralPath '{}' | Out-Printer -Name '{}'",
+                escape_powershell_single(&path.to_string_lossy()),
+                escape_powershell_single(printer_name)
+            ),
+        ])
         .output();
 
     #[cfg(not(target_os = "windows"))]
     let output = Command::new("lp")
-        .args(["-d", printer_name, "-o", "raw"])
+        .args(["-d", printer_name])
         .arg(&path)
         .output();
 
@@ -6301,7 +8929,7 @@ fn send_raw_to_printer(printer_name: &str, data: &[u8]) -> Result<(), String> {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
         Err(format!(
-            "La impresora rechazó el ticket. {}{}",
+            "La impresora {printer_name} no está conectada o no se encuentra disponible. {}{}",
             stdout,
             if stderr.is_empty() { String::new() } else { format!(" {stderr}") }
         ))
@@ -6309,12 +8937,90 @@ fn send_raw_to_printer(printer_name: &str, data: &[u8]) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn get_system_printers(state_sesion: tauri::State<SesionActual>) -> AppResult<Vec<String>> {
+    require_superadmin(&state_sesion)?;
+    system_printers()
+}
+
+#[tauri::command]
+fn get_perifericos_config(
+    state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
+) -> AppResult<PerifericosConfig> {
+    current_session_user(&state_sesion)?;
+    let conn = get_conn(&state_db).map_err(to_command_error)?;
+    let config = conn
+        .query_row(
+            "
+            SELECT impresora_tickets, impresora_etiquetas, updated_at
+            FROM perifericos_config
+            WHERE id = 1
+            ",
+            [],
+            |row| {
+                Ok(PerifericosConfig {
+                    impresora_tickets: row.get(0)?,
+                    impresora_etiquetas: row.get(1)?,
+                    updated_at: row.get(2)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(AppError::from)
+        .map_err(to_command_error)?;
+
+    Ok(config.unwrap_or(PerifericosConfig {
+        impresora_tickets: String::new(),
+        impresora_etiquetas: String::new(),
+        updated_at: String::new(),
+    }))
+}
+
+#[tauri::command]
+fn guardar_perifericos_config(
+    state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
+    config: PerifericosConfigInput,
+) -> AppResult<PerifericosConfig> {
+    require_superadmin(&state_sesion)?;
+    let conn = get_conn(&state_db).map_err(to_command_error)?;
+    let impresora_tickets = config.impresora_tickets.trim().to_string();
+    let impresora_etiquetas = config.impresora_etiquetas.trim().to_string();
+    conn.execute(
+        "
+        INSERT INTO perifericos_config (id, impresora_tickets, impresora_etiquetas, updated_at)
+        VALUES (1, ?1, ?2, datetime('now'))
+        ON CONFLICT(id) DO UPDATE SET
+            impresora_tickets = excluded.impresora_tickets,
+            impresora_etiquetas = excluded.impresora_etiquetas,
+            updated_at = datetime('now')
+        ",
+        params![impresora_tickets, impresora_etiquetas],
+    )
+    .map_err(AppError::from)
+    .map_err(to_command_error)?;
+
+    get_perifericos_config(state_db, state_sesion)
+}
+
+#[tauri::command]
+fn imprimir_silencioso(
+    state_sesion: tauri::State<SesionActual>,
+    input: SilentPrintInput,
+) -> AppResult<()> {
+    current_session_user(&state_sesion)?;
+    send_text_to_system_printer(&input.printer_name, &input.contenido)
+}
+
+#[tauri::command]
 fn imprimir_ticket_y_abrir_caja(
+    state_sesion: tauri::State<SesionActual>,
     printer_name: String,
     paper_width: Option<usize>,
     abrir_cajon: Option<bool>,
     ticket: TicketPayloadInput,
 ) -> AppResult<()> {
+    current_session_user(&state_sesion)?;
     let width = paper_width.unwrap_or(42);
     let bytes = build_ticket_escpos(&ticket, width, abrir_cajon.unwrap_or(true))?;
     send_raw_to_printer(&printer_name, &bytes)
@@ -6506,83 +9212,21 @@ fn get_productos_bajo_stock(
 ) -> AppResult<Vec<ProductoBajoStock>> {
     let conn = get_conn(&state_db).map_err(to_command_error)?;
     let user = require_admin_or_superadmin(&state_sesion)?;
-    let sid = scoped_sucursal_for_read(&user, normalize_filter(&sucursal_id));
+    let page = query_productos_bajo_stock(&conn, &user, normalize_filter(&sucursal_id), 0, 50)?;
+    Ok(page.rows)
+}
 
-    let mut resultados = Vec::new();
-    if let Some(sucursal) = sid {
-        let mut stmt = conn
-            .prepare(
-                "
-                SELECT p.id, p.descripcion, p.marca, s.id, s.nombre, i.stock, i.stock_minimo
-                FROM inventario_sucursal i
-                INNER JOIN productos p ON p.id = i.producto_id
-                INNER JOIN sucursales s ON s.id = i.sucursal_id
-                WHERE i.stock_minimo > 0
-                  AND i.stock <= i.stock_minimo
-                  AND i.sucursal_id = ?1
-                  AND p.eliminado = 0
-                  AND i.eliminado = 0
-                  AND s.eliminado = 0
-                ORDER BY (i.stock - i.stock_minimo) ASC, p.descripcion
-                ",
-            )
-            .map_err(AppError::from)
-            .map_err(to_command_error)?;
-        let iter = stmt
-            .query_map([sucursal], |row| {
-                Ok(ProductoBajoStock {
-                    producto_id: row.get(0)?,
-                    descripcion: row.get(1)?,
-                    marca: row.get(2)?,
-                    sucursal_id: row.get(3)?,
-                    sucursal_nombre: row.get(4)?,
-                    stock: row.get(5)?,
-                    stock_minimo: row.get(6)?,
-                })
-            })
-            .map_err(AppError::from)
-            .map_err(to_command_error)?;
-        for item in iter {
-            resultados.push(item.map_err(AppError::from).map_err(to_command_error)?);
-        }
-    } else {
-        let mut stmt = conn
-            .prepare(
-                "
-                SELECT p.id, p.descripcion, p.marca, s.id, s.nombre, i.stock, i.stock_minimo
-                FROM inventario_sucursal i
-                INNER JOIN productos p ON p.id = i.producto_id
-                INNER JOIN sucursales s ON s.id = i.sucursal_id
-                WHERE i.stock_minimo > 0
-                  AND i.stock <= i.stock_minimo
-                  AND p.eliminado = 0
-                  AND i.eliminado = 0
-                  AND s.eliminado = 0
-                ORDER BY (i.stock - i.stock_minimo) ASC, p.descripcion
-                ",
-            )
-            .map_err(AppError::from)
-            .map_err(to_command_error)?;
-        let iter = stmt
-            .query_map([], |row| {
-                Ok(ProductoBajoStock {
-                    producto_id: row.get(0)?,
-                    descripcion: row.get(1)?,
-                    marca: row.get(2)?,
-                    sucursal_id: row.get(3)?,
-                    sucursal_nombre: row.get(4)?,
-                    stock: row.get(5)?,
-                    stock_minimo: row.get(6)?,
-                })
-            })
-            .map_err(AppError::from)
-            .map_err(to_command_error)?;
-        for item in iter {
-            resultados.push(item.map_err(AppError::from).map_err(to_command_error)?);
-        }
-    }
-
-    Ok(resultados)
+#[tauri::command]
+fn get_productos_bajo_stock_page(
+    state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
+    sucursal_id: Option<String>,
+    page: i64,
+    page_size: i64,
+) -> AppResult<ProductosBajoStockPage> {
+    let conn = get_conn(&state_db).map_err(to_command_error)?;
+    let user = require_admin_or_superadmin(&state_sesion)?;
+    query_productos_bajo_stock(&conn, &user, normalize_filter(&sucursal_id), page, page_size)
 }
 
 #[tauri::command]
@@ -6669,6 +9313,448 @@ fn get_productos_mas_vendidos(
     Ok(resultados)
 }
 
+fn indicador_scope(
+    state_sesion: &tauri::State<SesionActual>,
+    filtro: Option<&DashboardFiltroInput>,
+) -> Result<(Option<String>, String, String), String> {
+    let user = require_admin_or_superadmin(state_sesion)?;
+    let sucursal_id = scoped_sucursal_for_read(
+        &user,
+        filtro.and_then(|f| normalize_filter(&f.sucursal_id)),
+    );
+    let fecha_inicio = filtro
+        .and_then(|f| normalize_filter(&f.fecha_inicio))
+        .unwrap_or_else(|| "0001-01-01T00:00:00.000Z".to_string());
+    let fecha_fin = filtro
+        .and_then(|f| normalize_filter(&f.fecha_fin))
+        .unwrap_or_else(|| "9999-12-31T23:59:59.999Z".to_string());
+    Ok((sucursal_id, fecha_inicio, fecha_fin))
+}
+
+#[tauri::command]
+fn get_rentabilidad(
+    state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
+    filtro: Option<DashboardFiltroInput>,
+) -> AppResult<RentabilidadResumen> {
+    let conn = get_conn(&state_db).map_err(to_command_error)?;
+    let (sucursal_id, fi, ff) = indicador_scope(&state_sesion, filtro.as_ref())?;
+    let filtro_ref = filtro.as_ref();
+    let marca = filtro_ref.and_then(|f| normalize_filter(&f.marca));
+    let categoria = filtro_ref.and_then(|f| normalize_filter(&f.categoria));
+    let proveedor_id = filtro_ref.and_then(|f| normalize_filter(&f.proveedor_id));
+    let metodo_pago = filtro_ref.and_then(|f| normalize_filter(&f.metodo_pago));
+    let usuario_id = filtro_ref.and_then(|f| normalize_filter(&f.usuario_id));
+
+    let (venta_total, costo_total): (f64, f64) = if let Some(sid) = sucursal_id.clone() {
+        conn.query_row(
+            "
+            SELECT COALESCE(SUM(dv.cantidad * dv.precio_venta_pactado), 0),
+                   COALESCE(SUM(dv.cantidad * dv.costo_unitario_pactado), 0)
+            FROM detalle_ventas dv
+            INNER JOIN ventas v ON v.id = dv.venta_id
+            INNER JOIN productos p ON p.id = dv.producto_id
+            WHERE v.estado = 'COMPLETADA' AND v.sucursal_id = ?1 AND v.fecha >= ?2 AND v.fecha <= ?3
+              AND (?4 IS NULL OR p.marca = ?4)
+              AND (?5 IS NULL OR p.categoria = ?5)
+              AND (?6 IS NULL OR p.proveedor_id = ?6)
+              AND (?7 IS NULL OR v.metodo_pago = ?7)
+              AND (?8 IS NULL OR v.usuario_id = ?8)
+            ",
+            params![sid, fi, ff, marca, categoria, proveedor_id, metodo_pago, usuario_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+    } else {
+        conn.query_row(
+            "
+            SELECT COALESCE(SUM(dv.cantidad * dv.precio_venta_pactado), 0),
+                   COALESCE(SUM(dv.cantidad * dv.costo_unitario_pactado), 0)
+            FROM detalle_ventas dv
+            INNER JOIN ventas v ON v.id = dv.venta_id
+            INNER JOIN productos p ON p.id = dv.producto_id
+            WHERE v.estado = 'COMPLETADA' AND v.fecha >= ?1 AND v.fecha <= ?2
+              AND (?3 IS NULL OR p.marca = ?3)
+              AND (?4 IS NULL OR p.categoria = ?4)
+              AND (?5 IS NULL OR p.proveedor_id = ?5)
+              AND (?6 IS NULL OR v.metodo_pago = ?6)
+              AND (?7 IS NULL OR v.usuario_id = ?7)
+            ",
+            params![fi, ff, marca, categoria, proveedor_id, metodo_pago, usuario_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+    }
+    .map_err(AppError::from)
+    .map_err(to_command_error)?;
+
+    let utilidad = round_money(venta_total - costo_total);
+    let margen = if venta_total > 0.0 {
+        round_money((utilidad / venta_total) * 100.0)
+    } else {
+        0.0
+    };
+
+    let mut productos = Vec::new();
+    if let Some(sid) = sucursal_id {
+        let mut stmt = conn
+            .prepare(
+                "
+                SELECT p.id, p.descripcion, p.marca,
+                       COALESCE(SUM(dv.cantidad), 0) AS unidades,
+                       COALESCE(SUM(dv.cantidad * dv.precio_venta_pactado), 0) AS venta,
+                       COALESCE(SUM(dv.cantidad * dv.costo_unitario_pactado), 0) AS costo
+                FROM detalle_ventas dv
+                INNER JOIN ventas v ON v.id = dv.venta_id
+                INNER JOIN productos p ON p.id = dv.producto_id
+                WHERE v.estado = 'COMPLETADA' AND v.sucursal_id = ?1 AND v.fecha >= ?2 AND v.fecha <= ?3
+                  AND (?4 IS NULL OR p.marca = ?4)
+                  AND (?5 IS NULL OR p.categoria = ?5)
+                  AND (?6 IS NULL OR p.proveedor_id = ?6)
+                  AND (?7 IS NULL OR v.metodo_pago = ?7)
+                  AND (?8 IS NULL OR v.usuario_id = ?8)
+                GROUP BY p.id, p.descripcion, p.marca
+                ORDER BY (venta - costo) DESC
+                LIMIT 50
+                ",
+            )
+            .map_err(AppError::from)
+            .map_err(to_command_error)?;
+        let iter = stmt
+            .query_map(params![sid, fi, ff, marca, categoria, proveedor_id, metodo_pago, usuario_id], map_rentabilidad_producto)
+            .map_err(AppError::from)
+            .map_err(to_command_error)?;
+        for item in iter {
+            productos.push(item.map_err(AppError::from).map_err(to_command_error)?);
+        }
+    } else {
+        let mut stmt = conn
+            .prepare(
+                "
+                SELECT p.id, p.descripcion, p.marca,
+                       COALESCE(SUM(dv.cantidad), 0) AS unidades,
+                       COALESCE(SUM(dv.cantidad * dv.precio_venta_pactado), 0) AS venta,
+                       COALESCE(SUM(dv.cantidad * dv.costo_unitario_pactado), 0) AS costo
+                FROM detalle_ventas dv
+                INNER JOIN ventas v ON v.id = dv.venta_id
+                INNER JOIN productos p ON p.id = dv.producto_id
+                WHERE v.estado = 'COMPLETADA' AND v.fecha >= ?1 AND v.fecha <= ?2
+                  AND (?3 IS NULL OR p.marca = ?3)
+                  AND (?4 IS NULL OR p.categoria = ?4)
+                  AND (?5 IS NULL OR p.proveedor_id = ?5)
+                  AND (?6 IS NULL OR v.metodo_pago = ?6)
+                  AND (?7 IS NULL OR v.usuario_id = ?7)
+                GROUP BY p.id, p.descripcion, p.marca
+                ORDER BY (venta - costo) DESC
+                LIMIT 50
+                ",
+            )
+            .map_err(AppError::from)
+            .map_err(to_command_error)?;
+        let iter = stmt
+            .query_map(params![fi, ff, marca, categoria, proveedor_id, metodo_pago, usuario_id], map_rentabilidad_producto)
+            .map_err(AppError::from)
+            .map_err(to_command_error)?;
+        for item in iter {
+            productos.push(item.map_err(AppError::from).map_err(to_command_error)?);
+        }
+    }
+
+    Ok(RentabilidadResumen {
+        venta_total: round_money(venta_total),
+        costo_total: round_money(costo_total),
+        utilidad_bruta: utilidad,
+        margen_porcentaje: margen,
+        productos,
+    })
+}
+
+fn map_rentabilidad_producto(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProductoRentabilidad> {
+    let venta: f64 = row.get(4)?;
+    let costo: f64 = row.get(5)?;
+    let utilidad = round_money(venta - costo);
+    let margen = if venta > 0.0 {
+        round_money((utilidad / venta) * 100.0)
+    } else {
+        0.0
+    };
+    Ok(ProductoRentabilidad {
+        producto_id: row.get(0)?,
+        descripcion: row.get(1)?,
+        marca: row.get(2)?,
+        unidades: row.get(3)?,
+        venta_total: round_money(venta),
+        costo_total: round_money(costo),
+        utilidad,
+        margen_porcentaje: margen,
+    })
+}
+
+#[tauri::command]
+fn get_indicador_ventas(
+    state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
+    filtro: Option<DashboardFiltroInput>,
+) -> AppResult<IndicadorVentasResumen> {
+    let conn = get_conn(&state_db).map_err(to_command_error)?;
+    let (sucursal_id, fi, ff) = indicador_scope(&state_sesion, filtro.as_ref())?;
+    let filtro_ref = filtro.as_ref();
+    let metodo_pago = filtro_ref.and_then(|f| normalize_filter(&f.metodo_pago));
+    let usuario_id = filtro_ref.and_then(|f| normalize_filter(&f.usuario_id));
+
+    let (total_vendido, transacciones, canceladas, ventas_credito): (f64, i64, i64, f64) = if let Some(sid) = sucursal_id.clone() {
+        conn.query_row(
+            "
+            SELECT COALESCE(SUM(CASE WHEN estado = 'COMPLETADA' THEN total ELSE 0 END), 0),
+                   COALESCE(SUM(CASE WHEN estado = 'COMPLETADA' THEN 1 ELSE 0 END), 0),
+                   COALESCE(SUM(CASE WHEN estado = 'CANCELADA' THEN 1 ELSE 0 END), 0),
+                   COALESCE(SUM(CASE WHEN estado = 'COMPLETADA' AND metodo_pago = 'CREDITO' THEN total ELSE 0 END), 0)
+            FROM ventas
+            WHERE sucursal_id = ?1 AND fecha >= ?2 AND fecha <= ?3
+              AND (?4 IS NULL OR metodo_pago = ?4)
+              AND (?5 IS NULL OR usuario_id = ?5)
+            ",
+            params![sid, fi, ff, metodo_pago, usuario_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+    } else {
+        conn.query_row(
+            "
+            SELECT COALESCE(SUM(CASE WHEN estado = 'COMPLETADA' THEN total ELSE 0 END), 0),
+                   COALESCE(SUM(CASE WHEN estado = 'COMPLETADA' THEN 1 ELSE 0 END), 0),
+                   COALESCE(SUM(CASE WHEN estado = 'CANCELADA' THEN 1 ELSE 0 END), 0),
+                   COALESCE(SUM(CASE WHEN estado = 'COMPLETADA' AND metodo_pago = 'CREDITO' THEN total ELSE 0 END), 0)
+            FROM ventas
+            WHERE fecha >= ?1 AND fecha <= ?2
+              AND (?3 IS NULL OR metodo_pago = ?3)
+              AND (?4 IS NULL OR usuario_id = ?4)
+            ",
+            params![fi, ff, metodo_pago, usuario_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+    }
+    .map_err(AppError::from)
+    .map_err(to_command_error)?;
+
+    let mut metodos = Vec::new();
+    if let Some(sid) = sucursal_id.clone() {
+        let mut stmt = conn.prepare(
+            "SELECT metodo_pago, COALESCE(SUM(total), 0), COUNT(*) FROM ventas WHERE estado = 'COMPLETADA' AND sucursal_id = ?1 AND fecha >= ?2 AND fecha <= ?3 AND (?4 IS NULL OR metodo_pago = ?4) AND (?5 IS NULL OR usuario_id = ?5) GROUP BY metodo_pago ORDER BY 2 DESC",
+        ).map_err(AppError::from).map_err(to_command_error)?;
+        let iter = stmt.query_map(params![sid, fi.clone(), ff.clone(), metodo_pago, usuario_id], |row| {
+            Ok(MetodoPagoResumen { metodo_pago: row.get(0)?, total: round_money(row.get(1)?), transacciones: row.get(2)? })
+        }).map_err(AppError::from).map_err(to_command_error)?;
+        for item in iter { metodos.push(item.map_err(AppError::from).map_err(to_command_error)?); }
+    } else {
+        let mut stmt = conn.prepare(
+            "SELECT metodo_pago, COALESCE(SUM(total), 0), COUNT(*) FROM ventas WHERE estado = 'COMPLETADA' AND fecha >= ?1 AND fecha <= ?2 AND (?3 IS NULL OR metodo_pago = ?3) AND (?4 IS NULL OR usuario_id = ?4) GROUP BY metodo_pago ORDER BY 2 DESC",
+        ).map_err(AppError::from).map_err(to_command_error)?;
+        let iter = stmt.query_map(params![fi.clone(), ff.clone(), metodo_pago, usuario_id], |row| {
+            Ok(MetodoPagoResumen { metodo_pago: row.get(0)?, total: round_money(row.get(1)?), transacciones: row.get(2)? })
+        }).map_err(AppError::from).map_err(to_command_error)?;
+        for item in iter { metodos.push(item.map_err(AppError::from).map_err(to_command_error)?); }
+    }
+
+    let productos_mas_vendidos = get_productos_mas_vendidos(state_db, state_sesion, filtro)?;
+    Ok(IndicadorVentasResumen {
+        total_vendido: round_money(total_vendido),
+        transacciones,
+        ticket_promedio: if transacciones > 0 { round_money(total_vendido / transacciones as f64) } else { 0.0 },
+        ventas_canceladas: canceladas,
+        ventas_credito: round_money(ventas_credito),
+        ventas_contado: round_money(total_vendido - ventas_credito),
+        metodos,
+        productos_mas_vendidos,
+    })
+}
+
+#[tauri::command]
+fn get_indicador_inventario(
+    state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
+    filtro: Option<DashboardFiltroInput>,
+) -> AppResult<IndicadorInventarioResumen> {
+    let conn = get_conn(&state_db).map_err(to_command_error)?;
+    let user = require_admin_or_superadmin(&state_sesion)?;
+    let filtro_ref = filtro.as_ref();
+    let sid = scoped_sucursal_for_read(&user, filtro_ref.and_then(|f| normalize_filter(&f.sucursal_id)));
+    let marca = filtro_ref.and_then(|f| normalize_filter(&f.marca));
+    let categoria = filtro_ref.and_then(|f| normalize_filter(&f.categoria));
+    let proveedor_id = filtro_ref.and_then(|f| normalize_filter(&f.proveedor_id));
+    let (productos, valor, stock, bajo, sin_stock, sobre): (i64, f64, f64, i64, i64, i64) = if let Some(sucursal) = sid.clone() {
+        conn.query_row(
+            "
+            SELECT COUNT(*),
+                   COALESCE(SUM(i.stock * COALESCE(NULLIF(i.costo_promedio, 0), p.precio_costo, 0)), 0),
+                   COALESCE(SUM(i.stock), 0),
+                   COALESCE(SUM(CASE WHEN i.stock_minimo > 0 AND i.stock <= i.stock_minimo THEN 1 ELSE 0 END), 0),
+                   COALESCE(SUM(CASE WHEN i.stock <= 0 THEN 1 ELSE 0 END), 0),
+                   COALESCE(SUM(CASE WHEN i.stock_minimo > 0 AND i.stock >= i.stock_minimo * 3 THEN 1 ELSE 0 END), 0)
+            FROM inventario_sucursal i
+            INNER JOIN productos p ON p.id = i.producto_id
+            WHERE i.eliminado = 0 AND p.eliminado = 0 AND i.sucursal_id = ?1
+              AND (?2 IS NULL OR p.marca = ?2)
+              AND (?3 IS NULL OR p.categoria = ?3)
+              AND (?4 IS NULL OR p.proveedor_id = ?4)
+            ",
+            params![sucursal, marca, categoria, proveedor_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+        )
+    } else {
+        conn.query_row(
+            "
+            SELECT COUNT(*),
+                   COALESCE(SUM(i.stock * COALESCE(NULLIF(i.costo_promedio, 0), p.precio_costo, 0)), 0),
+                   COALESCE(SUM(i.stock), 0),
+                   COALESCE(SUM(CASE WHEN i.stock_minimo > 0 AND i.stock <= i.stock_minimo THEN 1 ELSE 0 END), 0),
+                   COALESCE(SUM(CASE WHEN i.stock <= 0 THEN 1 ELSE 0 END), 0),
+                   COALESCE(SUM(CASE WHEN i.stock_minimo > 0 AND i.stock >= i.stock_minimo * 3 THEN 1 ELSE 0 END), 0)
+            FROM inventario_sucursal i
+            INNER JOIN productos p ON p.id = i.producto_id
+            WHERE i.eliminado = 0 AND p.eliminado = 0
+              AND (?1 IS NULL OR p.marca = ?1)
+              AND (?2 IS NULL OR p.categoria = ?2)
+              AND (?3 IS NULL OR p.proveedor_id = ?3)
+            ",
+            params![marca, categoria, proveedor_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+        )
+    }
+    .map_err(AppError::from)
+    .map_err(to_command_error)?;
+
+    let bajo_stock = get_productos_bajo_stock(state_db, state_sesion, sid)?;
+    Ok(IndicadorInventarioResumen {
+        productos_en_inventario: productos,
+        valor_inventario: round_money(valor),
+        stock_total: round_money(stock),
+        stock_bajo: bajo,
+        sin_stock,
+        sobre_stock: sobre,
+        bajo_stock,
+    })
+}
+
+#[tauri::command]
+fn get_indicador_financiero(
+    state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
+    filtro: Option<DashboardFiltroInput>,
+) -> AppResult<IndicadorFinancieroResumen> {
+    let conn = get_conn(&state_db).map_err(to_command_error)?;
+    let (sucursal_id, fi, ff) = indicador_scope(&state_sesion, filtro.as_ref())?;
+    let filtro_ref = filtro.as_ref();
+    let metodo_pago_filter = filtro_ref.and_then(|f| normalize_filter(&f.metodo_pago));
+    let usuario_id_filter = filtro_ref.and_then(|f| normalize_filter(&f.usuario_id));
+    let venta_por_metodo = |metodo: &str| -> Result<f64, String> {
+        if metodo_pago_filter.as_deref().is_some_and(|selected| selected != metodo) {
+            return Ok(0.0);
+        }
+        let value: f64 = if let Some(sid) = sucursal_id.clone() {
+            conn.query_row(
+                "
+                SELECT COALESCE(SUM(total), 0)
+                FROM ventas
+                WHERE estado = 'COMPLETADA'
+                  AND metodo_pago = ?1
+                  AND sucursal_id = ?2
+                  AND fecha >= ?3
+                  AND fecha <= ?4
+                  AND (?5 IS NULL OR usuario_id = ?5)
+                ",
+                params![metodo, sid, fi, ff, usuario_id_filter],
+                |row| row.get(0),
+            )
+        } else {
+            conn.query_row(
+                "
+                SELECT COALESCE(SUM(total), 0)
+                FROM ventas
+                WHERE estado = 'COMPLETADA'
+                  AND metodo_pago = ?1
+                  AND fecha >= ?2
+                  AND fecha <= ?3
+                  AND (?4 IS NULL OR usuario_id = ?4)
+                ",
+                params![metodo, fi, ff, usuario_id_filter],
+                |row| row.get(0),
+            )
+        }
+        .map_err(AppError::from)
+        .map_err(to_command_error)?;
+        Ok(round_money(value))
+    };
+
+    let compras: f64 = if let Some(sid) = sucursal_id.clone() {
+        conn.query_row(
+            "SELECT COALESCE(SUM(total), 0) FROM compras WHERE sucursal_id = ?1 AND fecha >= ?2 AND fecha <= ?3",
+            params![sid, fi, ff],
+            |row| row.get(0),
+        )
+    } else {
+        conn.query_row(
+            "SELECT COALESCE(SUM(total), 0) FROM compras WHERE fecha >= ?1 AND fecha <= ?2",
+            params![fi, ff],
+            |row| row.get(0),
+        )
+    }
+    .map_err(AppError::from)
+    .map_err(to_command_error)?;
+
+    let (ingresos_caja, egresos_caja): (f64, f64) = if let Some(sid) = sucursal_id.clone() {
+        conn.query_row(
+            "
+            SELECT COALESCE(SUM(CASE WHEN cm.tipo = 'INGRESO' THEN cm.monto ELSE 0 END), 0),
+                   COALESCE(SUM(CASE WHEN cm.tipo = 'EGRESO' THEN cm.monto ELSE 0 END), 0)
+            FROM caja_movimientos cm
+            INNER JOIN cajas_sesiones cs ON cs.id = cm.sesion_id
+            WHERE cs.sucursal_id = ?1 AND cm.updated_at >= ?2 AND cm.updated_at <= ?3
+              AND (?4 IS NULL OR cs.usuario_id = ?4)
+            ",
+            params![sid, fi, ff, usuario_id_filter],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+    } else {
+        conn.query_row(
+            "
+            SELECT COALESCE(SUM(CASE WHEN cm.tipo = 'INGRESO' THEN cm.monto ELSE 0 END), 0),
+                   COALESCE(SUM(CASE WHEN cm.tipo = 'EGRESO' THEN cm.monto ELSE 0 END), 0)
+            FROM caja_movimientos cm
+            INNER JOIN cajas_sesiones cs ON cs.id = cm.sesion_id
+            WHERE cm.updated_at >= ?1 AND cm.updated_at <= ?2
+              AND (?3 IS NULL OR cs.usuario_id = ?3)
+            ",
+            params![fi, ff, usuario_id_filter],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+    }
+    .map_err(AppError::from)
+    .map_err(to_command_error)?;
+
+    let cuentas_por_cobrar: f64 = conn
+        .query_row(
+            "SELECT COALESCE(SUM(saldo_deudor), 0) FROM clientes WHERE eliminado = 0",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(AppError::from)
+        .map_err(to_command_error)?;
+
+    let ventas_efectivo = venta_por_metodo("EFECTIVO")?;
+    let ventas_tarjeta = venta_por_metodo("TARJETA")?;
+    let ventas_transferencia = venta_por_metodo("TRANSFERENCIA")?;
+    let ventas_credito = venta_por_metodo("CREDITO")?;
+    Ok(IndicadorFinancieroResumen {
+        ingresos_caja: round_money(ingresos_caja),
+        egresos_caja: round_money(egresos_caja),
+        ventas_efectivo,
+        ventas_tarjeta,
+        ventas_transferencia,
+        ventas_credito,
+        compras: round_money(compras),
+        cuentas_por_cobrar: round_money(cuentas_por_cobrar),
+        flujo_neto_estimado: round_money(ventas_efectivo + ventas_tarjeta + ventas_transferencia + ingresos_caja - egresos_caja - compras),
+    })
+}
+
 #[tauri::command]
 fn get_historial_ventas(
     state_db: tauri::State<DbState>,
@@ -6689,6 +9775,7 @@ fn get_historial_ventas(
         filtro_ref.and_then(|f| normalize_filter(&f.sucursal_id)),
     );
     let uid = filtro_ref.and_then(|f| normalize_filter(&f.usuario_id));
+    let estado = filtro_ref.and_then(|f| normalize_filter(&f.estado));
 
     let mut sql = String::from(
         "
@@ -6699,22 +9786,22 @@ fn get_historial_ventas(
         INNER JOIN sucursales s ON s.id = v.sucursal_id
         INNER JOIN usuarios u ON u.id = v.usuario_id
         LEFT JOIN clientes c ON c.id = v.cliente_id
-        WHERE v.fecha >= ?1 AND v.fecha <= ?2
+        WHERE v.fecha >= ? AND v.fecha <= ?
         ",
     );
     let mut params_vec: Vec<String> = vec![fi, ff];
 
     if let Some(value) = sid {
-        sql.push_str(" AND v.sucursal_id = ?3");
+        sql.push_str(" AND v.sucursal_id = ?");
         params_vec.push(value);
     }
     if let Some(value) = uid {
-        if params_vec.len() == 2 {
-            sql.push_str(" AND v.usuario_id = ?3");
-        } else {
-            sql.push_str(" AND v.usuario_id = ?4");
-        }
+        sql.push_str(" AND v.usuario_id = ?");
         params_vec.push(value);
+    }
+    if let Some(value) = estado {
+        sql.push_str(" AND v.estado = ?");
+        params_vec.push(value.to_ascii_uppercase());
     }
 
     sql.push_str(" ORDER BY v.fecha DESC");
@@ -6746,6 +9833,114 @@ fn get_historial_ventas(
     }
 
     Ok(historial)
+}
+
+#[tauri::command]
+fn get_historial_ventas_page(
+    state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
+    filtro: Option<HistorialVentasFiltro>,
+    page: i64,
+    page_size: i64,
+) -> AppResult<HistorialVentasPage> {
+    let conn = get_conn(&state_db).map_err(to_command_error)?;
+    let user = current_session_user(&state_sesion)?;
+    let filtro_ref = filtro.as_ref();
+    let fi = filtro_ref
+        .and_then(|f| normalize_filter(&f.fecha_inicio))
+        .unwrap_or_else(|| "0001-01-01T00:00:00.000Z".to_string());
+    let ff = filtro_ref
+        .and_then(|f| normalize_filter(&f.fecha_fin))
+        .unwrap_or_else(|| "9999-12-31T23:59:59.999Z".to_string());
+    let sid = scoped_sucursal_for_read(
+        &user,
+        filtro_ref.and_then(|f| normalize_filter(&f.sucursal_id)),
+    );
+    let uid = filtro_ref.and_then(|f| normalize_filter(&f.usuario_id));
+    let folio = filtro_ref.and_then(|f| normalize_filter(&f.folio));
+    let estado = filtro_ref.and_then(|f| normalize_filter(&f.estado));
+    let (page, page_size) = normalize_page_args(page, page_size);
+    let offset = page * page_size;
+
+    let mut where_sql = String::from(" WHERE v.fecha >= ? AND v.fecha <= ?");
+    let mut params_vec: Vec<String> = vec![fi, ff];
+
+    if let Some(value) = sid {
+        where_sql.push_str(" AND v.sucursal_id = ?");
+        params_vec.push(value);
+    }
+    if let Some(value) = uid {
+        where_sql.push_str(" AND v.usuario_id = ?");
+        params_vec.push(value);
+    }
+    if let Some(value) = folio {
+        where_sql.push_str(" AND v.id LIKE ? COLLATE NOCASE");
+        params_vec.push(format!("%{}%", value.trim()));
+    }
+    if let Some(value) = estado {
+        where_sql.push_str(" AND v.estado = ?");
+        params_vec.push(value.to_ascii_uppercase());
+    }
+
+    let count_sql = format!(
+        "
+        SELECT COUNT(*)
+        FROM ventas v
+        INNER JOIN sucursales s ON s.id = v.sucursal_id
+        INNER JOIN usuarios u ON u.id = v.usuario_id
+        LEFT JOIN clientes c ON c.id = v.cliente_id
+        {where_sql}
+        "
+    );
+    let total: i64 = conn
+        .query_row(&count_sql, params_from_iter(params_vec.iter()), |row| row.get(0))
+        .map_err(AppError::from)
+        .map_err(to_command_error)?;
+
+    let mut select_params = params_vec.clone();
+    select_params.push(page_size.to_string());
+    select_params.push(offset.to_string());
+
+    let select_sql = format!(
+        "
+        SELECT
+          v.id, v.fecha, v.total, v.metodo_pago, v.efectivo_recibido, v.cambio_entregado, v.estado,
+          s.id, s.nombre, u.id, u.nombre, c.id, c.nombre
+        FROM ventas v
+        INNER JOIN sucursales s ON s.id = v.sucursal_id
+        INNER JOIN usuarios u ON u.id = v.usuario_id
+        LEFT JOIN clientes c ON c.id = v.cliente_id
+        {where_sql}
+        ORDER BY v.fecha DESC
+        LIMIT ? OFFSET ?
+        "
+    );
+
+    let mut stmt = conn.prepare(&select_sql).map_err(AppError::from).map_err(to_command_error)?;
+    let mut rows = stmt
+        .query(params_from_iter(select_params.iter()))
+        .map_err(AppError::from)
+        .map_err(to_command_error)?;
+    let mut historial = Vec::new();
+    while let Some(row) = rows.next().map_err(AppError::from).map_err(to_command_error)? {
+        historial.push(HistorialVenta {
+            id: row.get(0).map_err(AppError::from).map_err(to_command_error)?,
+            fecha: row.get(1).map_err(AppError::from).map_err(to_command_error)?,
+            total: row.get(2).map_err(AppError::from).map_err(to_command_error)?,
+            metodo_pago: row.get(3).map_err(AppError::from).map_err(to_command_error)?,
+            efectivo_recibido: row.get(4).map_err(AppError::from).map_err(to_command_error)?,
+            cambio_entregado: row.get(5).map_err(AppError::from).map_err(to_command_error)?,
+            estado: row.get(6).map_err(AppError::from).map_err(to_command_error)?,
+            sucursal_id: row.get(7).map_err(AppError::from).map_err(to_command_error)?,
+            sucursal_nombre: row.get(8).map_err(AppError::from).map_err(to_command_error)?,
+            usuario_id: row.get(9).map_err(AppError::from).map_err(to_command_error)?,
+            usuario_nombre: row.get(10).map_err(AppError::from).map_err(to_command_error)?,
+            cliente_id: row.get(11).ok(),
+            cliente_nombre: row.get(12).ok(),
+        });
+    }
+
+    Ok(HistorialVentasPage { rows: historial, total })
 }
 
 #[tauri::command]
@@ -7325,6 +10520,150 @@ fn get_facturas_emitidas(
 }
 
 #[tauri::command]
+fn get_facturas_emitidas_page(
+    state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
+    page: i64,
+    page_size: i64,
+) -> AppResult<FacturasEmitidasPage> {
+    let conn = get_conn(&state_db).map_err(to_command_error)?;
+    let user = require_admin_or_superadmin(&state_sesion)?;
+    let sucursal_id = scoped_sucursal_for_read(&user, None);
+    let (page, page_size) = normalize_page_args(page, page_size);
+    let offset = page * page_size;
+
+    let mut where_sql = String::new();
+    let mut params_vec: Vec<String> = Vec::new();
+    if let Some(value) = sucursal_id {
+        where_sql.push_str(" WHERE v.sucursal_id = ?");
+        params_vec.push(value);
+    }
+
+    let count_sql = format!(
+        "
+        SELECT COUNT(*)
+        FROM facturas_emitidas fe
+        INNER JOIN ventas v ON v.id = fe.venta_id
+        {where_sql}
+        "
+    );
+    let total: i64 = conn
+        .query_row(&count_sql, params_from_iter(params_vec.iter()), |row| row.get(0))
+        .map_err(AppError::from)
+        .map_err(to_command_error)?;
+
+    let mut select_params = params_vec.clone();
+    select_params.push(page_size.to_string());
+    select_params.push(offset.to_string());
+
+    let select_sql = format!(
+        "
+        SELECT fe.id, fe.venta_id, fe.uuid, fe.rfc_receptor, fe.monto_total, fe.estado, fe.fecha_emision, fe.pdf_path, fe.xml_path
+        FROM facturas_emitidas fe
+        INNER JOIN ventas v ON v.id = fe.venta_id
+        {where_sql}
+        ORDER BY fe.fecha_emision DESC
+        LIMIT ? OFFSET ?
+        "
+    );
+
+    let mut stmt = conn
+        .prepare(&select_sql)
+        .map_err(AppError::from)
+        .map_err(to_command_error)?;
+    let iter = stmt
+        .query_map(params_from_iter(select_params.iter()), |row| {
+            Ok(FacturaEmitida {
+                id: row.get(0)?,
+                venta_id: row.get(1)?,
+                uuid: row.get(2)?,
+                rfc_receptor: row.get(3)?,
+                monto_total: row.get(4)?,
+                estado: row.get(5)?,
+                fecha_emision: row.get(6)?,
+                pdf_path: row.get(7)?,
+                xml_path: row.get(8)?,
+            })
+        })
+        .map_err(AppError::from)
+        .map_err(to_command_error)?;
+
+    let mut facturas = Vec::new();
+    for item in iter {
+        facturas.push(item.map_err(AppError::from).map_err(to_command_error)?);
+    }
+    Ok(FacturasEmitidasPage { rows: facturas, total })
+}
+
+#[tauri::command]
+fn get_facturas_por_ventas(
+    state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
+    venta_ids: Vec<String>,
+) -> AppResult<Vec<FacturaEmitida>> {
+    let conn = get_conn(&state_db).map_err(to_command_error)?;
+    let user = require_admin_or_superadmin(&state_sesion)?;
+    let sucursal_id = scoped_sucursal_for_read(&user, None);
+    let ids: Vec<String> = venta_ids
+        .into_iter()
+        .map(|id| id.trim().to_string())
+        .filter(|id| !id.is_empty())
+        .take(100)
+        .collect();
+
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let placeholders = std::iter::repeat("?")
+        .take(ids.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut sql = format!(
+        "
+        SELECT fe.id, fe.venta_id, fe.uuid, fe.rfc_receptor, fe.monto_total, fe.estado, fe.fecha_emision, fe.pdf_path, fe.xml_path
+        FROM facturas_emitidas fe
+        INNER JOIN ventas v ON v.id = fe.venta_id
+        WHERE fe.venta_id IN ({placeholders})
+        "
+    );
+    let mut params_vec = ids;
+    if let Some(value) = sucursal_id {
+        sql.push_str(" AND v.sucursal_id = ?");
+        params_vec.push(value);
+    }
+    sql.push_str(" ORDER BY fe.fecha_emision DESC");
+
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(AppError::from)
+        .map_err(to_command_error)?;
+    let iter = stmt
+        .query_map(params_from_iter(params_vec.iter()), |row| {
+            Ok(FacturaEmitida {
+                id: row.get(0)?,
+                venta_id: row.get(1)?,
+                uuid: row.get(2)?,
+                rfc_receptor: row.get(3)?,
+                monto_total: row.get(4)?,
+                estado: row.get(5)?,
+                fecha_emision: row.get(6)?,
+                pdf_path: row.get(7)?,
+                xml_path: row.get(8)?,
+            })
+        })
+        .map_err(AppError::from)
+        .map_err(to_command_error)?;
+
+    let mut facturas = Vec::new();
+    for item in iter {
+        facturas.push(item.map_err(AppError::from).map_err(to_command_error)?);
+    }
+
+    Ok(facturas)
+}
+
+#[tauri::command]
 fn get_sync_migration_status(
     state_db: tauri::State<DbState>,
     state_sesion: tauri::State<SesionActual>,
@@ -7361,11 +10700,55 @@ fn get_sync_status(
 ) -> AppResult<SyncStatus> {
     current_session_user(&state_sesion)?;
     let conn = get_conn(&state_db).map_err(to_command_error)?;
-    let pendientes = count_sync_pending(&conn).map_err(to_command_error)?;
-    let ventas_pendientes = count_table_sync_pending(&conn, "ventas").map_err(to_command_error)?;
+    let mut pendientes = 0;
+    let mut ventas_pendientes = 0;
+    let mut tablas_pendientes = Vec::new();
+
+    for table in SYNC_TABLES {
+        let count = count_table_sync_pending(&conn, table).map_err(to_command_error)?;
+        pendientes += count;
+        if *table == "ventas" {
+            ventas_pendientes = count;
+        }
+        if count > 0 {
+            tablas_pendientes.push(SyncTableStatus {
+                tabla: (*table).to_string(),
+                pendientes: count,
+            });
+        }
+    }
+
+    let runtime = conn
+        .query_row(
+            "
+            SELECT ultimo_intento_at, ultimo_exito_at, ultimo_error_at, ultimo_error
+            FROM sync_runtime_status
+            WHERE id = 1
+            ",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(AppError::from)
+        .map_err(to_command_error)?;
+    let (ultimo_intento_at, ultimo_exito_at, ultimo_error_at, ultimo_error) =
+        runtime.unwrap_or((None, None, None, None));
+
     Ok(SyncStatus {
         pendientes,
         ventas_pendientes,
+        tablas_pendientes,
+        ultimo_intento_at,
+        ultimo_exito_at,
+        ultimo_error_at,
+        ultimo_error,
     })
 }
 
@@ -8454,10 +11837,9 @@ fn build_delta_pull_endpoint(
                     "(sucursal_origen_id.{ids_filter},sucursal_destino_id.{ids_filter})"
                 )));
             }
-            "detalle_traspasos" => {
-                endpoint.push_str("&sucursal_origen_id=");
-                endpoint.push_str(&url_encode_component(&ids_filter));
-            }
+            // Supabase stores only sucursal_origen_id on detalle_traspasos. Filtering here
+            // would let destination branches pull the transfer header but not its detail rows.
+            "detalle_traspasos" => {}
             _ => {}
         }
     }
@@ -8704,7 +12086,9 @@ fn sync_upload_plans(limit: Option<usize>, only_pending: bool) -> Vec<(&'static 
                 "
                 SELECT id AS __local_id, id, codigo_barras, codigo_proveedor, proveedor_id, clave_producto, descripcion,
                        marca, categoria, unidad, precio_costo, costo_promedio, precio_venta, sat_clave_prod_serv,
-                       sat_clave_unidad, eliminado, 1 AS sincronizado, updated_at
+                       sat_clave_unidad, precio_1, precio_2, precio_3, precio_4, mayoreo_apartir,
+                       a_granel, no_en_catalogo, ventas_negativas, caducidad, fotos, descripcion_catalogo,
+                       eliminado, 1 AS sincronizado, updated_at
                 FROM productos
                 {pending}
                 ORDER BY updated_at
@@ -8820,6 +12204,8 @@ fn sync_upload_plans(limit: Option<usize>, only_pending: bool) -> Vec<(&'static 
                 "
                 SELECT id AS __local_id, sync_uuid AS uuid, id, usuario_id, sucursal_id, fecha, total,
                        metodo_pago, efectivo_recibido, cambio_entregado, cliente_id,
+                       cliente_rapido_nombre, cliente_rapido_telefono, cliente_rapido_domicilio,
+                       requiere_factura,
                        usuario_autorizo_cancelacion_id, motivo_cancelacion, fecha_cancelacion,
                        estado, 1 AS sincronizado, updated_at
                 FROM ventas
@@ -8836,7 +12222,8 @@ fn sync_upload_plans(limit: Option<usize>, only_pending: bool) -> Vec<(&'static 
                 "
                 SELECT dv.id AS __local_id, dv.sync_uuid AS uuid, dv.id, dv.venta_id, v.sucursal_id,
                        dv.producto_id, dv.cantidad, dv.precio_venta_pactado,
-                       dv.costo_unitario_pactado, 1 AS sincronizado, dv.updated_at
+                       dv.costo_unitario_pactado, dv.tipo_precio_vendido, dv.precio_original,
+                       dv.descuento_aplicado, 1 AS sincronizado, dv.updated_at
                 FROM detalle_ventas dv
                 INNER JOIN ventas v ON v.id = dv.venta_id
                 {dv_pending}
@@ -9081,6 +12468,49 @@ fn run_auto_sync_once(pool: &DbPool) -> AppResult<usize> {
     Ok(total)
 }
 
+fn update_sync_runtime_status(conn: &Connection, error: Option<&str>) -> Result<(), AppError> {
+    let now = current_sqlite_timestamp(conn)?;
+    if let Some(error) = error {
+        let error = error.chars().take(700).collect::<String>();
+        conn.execute(
+            "
+            INSERT INTO sync_runtime_status (id, ultimo_intento_at, ultimo_error_at, ultimo_error)
+            VALUES (1, ?1, ?1, ?2)
+            ON CONFLICT(id) DO UPDATE SET
+              ultimo_intento_at = excluded.ultimo_intento_at,
+              ultimo_error_at = excluded.ultimo_error_at,
+              ultimo_error = excluded.ultimo_error
+            ",
+            params![now, error],
+        )?;
+    } else {
+        conn.execute(
+            "
+            INSERT INTO sync_runtime_status (id, ultimo_intento_at, ultimo_exito_at, ultimo_error_at, ultimo_error)
+            VALUES (1, ?1, ?1, NULL, NULL)
+            ON CONFLICT(id) DO UPDATE SET
+              ultimo_intento_at = excluded.ultimo_intento_at,
+              ultimo_exito_at = excluded.ultimo_exito_at,
+              ultimo_error_at = NULL,
+              ultimo_error = NULL
+            ",
+            params![now],
+        )?;
+    }
+    Ok(())
+}
+
+fn record_sync_worker_status(pool: &DbPool, error: Option<&str>) {
+    match pool.get() {
+        Ok(conn) => {
+            if let Err(error) = update_sync_runtime_status(&conn, error) {
+                eprintln!("[sync-worker] no se pudo actualizar estado runtime: {error}");
+            }
+        }
+        Err(error) => eprintln!("[sync-worker] no se pudo obtener conexión para estado runtime: {error}"),
+    }
+}
+
 fn start_sync_worker(pool: DbPool) {
     tauri::async_runtime::spawn(async move {
         loop {
@@ -9103,9 +12533,12 @@ fn start_sync_worker(pool: DbPool) {
                 };
 
                 if errors.is_empty() {
+                    record_sync_worker_status(&pool, None);
                     Ok::<(usize, usize), String>((uploaded, downloaded))
                 } else {
-                    Err(errors.join(" | "))
+                    let error = errors.join(" | ");
+                    record_sync_worker_status(&pool, Some(&error));
+                    Err(error)
                 }
             })
             .await;
@@ -9220,8 +12653,12 @@ fn ensure_no_open_cash_sessions(conn: &Connection) -> AppResult<()> {
 }
 
 #[tauri::command]
-fn get_supabase_config(state_db: tauri::State<DbState>) -> AppResult<SupabaseConfig> {
+fn get_supabase_config(
+    state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
+) -> AppResult<SupabaseConfig> {
     let conn = get_conn(&state_db).map_err(to_command_error)?;
+    require_superadmin_or_initial_setup(&conn, &state_sesion)?;
     let config = get_supabase_config_from_conn(&conn)
         .map_err(to_command_error)?
         .unwrap_or(SupabaseConfig {
@@ -9372,6 +12809,8 @@ fn sincronizar_hacia_nube(
         }
     }
 
+    update_sync_runtime_status(&conn, None).map_err(to_command_error)?;
+
     Ok(SyncUploadResult {
         total_registros,
         por_tabla,
@@ -9411,6 +12850,8 @@ fn subir_base_local_completa_a_nube(
         }
     }
 
+    update_sync_runtime_status(&conn, None).map_err(to_command_error)?;
+
     Ok(SyncUploadResult {
         total_registros,
         por_tabla,
@@ -9449,7 +12890,8 @@ fn sincronizar_desde_nube(
         generado_at: current_timestamp_string(),
         tablas,
     };
-    apply_backup_to_conn(&mut conn, backup).map_err(to_command_error)
+    apply_backup_to_conn(&mut conn, backup).map_err(to_command_error)?;
+    update_sync_runtime_status(&conn, None).map_err(to_command_error)
 }
 
 #[tauri::command]
@@ -10053,6 +13495,110 @@ fn get_historial_traspasos(
 }
 
 #[tauri::command]
+fn get_historial_traspasos_page(
+    state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
+    page: i64,
+    page_size: i64,
+    estado: Option<String>,
+) -> AppResult<HistorialTraspasosPage> {
+    let conn = get_conn(&state_db).map_err(to_command_error)?;
+    let user = current_session_user(&state_sesion)?;
+    let sucursal_id = scoped_sucursal_for_read(&user, None);
+    let (page, page_size) = normalize_page_args(page, page_size);
+    let offset = page * page_size;
+
+    let mut conditions: Vec<String> = Vec::new();
+    let mut params_vec: Vec<String> = Vec::new();
+    if let Some(value) = sucursal_id {
+        conditions.push("(t.sucursal_origen_id = ? OR t.sucursal_destino_id = ?)".to_string());
+        params_vec.push(value.clone());
+        params_vec.push(value);
+    }
+    if let Some(value) = estado {
+        let estado = value.trim().to_uppercase();
+        if !estado.is_empty() {
+            conditions.push("t.estado = ?".to_string());
+            params_vec.push(estado);
+        }
+    }
+    let where_sql = if conditions.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", conditions.join(" AND "))
+    };
+
+    let count_sql = format!("SELECT COUNT(*) FROM traspasos t{where_sql}");
+    let total: i64 = conn
+        .query_row(&count_sql, params_from_iter(params_vec.iter()), |row| row.get(0))
+        .map_err(AppError::from)
+        .map_err(to_command_error)?;
+
+    let mut select_params = params_vec.clone();
+    select_params.push(page_size.to_string());
+    select_params.push(offset.to_string());
+    let select_sql = format!(
+        "
+            SELECT
+              t.id,
+              t.sucursal_origen_id,
+              so.nombre,
+              t.sucursal_destino_id,
+              sd.nombre,
+              t.usuario_id,
+              u.nombre,
+              t.fecha,
+              t.estado,
+              t.usuario_recibio_id,
+              ur.nombre,
+              t.fecha_recepcion,
+              t.observaciones_recepcion
+            FROM traspasos t
+            INNER JOIN sucursales so ON so.id = t.sucursal_origen_id
+            INNER JOIN sucursales sd ON sd.id = t.sucursal_destino_id
+            INNER JOIN usuarios u ON u.id = t.usuario_id
+            LEFT JOIN usuarios ur ON ur.id = t.usuario_recibio_id
+            {where_sql}
+            ORDER BY t.fecha DESC
+            LIMIT ? OFFSET ?
+        "
+    );
+
+    let mut stmt = conn
+        .prepare(&select_sql)
+        .map_err(AppError::from)
+        .map_err(to_command_error)?;
+
+    let iter = stmt
+        .query_map(params_from_iter(select_params.iter()), |row| {
+            Ok(HistorialTraspaso {
+                id: row.get(0)?,
+                sucursal_origen_id: row.get(1)?,
+                sucursal_origen_nombre: row.get(2)?,
+                sucursal_destino_id: row.get(3)?,
+                sucursal_destino_nombre: row.get(4)?,
+                usuario_id: row.get(5)?,
+                usuario_nombre: row.get(6)?,
+                fecha: row.get(7)?,
+                estado: row.get(8)?,
+                usuario_recibio_id: row.get(9)?,
+                usuario_recibio_nombre: row.get(10)?,
+                fecha_recepcion: row.get(11)?,
+                observaciones_recepcion: row.get(12)?,
+            })
+        })
+        .map_err(AppError::from)
+        .map_err(to_command_error)?;
+
+    let mut rows = Vec::new();
+    for item in iter {
+        rows.push(item.map_err(AppError::from).map_err(to_command_error)?);
+    }
+
+    Ok(HistorialTraspasosPage { rows, total })
+}
+
+#[tauri::command]
 fn registrar_merma_ajuste(
     state_db: tauri::State<DbState>,
     state_sesion: tauri::State<SesionActual>,
@@ -10282,6 +13828,100 @@ fn get_historial_mermas(
 }
 
 #[tauri::command]
+fn get_historial_mermas_page(
+    state_db: tauri::State<DbState>,
+    state_sesion: tauri::State<SesionActual>,
+    page: i64,
+    page_size: i64,
+) -> AppResult<HistorialMermasPage> {
+    let conn = get_conn(&state_db).map_err(to_command_error)?;
+    let user = current_session_user(&state_sesion)?;
+    let sucursal_id = scoped_sucursal_for_read(&user, None);
+    let (page, page_size) = normalize_page_args(page, page_size);
+    let offset = page * page_size;
+
+    let mut where_sql = String::new();
+    let mut params_vec: Vec<String> = Vec::new();
+    if let Some(value) = sucursal_id {
+        where_sql.push_str(" WHERE m.sucursal_id = ?");
+        params_vec.push(value);
+    }
+
+    let count_sql = format!("SELECT COUNT(*) FROM mermas_ajustes m{where_sql}");
+    let total: i64 = conn
+        .query_row(&count_sql, params_from_iter(params_vec.iter()), |row| row.get(0))
+        .map_err(AppError::from)
+        .map_err(to_command_error)?;
+
+    let mut select_params = params_vec.clone();
+    select_params.push(page_size.to_string());
+    select_params.push(offset.to_string());
+    let select_sql = format!(
+        "
+            SELECT
+              m.id,
+              m.producto_id,
+              p.descripcion,
+              p.marca,
+              m.sucursal_id,
+              s.nombre,
+              m.usuario_id,
+              u.nombre,
+              m.cantidad,
+              m.tipo_movimiento,
+              m.motivo,
+              m.fecha,
+              COALESCE(mi.costo_unitario, p.costo_promedio, p.precio_costo),
+              (m.cantidad * COALESCE(mi.costo_unitario, p.costo_promedio, p.precio_costo)) AS costo_total
+            FROM mermas_ajustes m
+            INNER JOIN productos p ON p.id = m.producto_id
+            INNER JOIN sucursales s ON s.id = m.sucursal_id
+            INNER JOIN usuarios u ON u.id = m.usuario_id
+            LEFT JOIN movimientos_inventario mi
+              ON mi.referencia_tipo = 'MERMA_AJUSTE'
+             AND mi.referencia_id = m.id
+             AND mi.producto_id = m.producto_id
+            {where_sql}
+            ORDER BY m.fecha DESC
+            LIMIT ? OFFSET ?
+        "
+    );
+
+    let mut stmt = conn
+        .prepare(&select_sql)
+        .map_err(AppError::from)
+        .map_err(to_command_error)?;
+    let iter = stmt
+        .query_map(params_from_iter(select_params.iter()), |row| {
+            Ok(HistorialMerma {
+                id: row.get(0)?,
+                producto_id: row.get(1)?,
+                producto_descripcion: row.get(2)?,
+                marca: row.get(3)?,
+                sucursal_id: row.get(4)?,
+                sucursal_nombre: row.get(5)?,
+                usuario_id: row.get(6)?,
+                usuario_nombre: row.get(7)?,
+                cantidad: row.get(8)?,
+                tipo_movimiento: row.get(9)?,
+                motivo: row.get(10)?,
+                fecha: row.get(11)?,
+                costo_unitario: row.get(12)?,
+                costo_total_perdido: row.get(13)?,
+            })
+        })
+        .map_err(AppError::from)
+        .map_err(to_command_error)?;
+
+    let mut rows = Vec::new();
+    for item in iter {
+        rows.push(item.map_err(AppError::from).map_err(to_command_error)?);
+    }
+
+    Ok(HistorialMermasPage { rows, total })
+}
+
+#[tauri::command]
 fn registrar_venta(
     state_db: tauri::State<DbState>,
     state_sesion: tauri::State<SesionActual>,
@@ -10337,7 +13977,7 @@ fn registrar_venta(
         return Err("No puedes vender sin una caja ABIERTA. Abre caja para continuar.".to_string());
     }
 
-    let mut detalles_calculados: Vec<(String, String, f64, f64, f64)> = Vec::new();
+    let mut detalles_calculados: Vec<(String, String, f64, f64, f64, String, f64, f64, bool)> = Vec::new();
     let mut total_centavos = 0_i64;
     for detalle in &venta.detalles {
         let mut producto: ProductoConStock = tx
@@ -10360,7 +14000,18 @@ fn registrar_venta(
                     p.sat_clave_unidad,
                     i.sucursal_id,
                     i.stock,
-                    i.stock_minimo
+                    i.stock_minimo,
+                    COALESCE(p.precio_1, 0),
+                    COALESCE(p.precio_2, 0),
+                    COALESCE(p.precio_3, 0),
+                    COALESCE(p.precio_4, 0),
+                    COALESCE(p.mayoreo_apartir, 0),
+                    COALESCE(p.a_granel, 0),
+                    COALESCE(p.no_en_catalogo, 0),
+                    COALESCE(p.ventas_negativas, 0),
+                    p.caducidad,
+                    TRIM(COALESCE(p.fotos, '')),
+                    TRIM(COALESCE(p.descripcion_catalogo, ''))
                 FROM productos p
                 INNER JOIN inventario_sucursal i ON i.producto_id = p.id
                 WHERE p.id = ?1
@@ -10392,23 +14043,45 @@ fn registrar_venta(
                         precio_descontado: None,
                         nombre_promo: None,
                         promocion_id: None,
+                        promo_tipo_descuento: None,
+                        promo_valor: None,
+                        precio_1: row.get(17)?,
+                        precio_2: row.get(18)?,
+                        precio_3: row.get(19)?,
+                        precio_4: row.get(20)?,
+                        mayoreo_apartir: row.get(21)?,
+                        a_granel: row.get::<_, i64>(22)? == 1,
+                        no_en_catalogo: row.get::<_, i64>(23)? == 1,
+                        ventas_negativas: row.get::<_, i64>(24)? == 1,
+                        caducidad: row.get(25)?,
+                        fotos: row.get(26)?,
+                        descripcion_catalogo: row.get(27)?,
                     })
                 },
             )
             .map_err(|_| format!("El producto {} no existe en el inventario de la sucursal.", detalle.producto_id))?;
 
         let es_venta_diversa = producto.clave_producto == "VENTA_DIVERSA";
-        let precio_servidor = if es_venta_diversa {
+        let (precio_servidor, tipo_precio_vendido, precio_original, descuento_aplicado) = if es_venta_diversa {
             if !is_admin_or_superadmin_role(&usuario_role) {
                 return Err("Solo ADMIN o SUPERADMIN pueden cobrar artículo diverso.".to_string());
             }
             if detalle.precio_venta_pactado <= 0.0 {
                 return Err("El artículo diverso requiere un precio mayor a cero.".to_string());
             }
-            round_money(detalle.precio_venta_pactado)
+            let precio = round_money(detalle.precio_venta_pactado);
+            (precio, "DIVERSO".to_string(), precio, 0.0)
         } else {
+            let (precio_base, tipo_base) = precio_base_por_cantidad(&producto, detalle.cantidad);
+            producto.precio_venta = precio_base;
             apply_active_promotion(&tx, &mut producto).map_err(to_command_error)?;
-            round_money(producto.precio_venta)
+            let precio_final = round_money(producto.precio_venta);
+            let tipo = if producto.promocion_id.is_some() {
+                format!("{tipo_base}+PROMO")
+            } else {
+                tipo_base
+            };
+            (precio_final, tipo, precio_base, round_money((precio_base - precio_final).max(0.0)))
         };
         let costo_unitario = round_money(producto.costo_promedio);
         total_centavos += money_to_cents(detalle.cantidad * precio_servidor);
@@ -10418,6 +14091,10 @@ fn registrar_venta(
             detalle.cantidad,
             precio_servidor,
             costo_unitario,
+            tipo_precio_vendido,
+            precio_original,
+            descuento_aplicado,
+            producto.ventas_negativas,
         ));
     }
     let total = cents_to_money(total_centavos);
@@ -10492,8 +14169,9 @@ fn registrar_venta(
         "
         INSERT INTO ventas (
             id, usuario_id, sucursal_id, fecha, total, metodo_pago, efectivo_recibido,
-            cambio_entregado, cliente_id, estado, sync_uuid, sincronizado, updated_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'COMPLETADA', ?10, 0, datetime('now'))
+            cambio_entregado, cliente_id, estado, cliente_rapido_nombre, cliente_rapido_telefono,
+            cliente_rapido_domicilio, requiere_factura, sync_uuid, sincronizado, updated_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'COMPLETADA', ?10, ?11, ?12, ?13, ?14, 0, datetime('now'))
         ",
         params![
             venta.id,
@@ -10505,19 +14183,45 @@ fn registrar_venta(
             efectivo_recibido,
             cambio_entregado,
             venta.cliente_id,
+            venta
+                .cliente_rapido_nombre
+                .as_ref()
+                .map(|v| normalize_title_trim(v))
+                .filter(|v| !v.is_empty()),
+            venta
+                .cliente_rapido_telefono
+                .as_ref()
+                .map(|v| normalize_plain_trim(v))
+                .filter(|v| !v.is_empty()),
+            venta
+                .cliente_rapido_domicilio
+                .as_ref()
+                .map(|v| normalize_title_trim(v))
+                .filter(|v| !v.is_empty()),
+            if venta.requiere_factura { 1 } else { 0 },
             generate_uuid_like()
         ],
     )
     .map_err(|error| map_write_error(error, "venta"))
     .map_err(to_command_error)?;
 
-    for (detalle_id, producto_id, cantidad, precio_servidor, costo_unitario) in &detalles_calculados {
+    for (
+        detalle_id,
+        producto_id,
+        cantidad,
+        precio_servidor,
+        costo_unitario,
+        tipo_precio_vendido,
+        precio_original,
+        descuento_aplicado,
+        permite_ventas_negativas,
+    ) in &detalles_calculados {
         tx.execute(
             "
             INSERT INTO detalle_ventas (
                 id, venta_id, producto_id, cantidad, precio_venta_pactado, costo_unitario_pactado,
-                sync_uuid, sincronizado, updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, datetime('now'))
+                tipo_precio_vendido, precio_original, descuento_aplicado, sync_uuid, sincronizado, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 0, datetime('now'))
             ",
             params![
                 detalle_id,
@@ -10526,25 +14230,40 @@ fn registrar_venta(
                 cantidad,
                 precio_servidor,
                 costo_unitario,
+                tipo_precio_vendido,
+                precio_original,
+                descuento_aplicado,
                 generate_uuid_like()
             ],
         )
         .map_err(|error| map_write_error(error, "detalle de venta"))
         .map_err(to_command_error)?;
 
-        let affected = tx
-            .execute(
-            "
-            UPDATE inventario_sucursal
-            SET stock = stock - ?1,
-                sincronizado = 0,
-                updated_at = datetime('now')
-            WHERE producto_id = ?2 AND sucursal_id = ?3 AND stock >= ?1
-            ",
-            params![cantidad, producto_id, venta.sucursal_id],
+        let affected = if *permite_ventas_negativas {
+            tx.execute(
+                "
+                UPDATE inventario_sucursal
+                SET stock = stock - ?1,
+                    sincronizado = 0,
+                    updated_at = datetime('now')
+                WHERE producto_id = ?2 AND sucursal_id = ?3
+                ",
+                params![cantidad, producto_id, venta.sucursal_id],
             )
-            .map_err(|error| map_write_error(error, "inventario"))
-            .map_err(to_command_error)?;
+        } else {
+            tx.execute(
+                "
+                UPDATE inventario_sucursal
+                SET stock = stock - ?1,
+                    sincronizado = 0,
+                    updated_at = datetime('now')
+                WHERE producto_id = ?2 AND sucursal_id = ?3 AND stock >= ?1
+                ",
+                params![cantidad, producto_id, venta.sucursal_id],
+            )
+        }
+        .map_err(|error| map_write_error(error, "inventario"))
+        .map_err(to_command_error)?;
 
         if affected != 1 {
             return Err(format!(
@@ -10725,10 +14444,17 @@ pub fn run() {
             update_sucursal,
             delete_sucursal,
             get_productos_por_sucursal,
+            get_productos_por_sucursal_page,
             buscar_productos_por_sucursal,
             buscar_productos_para_compra,
             asegurar_producto_venta_diversa,
             get_productos_catalogo,
+            get_productos_catalogo_page,
+            importar_datos_universal_visual,
+            importar_articulos_legacy_visual,
+            seleccionar_archivo_csv_importacion,
+            analizar_csv_importacion,
+            importar_csv_productos_mapeado,
             create_producto_catalogo,
             update_producto_catalogo,
             guardar_inventario_sucursal,
@@ -10745,11 +14471,21 @@ pub fn run() {
             abrir_caja,
             registrar_movimiento_caja,
             cerrar_caja,
+            get_system_printers,
+            get_perifericos_config,
+            guardar_perifericos_config,
+            imprimir_silencioso,
             imprimir_ticket_y_abrir_caja,
             get_dashboard_stats,
+            get_rentabilidad,
+            get_indicador_ventas,
+            get_indicador_inventario,
+            get_indicador_financiero,
             get_productos_bajo_stock,
+            get_productos_bajo_stock_page,
             get_productos_mas_vendidos,
             get_historial_ventas,
+            get_historial_ventas_page,
             get_detalle_venta,
             get_empresa_config,
             guardar_empresa_config,
@@ -10769,12 +14505,16 @@ pub fn run() {
             get_payload_factura,
             actualizar_estado_factura,
             get_facturas_emitidas,
+            get_facturas_emitidas_page,
+            get_facturas_por_ventas,
             cancelar_venta,
             registrar_traspaso,
             recibir_traspaso,
             get_historial_traspasos,
+            get_historial_traspasos_page,
             registrar_merma_ajuste,
             get_historial_mermas,
+            get_historial_mermas_page,
             registrar_venta
         ])
         .run(tauri::generate_context!())

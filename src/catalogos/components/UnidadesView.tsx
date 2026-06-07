@@ -23,7 +23,15 @@ import {
 import { Add as AddIcon, Delete as DeleteIcon, Edit as EditIcon, Save as SaveIcon } from '@mui/icons-material';
 import { useCatalogos } from '../context/CatalogosContext';
 import { UnidadMedida } from '../../inventario/types';
+import { AsyncButton } from '../../shared/components/AsyncButton';
+import { ConfirmActionDialog } from '../../shared/components/ConfirmActionDialog';
+import { FeedbackSnackbar } from '../../shared/components/FeedbackSnackbar';
+import { TablePager } from '../../shared/components/TablePager';
 import { TableActions } from '../../shared/components/TableActions';
+import { useDialogHotkeys } from '../../shared/hooks/useDialogHotkeys';
+import { useFeedback } from '../../shared/hooks/useFeedback';
+import { useLocalPagination } from '../../shared/hooks/useLocalPagination';
+import { dialogActionsSx, dialogContentSx } from '../../shared/ui/patterns';
 
 export function UnidadesView() {
   const { unidades, refreshCatalogos } = useCatalogos();
@@ -35,6 +43,8 @@ export function UnidadesView() {
   const [claveSat, setClaveSat] = useState('');
   const [saving, setSaving] = useState(false);
   const [deletingId, setDeletingId] = useState('');
+  const [deleteTarget, setDeleteTarget] = useState<UnidadMedida | null>(null);
+  const { feedbackMessage, feedbackSeverity, showFeedback, closeFeedback } = useFeedback();
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -42,6 +52,7 @@ export function UnidadesView() {
       ? unidades.filter((unidad) => unidad.nombre.toLowerCase().includes(q) || unidad.claveSat.toLowerCase().includes(q))
       : unidades;
   }, [unidades, search]);
+  const unidadesPager = useLocalPagination(filtered);
 
   const handleOpen = (unidad?: UnidadMedida) => {
     setEditMode(Boolean(unidad));
@@ -63,28 +74,42 @@ export function UnidadesView() {
       }
       setOpen(false);
       await refreshCatalogos();
+      showFeedback(editMode ? 'Unidad actualizada.' : 'Unidad creada.', 'success');
     } catch (error) {
-      alert(`Error al guardar: ${error}`);
+      showFeedback(`Error al guardar: ${error}`, 'error');
     } finally {
       setSaving(false);
     }
   };
 
   const handleDelete = async (id: string) => {
-    if (!confirm('¿Eliminar esta unidad?')) return;
     setDeletingId(id);
     try {
       await invoke('delete_unidad', { id });
       await refreshCatalogos();
+      setDeleteTarget(null);
+      showFeedback('Unidad eliminada.', 'success');
     } catch (error) {
-      alert(`Error al eliminar: ${error}`);
+      showFeedback(`Error al eliminar: ${error}`, 'error');
     } finally {
       setDeletingId('');
     }
   };
 
+  const claveSatLimpia = claveSat.trim();
+  const claveSatInvalida = claveSatLimpia.length > 0 && claveSatLimpia.length !== 3;
+  const saveDisabled = saving || !nombre.trim() || claveSatInvalida;
+
+  useDialogHotkeys({
+    open,
+    disabled: saveDisabled,
+    cancelDisabled: saving,
+    onConfirm: handleSave,
+    onCancel: () => setOpen(false),
+  });
+
   return (
-    <Box sx={{ maxWidth: 960, mx: 'auto', mt: 2 }}>
+    <Box sx={{ width: '100%', mt: 2 }}>
       <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3, gap: 2, flexWrap: 'wrap' }}>
         <Typography variant="h5" sx={{ fontWeight: 700 }}>Unidades</Typography>
         <Button variant="contained" startIcon={<AddIcon />} onClick={() => handleOpen()} disableElevation>
@@ -113,19 +138,19 @@ export function UnidadesView() {
               <TableRow>
                 <TableCell sx={{ fontWeight: 600 }}>Nombre</TableCell>
                 <TableCell sx={{ fontWeight: 600 }}>Clave SAT</TableCell>
-                <TableCell align="right" sx={{ fontWeight: 600 }}>Acciones</TableCell>
+                <TableCell sx={{ fontWeight: 600 }}>Acciones</TableCell>
               </TableRow>
             </TableHead>
             <TableBody>
-              {filtered.map((unidad) => (
+              {unidadesPager.paginatedRows.map((unidad) => (
                 <TableRow key={unidad.id} hover>
                   <TableCell>{unidad.nombre}</TableCell>
                   <TableCell>{unidad.claveSat || '-'}</TableCell>
-                  <TableCell align="right">
+                  <TableCell>
                     <IconButton color="primary" size="small" onClick={() => handleOpen(unidad)} sx={{ mr: 1 }} disabled={Boolean(deletingId)}>
                       <EditIcon fontSize="small" />
                     </IconButton>
-                    <IconButton color="error" size="small" onClick={() => handleDelete(unidad.id)} disabled={Boolean(deletingId)}>
+                    <IconButton color="error" size="small" onClick={() => setDeleteTarget(unidad)} disabled={Boolean(deletingId)}>
                       {deletingId === unidad.id ? <CircularProgress size={18} /> : <DeleteIcon fontSize="small" />}
                     </IconButton>
                   </TableCell>
@@ -141,35 +166,64 @@ export function UnidadesView() {
             </TableBody>
           </Table>
         </TableContainer>
+        <TablePager
+          page={unidadesPager.page}
+          pageSize={unidadesPager.pageSize}
+          totalPages={unidadesPager.totalPages}
+          totalRows={unidadesPager.totalRows}
+          fromRow={unidadesPager.fromRow}
+          toRow={unidadesPager.toRow}
+          canPreviousPage={unidadesPager.canPreviousPage}
+          canNextPage={unidadesPager.canNextPage}
+          onPreviousPage={unidadesPager.previousPage}
+          onNextPage={unidadesPager.nextPage}
+          onPageSizeChange={unidadesPager.setPageSize}
+          rowLabel="unidades"
+        />
       </Paper>
 
       <Dialog open={open} onClose={saving ? undefined : () => setOpen(false)} maxWidth="xs" fullWidth>
         <DialogTitle sx={{ fontWeight: 600 }}>{editMode ? 'Editar unidad' : 'Nueva unidad'}</DialogTitle>
         <Divider />
-        <DialogContent sx={{ pt: 3, display: 'flex', flexDirection: 'column', gap: 2 }}>
+        <DialogContent sx={dialogContentSx}>
           <TextField label="Nombre" value={nombre} onChange={(event) => setNombre(event.target.value)} fullWidth required />
           <TextField
             label="Clave Unidad SAT"
             value={claveSat}
             onChange={(event) => setClaveSat(event.target.value.toUpperCase())}
             fullWidth
-            required
-            helperText="Ej. H87, KGM"
+            error={claveSatInvalida}
+            helperText={claveSatInvalida ? 'Si capturas clave SAT debe tener exactamente 3 caracteres.' : 'Opcional. Ej. H87, KGM'}
             slotProps={{ htmlInput: { maxLength: 3 } }}
           />
         </DialogContent>
-        <DialogActions sx={{ p: 3, pt: 1 }}>
+        <DialogActions sx={{ ...dialogActionsSx, p: 3, pt: 1 }}>
           <Button onClick={() => setOpen(false)} disabled={saving}>Cancelar</Button>
-          <Button
+          <AsyncButton
             variant="contained"
-            startIcon={saving ? <CircularProgress size={18} color="inherit" /> : <SaveIcon />}
+            startIcon={<SaveIcon />}
             onClick={handleSave}
-            disabled={saving || !nombre.trim() || !claveSat.trim()}
+            disabled={saveDisabled}
+            loading={saving}
+            loadingText="Guardando..."
           >
-            {saving ? 'Guardando...' : 'Guardar'}
-          </Button>
+            Guardar
+          </AsyncButton>
         </DialogActions>
       </Dialog>
+      <ConfirmActionDialog
+        open={Boolean(deleteTarget)}
+        title="Eliminar unidad"
+        message={`¿Eliminar la unidad "${deleteTarget?.nombre ?? ''}"?`}
+        confirmText="Eliminar"
+        confirmColor="error"
+        loading={Boolean(deletingId)}
+        onCancel={() => setDeleteTarget(null)}
+        onConfirm={() => {
+          if (deleteTarget) return handleDelete(deleteTarget.id);
+        }}
+      />
+      <FeedbackSnackbar message={feedbackMessage} severity={feedbackSeverity} onClose={closeFeedback} />
     </Box>
   );
 }

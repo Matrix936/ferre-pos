@@ -93,7 +93,7 @@ export function MiPerfilView() {
   };
 
   return (
-    <Box sx={{ maxWidth: 900, mx: 'auto', mt: 2 }}>
+    <Box sx={{ width: '100%', mt: 2 }}>
       <Typography variant="h5" sx={{ fontWeight: 700, mb: 3, color: 'text.primary' }}>
         Mi perfil
       </Typography>

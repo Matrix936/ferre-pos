@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import {
-  Alert,
   Autocomplete,
   Box,
   Button,
@@ -9,7 +8,6 @@ import {
   CircularProgress,
   MenuItem,
   Paper,
-  Snackbar,
   Stack,
   Table,
   TableBody,
@@ -24,7 +22,12 @@ import { Delete as DeleteIcon, LocalShipping as TraspasoIcon } from '@mui/icons-
 import { useAuth } from '../../auth/context/AuthContext';
 import { useCatalogos } from '../../catalogos/context/CatalogosContext';
 import { ProductoInventario } from '../../inventario/types';
+import { AsyncButton } from '../../shared/components/AsyncButton';
+import { FeedbackSnackbar } from '../../shared/components/FeedbackSnackbar';
+import { TablePager } from '../../shared/components/TablePager';
 import { useDebouncedValue } from '../../shared/hooks/useDebouncedValue';
+import { useFeedback } from '../../shared/hooks/useFeedback';
+import { useLocalPagination } from '../../shared/hooks/useLocalPagination';
 
 interface TraspasoRow {
   productoId: string;
@@ -50,6 +53,11 @@ interface HistorialTraspaso {
   observacionesRecepcion?: string | null;
 }
 
+interface HistorialTraspasosPage {
+  rows: HistorialTraspaso[];
+  total: number;
+}
+
 const QUANTITY_PATTERN = /^\d+(\.\d{0,3})?$/;
 
 export function NuevoTraspasoView() {
@@ -61,20 +69,28 @@ export function NuevoTraspasoView() {
   const [productosBusqueda, setProductosBusqueda] = useState<ProductoInventario[]>([]);
   const [detalle, setDetalle] = useState<TraspasoRow[]>([]);
   const [historial, setHistorial] = useState<HistorialTraspaso[]>([]);
-  const [snackbar, setSnackbar] = useState('');
   const [loading, setLoading] = useState(false);
   const [receivingId, setReceivingId] = useState<string | null>(null);
   const [refreshingHistorial, setRefreshingHistorial] = useState(false);
+  const [pendientesPage, setPendientesPage] = useState(0);
+  const [pendientesPageSize, setPendientesPageSizeState] = useState(10);
+  const [pendientesTotalRows, setPendientesTotalRows] = useState(0);
+  const { feedbackMessage, feedbackSeverity, showFeedback, closeFeedback } = useFeedback();
   const searchDebounced = useDebouncedValue(search, 300);
 
   const fetchHistorial = async () => {
-    const data = await invoke<HistorialTraspaso[]>('get_historial_traspasos');
-    setHistorial(data);
+    const data = await invoke<HistorialTraspasosPage>('get_historial_traspasos_page', {
+      page: pendientesPage,
+      pageSize: pendientesPageSize,
+      estado: 'EN_TRANSITO',
+    });
+    setHistorial(data.rows);
+    setPendientesTotalRows(data.total);
   };
 
   useEffect(() => {
     fetchHistorial().catch((error) => console.error('Error historial traspasos:', error));
-  }, []);
+  }, [pendientesPage, pendientesPageSize]);
 
   useEffect(() => {
     if (!destinoId && sucursales.length > 0) {
@@ -148,13 +164,14 @@ export function NuevoTraspasoView() {
   };
 
   const handleConfirmar = async () => {
+    if (loading) return;
     if (!user?.id) return;
     if (invalidSucursales) {
-      setSnackbar('Selecciona sucursal origen y destino distintas.');
+      showFeedback('Selecciona sucursal origen y destino distintas.', 'warning');
       return;
     }
     if (detalle.length === 0) {
-      setSnackbar('Agrega al menos un producto.');
+      showFeedback('Agrega al menos un producto.', 'warning');
       return;
     }
     const invalidos = detalle.find(
@@ -164,12 +181,12 @@ export function NuevoTraspasoView() {
         Number(row.cantidad) > row.stockDisponible,
     );
     if (invalidos) {
-      setSnackbar(`Revisa la cantidad de ${invalidos.descripcion}. Debe ser mayor a cero, máximo 3 decimales y no superar stock.`);
+      showFeedback(`Revisa la cantidad de ${invalidos.descripcion}. Debe ser mayor a cero, máximo 3 decimales y no superar stock.`, 'warning');
       return;
     }
     const excedidos = detalle.find((row) => Number(row.cantidad || 0) > row.stockDisponible);
     if (excedidos) {
-      setSnackbar(`Cantidad excedida para ${excedidos.descripcion}.`);
+      showFeedback(`Cantidad excedida para ${excedidos.descripcion}.`, 'warning');
       return;
     }
 
@@ -189,22 +206,24 @@ export function NuevoTraspasoView() {
           })),
         },
       });
-      setSnackbar('Traspaso registrado en tránsito. La sucursal destino debe recibirlo para sumar inventario.');
+      showFeedback('Traspaso registrado en tránsito. La sucursal destino debe recibirlo para sumar inventario.');
       clearForm();
       setProductosBusqueda([]);
       await fetchHistorial();
     } catch (error) {
-      setSnackbar(`Error al registrar traspaso: ${error}`);
+      showFeedback(`Error al registrar traspaso: ${error}`, 'error');
     } finally {
       setLoading(false);
     }
   };
 
+  const confirmarDisabled = loading || invalidSucursales || detalle.length === 0 || !detalleValido;
+
   const handleRecibirTraspaso = async (traspaso: HistorialTraspaso) => {
     if (!user?.id) return;
     const canReceive = user.role === 'SUPERADMIN' || user.sucursalId === traspaso.sucursalDestinoId;
     if (!canReceive) {
-      setSnackbar('Solo SUPERADMIN o la sucursal destino pueden recibir este traspaso.');
+      showFeedback('Solo SUPERADMIN o la sucursal destino pueden recibir este traspaso.', 'warning');
       return;
     }
 
@@ -218,30 +237,37 @@ export function NuevoTraspasoView() {
           observacionesRecepcion: '',
         },
       });
-      setSnackbar('Traspaso recibido. El inventario de la sucursal destino fue actualizado.');
+      showFeedback('Traspaso recibido. El inventario de la sucursal destino fue actualizado.');
       await fetchHistorial();
     } catch (error) {
-      setSnackbar(`Error al recibir traspaso: ${error}`);
+      showFeedback(`Error al recibir traspaso: ${error}`, 'error');
     } finally {
       setReceivingId(null);
     }
   };
 
-  const pendientes = historial.filter((item) => item.estado === 'EN_TRANSITO');
+  const detallePager = useLocalPagination(detalle);
+  const pendientesTotalPages = Math.max(1, Math.ceil(pendientesTotalRows / pendientesPageSize));
+  const pendientesFromRow = pendientesTotalRows === 0 ? 0 : pendientesPage * pendientesPageSize + 1;
+  const pendientesToRow = Math.min((pendientesPage + 1) * pendientesPageSize, pendientesTotalRows);
+  const setPendientesPageSize = (value: number) => {
+    setPendientesPageSizeState(value);
+    setPendientesPage(0);
+  };
 
   const handleRefreshHistorial = async () => {
     setRefreshingHistorial(true);
     try {
       await fetchHistorial();
     } catch (error) {
-      setSnackbar(`Error al actualizar: ${error}`);
+      showFeedback(`Error al actualizar: ${error}`, 'error');
     } finally {
       setRefreshingHistorial(false);
     }
   };
 
   return (
-    <Box sx={{ maxWidth: 1280, mx: 'auto', mt: 2 }}>
+    <Box sx={{ width: '100%', mt: 2 }}>
       <Typography variant="h5" sx={{ fontWeight: 700, mb: 3 }}>
         Traspaso entre Sucursales
       </Typography>
@@ -329,11 +355,11 @@ export function NuevoTraspasoView() {
                 <TableCell sx={{ fontWeight: 600 }}>Marca</TableCell>
                 <TableCell sx={{ fontWeight: 600 }}>Stock disponible</TableCell>
                 <TableCell sx={{ fontWeight: 600 }}>Cantidad a enviar</TableCell>
-                <TableCell align="right" sx={{ fontWeight: 600 }}>Acciones</TableCell>
+                <TableCell sx={{ fontWeight: 600 }}>Acciones</TableCell>
               </TableRow>
             </TableHead>
             <TableBody>
-              {detalle.map((row) => {
+              {detallePager.paginatedRows.map((row) => {
                 const cantidad = Number(row.cantidad || 0);
                 const invalidFormat = Boolean(row.cantidad) && !QUANTITY_PATTERN.test(row.cantidad.trim());
                 const nonPositive = Boolean(row.cantidad) && cantidad <= 0;
@@ -361,7 +387,7 @@ export function NuevoTraspasoView() {
                         slotProps={{ htmlInput: { min: 0.001, step: '0.001', max: row.stockDisponible, inputMode: 'decimal' } }}
                       />
                     </TableCell>
-                    <TableCell align="right">
+                    <TableCell>
                       <Button color="error" size="small" startIcon={<DeleteIcon />} onClick={() => removeRow(row.productoId)}>
                         Quitar
                       </Button>
@@ -379,17 +405,33 @@ export function NuevoTraspasoView() {
             </TableBody>
           </Table>
         </TableContainer>
+        <TablePager
+          page={detallePager.page}
+          pageSize={detallePager.pageSize}
+          totalPages={detallePager.totalPages}
+          totalRows={detallePager.totalRows}
+          fromRow={detallePager.fromRow}
+          toRow={detallePager.toRow}
+          canPreviousPage={detallePager.canPreviousPage}
+          canNextPage={detallePager.canNextPage}
+          onPreviousPage={detallePager.previousPage}
+          onNextPage={detallePager.nextPage}
+          onPageSizeChange={detallePager.setPageSize}
+          rowLabel="productos"
+        />
       </Paper>
 
       <Box sx={{ display: 'flex', justifyContent: 'flex-end', mt: 2 }}>
-        <Button
+        <AsyncButton
           variant="contained"
-          startIcon={loading ? <CircularProgress size={18} color="inherit" /> : <TraspasoIcon />}
+          startIcon={<TraspasoIcon />}
           onClick={handleConfirmar}
-          disabled={loading || invalidSucursales || detalle.length === 0 || !detalleValido}
+          disabled={confirmarDisabled}
+          loading={loading}
+          loadingText="Registrando..."
         >
-          {loading ? 'Registrando...' : 'Confirmar Traspaso'}
-        </Button>
+          Confirmar Traspaso
+        </AsyncButton>
       </Box>
 
       <Paper elevation={0} sx={{ p: 2, borderRadius: 2, border: '1px solid', borderColor: 'divider', mt: 3 }}>
@@ -427,11 +469,11 @@ export function NuevoTraspasoView() {
                 <TableCell sx={{ fontWeight: 600 }}>Fecha salida</TableCell>
                 <TableCell sx={{ fontWeight: 600 }}>Registró</TableCell>
                 <TableCell sx={{ fontWeight: 600 }}>Estado</TableCell>
-                <TableCell align="right" sx={{ fontWeight: 600 }}>Acción</TableCell>
+                <TableCell sx={{ fontWeight: 600 }}>Acción</TableCell>
               </TableRow>
             </TableHead>
             <TableBody>
-              {pendientes.map((traspaso) => {
+              {historial.map((traspaso) => {
                 const canReceive = user?.role === 'SUPERADMIN' || user?.sucursalId === traspaso.sucursalDestinoId;
                 return (
                   <TableRow key={traspaso.id} hover>
@@ -443,7 +485,7 @@ export function NuevoTraspasoView() {
                     <TableCell>
                       <Chip label="En tránsito" color="warning" size="small" />
                     </TableCell>
-                    <TableCell align="right">
+                    <TableCell>
                       <Button
                         variant="contained"
                         size="small"
@@ -457,7 +499,7 @@ export function NuevoTraspasoView() {
                   </TableRow>
                 );
               })}
-              {pendientes.length === 0 && (
+              {historial.length === 0 && (
                 <TableRow>
                   <TableCell colSpan={7} align="center" sx={{ py: 3, color: 'text.secondary' }}>
                     No hay traspasos pendientes.
@@ -467,13 +509,23 @@ export function NuevoTraspasoView() {
             </TableBody>
           </Table>
         </TableContainer>
+        <TablePager
+          page={pendientesPage}
+          pageSize={pendientesPageSize}
+          totalPages={pendientesTotalPages}
+          totalRows={pendientesTotalRows}
+          fromRow={pendientesFromRow}
+          toRow={pendientesToRow}
+          canPreviousPage={pendientesPage > 0}
+          canNextPage={pendientesPage + 1 < pendientesTotalPages}
+          onPreviousPage={() => setPendientesPage((prev) => Math.max(0, prev - 1))}
+          onNextPage={() => setPendientesPage((prev) => Math.min(pendientesTotalPages - 1, prev + 1))}
+          onPageSizeChange={setPendientesPageSize}
+          rowLabel="traspasos"
+        />
       </Paper>
 
-      <Snackbar open={Boolean(snackbar)} autoHideDuration={3200} onClose={() => setSnackbar('')}>
-        <Alert onClose={() => setSnackbar('')} severity={snackbar.startsWith('Error') ? 'error' : 'success'} variant="filled">
-          {snackbar}
-        </Alert>
-      </Snackbar>
+      <FeedbackSnackbar message={feedbackMessage} severity={feedbackSeverity} onClose={closeFeedback} />
     </Box>
   );
 }

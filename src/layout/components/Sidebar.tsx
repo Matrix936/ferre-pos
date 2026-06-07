@@ -13,11 +13,13 @@ import {
 } from "@mui/material";
 import {
   AccountBalanceWallet as CajaIcon,
+  Analytics as IndicadoresIcon,
   Badge as ClientesIcon,
   Class as CategoriasIcon,
   Category as ProductosIcon,
   Dashboard as DashboardIcon,
   Inventory as InventoryIcon,
+  Insights as IndicadorVentasIcon,
   LocalOffer as PromocionesIcon,
   LocalShipping as ProveedoresIcon,
   People as PeopleIcon,
@@ -30,6 +32,7 @@ import {
   SquareFoot as UnidadesIcon,
   Store as StoreIcon,
   SyncAlt as TraspasosIcon,
+  TrendingUp as RentabilidadIcon,
 } from "@mui/icons-material";
 import { Theme } from "@mui/material/styles";
 import { ReactNode, useEffect, useState } from "react";
@@ -100,6 +103,15 @@ const navGroups: NavGroup[] = [
       { label: "Clientes", tooltip: "Clientes y crédito", to: "/clientes", icon: <ClientesIcon />, allowedRoles: ["SUPERADMIN", "ADMIN"] },
       { label: "Facturación", tooltip: "Facturación electrónica", to: "/facturacion", icon: <FacturacionIcon />, allowedRoles: ["SUPERADMIN", "ADMIN"] },
       { label: "Promociones", tooltip: "Promociones y descuentos", to: "/promociones", icon: <PromocionesIcon />, allowedRoles: ["SUPERADMIN", "ADMIN"] },
+    ],
+  },
+  {
+    label: "Indicadores",
+    items: [
+      { label: "Rentabilidad", tooltip: "Rentabilidad por producto", to: "/indicadores/rentabilidad", icon: <RentabilidadIcon />, allowedRoles: ["SUPERADMIN", "ADMIN"] },
+      { label: "Ventas", tooltip: "Indicador de ventas", to: "/indicadores/ventas", icon: <IndicadorVentasIcon />, allowedRoles: ["SUPERADMIN", "ADMIN"] },
+      { label: "Inventario", tooltip: "Indicador de inventario", to: "/indicadores/inventario", icon: <InventoryIcon />, allowedRoles: ["SUPERADMIN", "ADMIN"] },
+      { label: "Financiero", tooltip: "Indicador financiero", to: "/indicadores/financiero", icon: <IndicadoresIcon />, allowedRoles: ["SUPERADMIN", "ADMIN"] },
     ],
   },
   {
